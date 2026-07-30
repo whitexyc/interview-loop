@@ -24,7 +24,7 @@
  * - 会话切换时先保存当前会话再加载目标会话
  */
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Input, Button, Spin, Alert, Typography, Flex, Tag, Select, Popconfirm } from 'antd';
+import { Input, Button, Spin, Alert, Typography, Flex, Tag } from 'antd';
 import { SendOutlined, BulbOutlined, PlusOutlined } from '@ant-design/icons';
 import ChatMessage from '../components/ChatMessage';
 import PipelinePanel from '../components/PipelinePanel';
@@ -357,26 +357,7 @@ export default function ChatPage() {
     }
   }, []);
 
-  /** 删除当前会话 */
-  const handleDeleteConversation = useCallback(async () => {
-    if (!activeConversationId || conversations.length <= 1) return;
-    try {
-      await deleteConversation(activeConversationId);
-      const remaining = conversations.filter((c) => c.id !== activeConversationId);
-      setConversations(remaining);
-      if (remaining.length > 0) {
-        const msgs = await getMessages(remaining[0].id);
-        setActiveConversationId(remaining[0].id);
-        setMessages(msgs);
-      }
-    } catch (err) {
-      setError('删除会话失败: ' + (err instanceof Error ? err.message : ''));
-    }
-  }, [activeConversationId, conversations]);
-
-  /**
-   * 引用标记点击处理
-   */
+  /** 引用标记点击处理 */
   const handleCitationClick = useCallback(
     (refIndex: number) => {
       for (let i = messages.length - 1; i >= 0; i--) {
@@ -409,44 +390,66 @@ export default function ChatPage() {
         <PipelinePanel currentStep={pipelineStep} steps={pipelineSteps} />
       </div>
 
+      {/* ====== 对话列表（M19：左侧边栏） ====== */}
+      <div style={{
+        width: 220, flexShrink: 0, display: 'flex', flexDirection: 'column',
+        background: '#fff', borderRadius: 12, border: '1px solid rgba(226,232,240,0.6)',
+        overflow: 'hidden',
+      }}>
+        <div style={{ padding: '10px 12px', borderBottom: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <Typography.Text strong style={{ fontSize: 13, color: '#64748b' }}>对话历史</Typography.Text>
+          <Button size="small" type="text" icon={<PlusOutlined />} onClick={handleNewConversation} />
+        </div>
+        <div style={{ flex: 1, overflowY: 'auto' }}>
+          {conversations.map((conv) => (
+            <div
+              key={conv.id}
+              onClick={() => handleSelectConversation(conv.id)}
+              onMouseEnter={(e) => { if (conv.id !== activeConversationId) e.currentTarget.style.background = '#f8fafc'; }}
+              onMouseLeave={(e) => { if (conv.id !== activeConversationId) e.currentTarget.style.background = 'transparent'; }}
+              style={{
+                padding: '8px 12px', cursor: 'pointer', fontSize: 13, lineHeight: 1.4,
+                background: conv.id === activeConversationId ? '#eff6ff' : 'transparent',
+                color: conv.id === activeConversationId ? '#1e40af' : '#334155',
+                borderLeft: conv.id === activeConversationId ? '3px solid #1e40af' : '3px solid transparent',
+                transition: 'all 0.1s ease',
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              }}
+            >
+              <span style={{
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1,
+              }}>{conv.title}</span>
+              {conversations.length > 1 && conv.id === activeConversationId && (
+                <span
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    try {
+                      await deleteConversation(conv.id);
+                      const remaining = conversations.filter((c) => c.id !== conv.id);
+                      setConversations(remaining);
+                      if (remaining.length > 0) {
+                        const msgs = await getMessages(remaining[0].id);
+                        setActiveConversationId(remaining[0].id);
+                        setMessages(msgs);
+                      }
+                    } catch { /* 忽略 */ }
+                  }}
+                  style={{ color: '#94a3b8', fontSize: 11, padding: '0 4px', cursor: 'pointer' }}
+                  title="删除"
+                >×</span>
+              )}
+            </div>
+          ))}
+          {conversations.length === 0 && (
+            <div style={{ padding: 16, textAlign: 'center', color: '#94a3b8', fontSize: 13 }}>
+              暂无对话
+            </div>
+          )}
+        </div>
+      </div>
+
       {/* ====== 右栏 ====== */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-        {/* 会话选择器（M9） */}
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
-            padding: '8px 12px',
-            background: '#fff',
-            borderRadius: 12,
-            marginBottom: 8,
-            border: '1px solid rgba(226,232,240,0.6)',
-            flexShrink: 0,
-          }}
-        >
-          <Select
-            value={activeConversationId}
-            onChange={handleSelectConversation}
-            style={{ flex: 1 }}
-            options={conversations.map((c) => ({ value: c.id, label: c.title }))}
-            placeholder="选择对话"
-            loading={conversations.length === 0}
-          />
-          <Button size="small" onClick={handleNewConversation} icon={<PlusOutlined />}>
-            新建
-          </Button>
-          <Popconfirm
-            title="确定删除此对话？"
-            onConfirm={handleDeleteConversation}
-            okText="删除"
-            cancelText="取消"
-          >
-            <Button size="small" danger disabled={conversations.length <= 1}>
-              删除
-            </Button>
-          </Popconfirm>
-        </div>
 
         {/* 消息列表 */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '0 8px 8px' }}>
