@@ -35,6 +35,8 @@ from rag.reranker import reranker
 from rag.chunker import chunker
 from agent.router import router_agent
 from agent.reflector import reflector
+from rag.graph_store import graph_store
+from rag.graph_extractor import graph_extractor
 
 logger = logging.getLogger(__name__)
 
@@ -269,17 +271,35 @@ class RAGEngine:
 
         for round_num in range(3):  # 最多 3 轮
             search_text = hyde_query if round_num == 0 else current_query
-            try:
-                docs = await asyncio.wait_for(
+
+            # Round 0: 并行向量检索 + 图搜索
+            if round_num == 0:
+                query_entities = await graph_extractor.extract_from_query(query)
+                vector_task = asyncio.wait_for(
                     hybrid_retriever.retrieve(search_text, top_k=top_k),
                     timeout=15,
                 )
-            except asyncio.TimeoutError:
-                logger.warning("第 %d 轮检索超时 (15s)", round_num + 1)
-                break
-            except Exception as e:
-                logger.warning("第 %d 轮检索失败: %s", round_num + 1, e)
-                break
+                graph_task = graph_store.search_related(query_entities, top_k=top_k)
+                vector_docs, graph_docs = await asyncio.gather(
+                    vector_task, graph_task,
+                )
+                # 合并：向量结果优先，图结果追加去重
+                docs = list(vector_docs) if vector_docs else []
+                for gd in (graph_docs or []):
+                    if gd.get("id") and gd["id"] not in {d.get("id") for d in docs}:
+                        docs.append(gd)
+            else:
+                try:
+                    docs = await asyncio.wait_for(
+                        hybrid_retriever.retrieve(search_text, top_k=top_k),
+                        timeout=15,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("第 %d 轮检索超时 (15s)", round_num + 1)
+                    break
+                except Exception as e:
+                    logger.warning("第 %d 轮检索失败: %s", round_num + 1, e)
+                    break
 
             # 合并本轮结果，去重
             for d in docs:
@@ -497,6 +517,32 @@ class RAGEngine:
 
                 logger.info("文档入库成功: title=%s, parents=%d, children=%d",
                             title, len(parent_objs), len(children))
+
+                # ── 知识图谱实体提取（异步，失败不影响入库） ──
+                try:
+                    await graph_store.ensure_graph()
+                    extraction = await graph_extractor.extract_from_document(content)
+                    entities = extraction.get("entities", [])
+                    relations = extraction.get("relations", [])
+                    parent_id = parent_objs[0].id if parent_objs else None
+
+                    for ent in entities:
+                        name = ent.get("name", "").strip()
+                        ent_type = ent.get("type", "concept")
+                        if name and parent_id:
+                            await graph_store.upsert_entity(name, ent_type, int(parent_id))
+
+                    for rel in relations:
+                        src = rel.get("source", "").strip()
+                        tgt = rel.get("target", "").strip()
+                        if src and tgt:
+                            await graph_store.upsert_relation(src, tgt)
+
+                    logger.info("Graph: extracted %d entities, %d relations",
+                                len(entities), len(relations))
+                except Exception as e:
+                    logger.warning("Graph 提取/写入失败，跳过: %s", e)
+
                 return {
                     "id": parent_objs[0].id,
                     "title": title,
