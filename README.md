@@ -84,35 +84,9 @@ npm run dev
 | `PW_LLM_PROVIDER` | 默认 LLM 供应商 | `deepseek` |
 | `PW_DEEPSEEK_API_KEY` | DeepSeek API Key | — |
 | `PW_CLAUDE_API_KEY` | Claude API Key | — |
-| `VITE_EDIT_PASSWORD` | 文档上传密码 | `white-xyc` |
+| `VITE_EDIT_PASSWORD` | 文档上传密码 | `` |
 
-## 开发流程
 
-本项目采用 **Vibe Coding 4-Agent 闭环工作流**：
-
-```
-Planner → plan.md + acceptance-criteria.md
-  → Developer → 代码 + changelog.md
-    → Reviewer → review-report.md
-      → Tester → test-report.md
-```
-
-每个模块经过完整的闭环才交付。
-
-## 模块清单
-
-| # | 模块 | 状态 |
-|---|------|------|
-| M8 | 知识库管理面板 | ✅ |
-| M9 | 聊天记录持久化 | ✅ |
-| M10 | RAG UI 优化 | ✅ |
-| M17 | 父子块检索 | ✅ |
-| M14 | HyDE 查询改写 | ✅ |
-| M13 | RAGAS 评估体系 | ✅ |
-| M15 | Redis 查询缓存 | ✅ |
-| M16 | Graph RAG | ✅ |
-| M18 | 上传移至知识库 | ✅ |
-| M19 | 左侧对话列表 | ✅ |
 
 ## License
 
