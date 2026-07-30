@@ -3,7 +3,7 @@ RAG 知识库文档 ORM 模型
 """
 import logging
 
-from sqlalchemy import Column, Integer, String, Text, DateTime, func
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase
 from pgvector.sqlalchemy import Vector
@@ -30,6 +30,9 @@ class Document(Base):
     meta = Column("metadata", JSONB, nullable=False, default=dict, comment="元数据")
     content_hash = Column(String(64), nullable=True, index=True, comment="内容 SHA256 哈希（去重用）")
     embedding = Column(Vector(384), nullable=True, comment="向量嵌入")
+    parent_id = Column(Integer, ForeignKey("documents.id"),
+                       nullable=True, index=True,
+                       comment="父块 ID（NULL=父块/根块，非NULL=子块指向其父块）")
     created_at = Column(
         DateTime(timezone=True), server_default=func.now(), comment="创建时间"
     )

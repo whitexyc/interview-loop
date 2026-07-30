@@ -69,6 +69,9 @@ class RAGEngine:
             elif not results:
                 return SearchResponse(results=[], message="未检索到相关内容")
 
+            # 父块映射：子块命中 → 父块返回（完整 section 语义）
+            results = await self._expand_to_parents(results)
+
             # 格式化输出：限制 content 长度，避免前端渲染大量文本
             output = []
             for doc in results:
@@ -152,6 +155,9 @@ class RAGEngine:
                         break
 
             docs = all_docs
+
+            # 父块映射：子块命中 → 父块返回（完整 section 语义）
+            docs = await self._expand_to_parents(docs)
 
             # ========== 3. 降级：无结果时直接 LLM ==========
             if not docs:
@@ -250,11 +256,14 @@ class RAGEngine:
             else:
                 break
 
+        # 父块映射：子块命中 → 父块返回（后续 rerank 基于父块）
+        docs = await self._expand_to_parents(all_docs) if all_docs else []
+
         # 低分过滤
         docs = [
-            d for d in all_docs
+            d for d in docs
             if d.get("hybrid_score", d.get("score", 0)) >= min_score
-        ] if all_docs else []
+        ] if docs else []
 
         return docs
 
@@ -267,6 +276,61 @@ class RAGEngine:
         except Exception as e:
             logger.warning("重排失败，使用原始排序: %s", e)
         return docs
+
+    async def _expand_to_parents(self, child_docs: list[dict]) -> list[dict]:
+        """将子块检索结果映射回父块，去重后按最佳分数排序
+
+        为什么需要父块映射？
+          检索命中的是子块（~300字符），但返回给用户/LLM 的应该是
+          语义完整的父块（完整 section）。同一父块的多个子块可能同时命中，
+          此时去重并取最佳子块的 hybrid_score 作为父块的分数。
+
+        Args:
+            child_docs: 子块检索结果列表，每项必须包含 parent_id 字段
+
+        Returns:
+            去重父块列表，字段包含 id, title, content, source, hybrid_score
+            按 hybrid_score 降序排列
+        """
+        if not child_docs:
+            return []
+
+        # 收集唯一 parent_id 并记录每父块最佳 hybrid_score
+        parent_scores: dict[int, float] = {}
+        for doc in child_docs:
+            pid = doc.get("parent_id")
+            if pid is None:
+                continue
+            score = doc.get("hybrid_score", doc.get("score", 0.0))
+            if pid not in parent_scores or score > parent_scores[pid]:
+                parent_scores[pid] = score
+
+        if not parent_scores:
+            return []
+
+        # 批量查询父块
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(Document).where(Document.id.in_(list(parent_scores.keys())))
+            )
+            parents = result.scalars().all()
+
+        # 构建输出：父块内容 + 最佳子块分数
+        output = []
+        for p in parents:
+            output.append({
+                "id": p.id,
+                "title": p.title,
+                "content": p.content,
+                "source": p.source,
+                "hybrid_score": parent_scores.get(p.id, 0.0),
+            })
+
+        # 按分数降序
+        output.sort(key=lambda x: x["hybrid_score"], reverse=True)
+        logger.debug("_expand_to_parents: child_docs=%d → parents=%d",
+                      len(child_docs), len(output))
+        return output
 
     async def add_document(self, title: str, content: str, source: str = "") -> dict:
         """添加文档：分块 → 向量化 → 落库
@@ -316,47 +380,66 @@ class RAGEngine:
                             "标题匹配" if dup.title == title.strip() else "内容哈希匹配")
                 return {"id": dup.id, "title": dup.title, "chunks": 0, "duplicate": True}
 
-            # 1. 按 Markdown 标题分块
-            chunks = chunker.chunk(content, source=source)
-            if not chunks:
-                # 没有标题时，整篇作为一个块
-                chunks = [{"title": title, "content": content}]
+            # 1. 两级分块：父块（section）+ 子块（~300 字符）
+            chunk_result = chunker.chunk(content, source=source)
+            parents = chunk_result.get("parents", [])
+            children = chunk_result.get("children", [])
 
-            # 2. 逐块向量化
-            texts = [c["content"] for c in chunks]
-            try:
-                embeddings = await embedding_service.embed_documents(texts)
-            except Exception as e:
-                logger.error("文档向量化失败: %s", e)
-                raise RuntimeError("文档向量化失败，请稍后重试") from e
+            # 无父块兜底：整文档为单一父块，子块=父块内容
+            if not parents:
+                parents = [{"title": title, "content": content}]
+                children = [{"title": title, "content": content, "parent_index": 0}]
 
-            # 3. 批量落库
-            inserted_ids = []
             try:
-                for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
-                    chunk_title = f"{title} > {chunk['title']}" if chunk["title"] and chunk["title"] != title else title
-                    # 只有第一个块保留原始 source，后续块附加页码标记
-                    chunk_source = source if i == 0 else f"{source}#chunk{i + 1}"
+                # 2. 插入父块（无向量，供子块引用）
+                parent_objs = []
+                for p in parents:
+                    parent_title = f"{title} > {p['title']}" if p.get("title") and p["title"] != title else title
                     doc = Document(
-                        title=chunk_title,
-                        content=chunk["content"],
-                        source=chunk_source,
-                        embedding=emb,
-                        content_hash=hashlib.sha256(chunk["content"].encode("utf-8")).hexdigest(),
+                        title=parent_title,
+                        content=p["content"],
+                        source=source,
+                        embedding=None,
+                        parent_id=None,
+                        content_hash=hashlib.sha256(p["content"].encode("utf-8")).hexdigest(),
                     )
                     session.add(doc)
-                    inserted_ids.append(doc)
+                    parent_objs.append(doc)
 
+                # flush 获取父块 DB ID（不提交，保持事务原子性）
+                await session.flush()
+
+                # 3. 子块向量化
+                child_texts = [c["content"] for c in children]
+                embeddings = await embedding_service.embed_documents(child_texts)
+
+                # 4. 插入子块（含向量 + parent_id 外键）
+                for i, (child, emb) in enumerate(zip(children, embeddings)):
+                    parent_idx = child.get("parent_index", 0)
+                    if parent_idx >= len(parent_objs):
+                        parent_idx = 0  # 安全兜底
+                    parent = parent_objs[parent_idx]
+
+                    child_title = f"{title} > {child.get('title', '')}" if child.get("title") else title
+                    doc = Document(
+                        title=child_title,
+                        content=child["content"],
+                        source=source,
+                        embedding=emb,
+                        parent_id=parent.id,
+                        content_hash=hashlib.sha256(child["content"].encode("utf-8")).hexdigest(),
+                    )
+                    session.add(doc)
+
+                # 5. 原子提交（父块 + 子块一起落库）
                 await session.commit()
-                for doc in inserted_ids:
-                    await session.refresh(doc)
 
-                logger.info("文档入库成功: title=%s, chunks=%d, ids=%s",
-                            title, len(inserted_ids), [d.id for d in inserted_ids])
+                logger.info("文档入库成功: title=%s, parents=%d, children=%d",
+                            title, len(parent_objs), len(children))
                 return {
-                    "id": inserted_ids[0].id,
+                    "id": parent_objs[0].id,
                     "title": title,
-                    "chunks": len(inserted_ids),
+                    "chunks": len(parent_objs) + len(children),
                     "duplicate": False,
                 }
             except Exception as e:
