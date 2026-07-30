@@ -31,3 +31,16 @@ build/
 # OS
 Thumbs.db
 .DS_Store
+
+# Personal
+个人信息.md
+prompt.md
+
+# Project docs / specs / shared memory (not source code)
+docs/
+specs/
+memory/
+
+# Models (download separately, not source code)
+ai_service/models/
+ai_service/test_m17.py
