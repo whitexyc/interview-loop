@@ -81,7 +81,10 @@ class RAGEngine:
 
             # 有足够候选时才做 rerank，否则直接返回
             if results and top_k < len(results):
-                results = await reranker.rerank(request.query, results, top_k=top_k)
+                try:
+                    results = await reranker.rerank(request.query, results, top_k=top_k)
+                except Exception as e:
+                    logger.warning("Rerank 失败，使用原始排序: %s", e)
             elif not results:
                 return SearchResponse(results=[], message="未检索到相关内容")
 
@@ -376,18 +379,23 @@ class RAGEngine:
         if not child_docs:
             return []
 
-        # 收集唯一 parent_id 并记录每父块最佳 hybrid_score
+        # 旧格式文档（parent_id=NULL，无 M17 父子块结构）直接通过
+        # 子块文档（parent_id=NOT NULL）映射到父块，去重后取最佳分数
+        output: list[dict] = []
         parent_scores: dict[int, float] = {}
         for doc in child_docs:
             pid = doc.get("parent_id")
             if pid is None:
-                continue
-            score = doc.get("hybrid_score", doc.get("score", 0.0))
-            if pid not in parent_scores or score > parent_scores[pid]:
-                parent_scores[pid] = score
+                # 旧格式：文档自身就是完整内容，直接通过
+                output.append(doc)
+            else:
+                # 新格式：收集 parent_id，待会统一查父块
+                score = doc.get("hybrid_score", doc.get("score", 0.0))
+                if pid not in parent_scores or score > parent_scores[pid]:
+                    parent_scores[pid] = score
 
         if not parent_scores:
-            return []
+            return output  # 没有子块需要展开，直接返回旧格式文档
 
         # 批量查询父块
         async with async_session_factory() as session:
@@ -396,8 +404,7 @@ class RAGEngine:
             )
             parents = result.scalars().all()
 
-        # 构建输出：父块内容 + 最佳子块分数
-        output = []
+        # 输出 = 旧格式文档 + 父块文档
         for p in parents:
             output.append({
                 "id": p.id,
@@ -407,11 +414,18 @@ class RAGEngine:
                 "hybrid_score": parent_scores.get(p.id, 0.0),
             })
 
-        # 按分数降序
-        output.sort(key=lambda x: x["hybrid_score"], reverse=True)
-        logger.debug("_expand_to_parents: child_docs=%d → parents=%d",
-                      len(child_docs), len(output))
-        return output
+        # 按 ID 去重 + 按分数降序
+        seen: set[int] = set()
+        unique_output: list[dict] = []
+        for d in output:
+            did = d.get("id")
+            if did is not None and did not in seen:
+                seen.add(did)
+                unique_output.append(d)
+        unique_output.sort(key=lambda x: x.get("hybrid_score", 0.0), reverse=True)
+        logger.debug("_expand_to_parents: child_docs=%d → parent-mapped=%d",
+                      len(child_docs), len(unique_output))
+        return unique_output
 
     async def add_document(self, title: str, content: str, source: str = "") -> dict:
         """添加文档：分块 → 向量化 → 落库
