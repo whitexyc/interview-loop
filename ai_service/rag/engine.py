@@ -25,6 +25,7 @@ from sqlalchemy import select
 
 from src.config import settings
 from src.database import async_session_factory
+from llm.client import LLMFactory
 from rag.schemas import SearchRequest, SearchResponse, ChatRequest, ChatResponse, ChatSteps
 from rag.models import Document
 from rag.embeddings import embedding_service
@@ -35,6 +36,18 @@ from agent.router import router_agent
 from agent.reflector import reflector
 
 logger = logging.getLogger(__name__)
+
+# HyDE (Hypothetical Document Embeddings) 提示词
+# LLM 先根据用户问题生成一段假设性回答，然后用这个假设回答的语义向量
+# 代替原始问题去做检索。因为假设回答模仿了知识库文档的语言风格，
+# 所以能更精准地匹配到相关文档。
+_HYDE_PROMPT = """你是一个知识库助手。根据用户问题，写一段2-3句话的假设性回答。
+这段回答不是给用户看的，而是用来在知识库中检索相关文档。
+请模仿知识库文档的语言风格来写。
+
+用户问题: {query}
+
+假设回答（2-3句话）:"""
 
 
 class RAGEngine:
@@ -192,6 +205,36 @@ class RAGEngine:
                 message="internal_error" if not settings.debug else f"error: {e}",
             )
 
+    async def _hyde_expand(self, query: str) -> str:
+        """使用 LLM 生成假设性回答作为检索查询
+
+        HyDE (Hypothetical Document Embeddings) 策略：
+        用户查询通常简短，而知识库文档是长文本段落。
+        让 LLM 先生成一段假设回答，模仿文档的语言风格和篇幅，
+        用这个假设回答的向量去检索，能显著提升召回率。
+
+        Args:
+            query: 用户原始查询
+
+        Returns:
+            假设性回答文本；失败或超时时降级返回原始 query
+        """
+        prompt = _HYDE_PROMPT.format(query=query)
+        try:
+            client = LLMFactory.get_client()
+            answer = await asyncio.wait_for(
+                client.generate(prompt),
+                timeout=10,
+            )
+            logger.info("HyDE 扩展完成: query=%s, hyde_len=%d", query[:50], len(answer))
+            return answer or query
+        except asyncio.TimeoutError:
+            logger.warning("HyDE 扩展超时 (10s)，降级使用原始 query: %s", query[:50])
+            return query
+        except Exception as e:
+            logger.warning("HyDE 扩展失败，降级使用原始 query: %s", e)
+            return query
+
     async def _retrieve(self, query: str, top_k: int = 30, min_score: float = 0.6) -> list[dict]:
         """多次检索 + 反思改写（最多 3 轮），供流式端点复用
 
@@ -213,10 +256,14 @@ class RAGEngine:
         existing_ids: set[int] = set()
         current_query = query
 
+        # HyDE 查询扩展：首轮用假设回答检索（语义更接近文档），后续轮次用反射改写查询
+        hyde_query = await self._hyde_expand(query)
+
         for round_num in range(3):  # 最多 3 轮
+            search_text = hyde_query if round_num == 0 else current_query
             try:
                 docs = await asyncio.wait_for(
-                    hybrid_retriever.retrieve(current_query, top_k=top_k),
+                    hybrid_retriever.retrieve(search_text, top_k=top_k),
                     timeout=15,
                 )
             except asyncio.TimeoutError:
@@ -236,8 +283,9 @@ class RAGEngine:
             # 前两轮尝试反思改写，最后一轮直接结束
             if round_num < 2:
                 try:
+                    # 反思检查始终使用原始 query（非 HyDE 查询）
                     check = await asyncio.wait_for(
-                        reflector.check_sufficiency(current_query, docs),
+                        reflector.check_sufficiency(query, docs),
                         timeout=10,
                     )
                     if check.get("sufficient", True):
