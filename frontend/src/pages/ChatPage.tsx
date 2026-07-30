@@ -68,6 +68,29 @@ export default function ChatPage() {
   const [conversations, setConversations] = useState<ConversationInfo[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<number | null>(null);
 
+  // ── 反馈状态（M10） ──
+  const [feedbackMap, setFeedbackMap] = useState<Record<string, 'up' | 'down' | null>>({});
+
+  /** 挂载时从 localStorage 加载反馈数据 */
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('rag_feedback');
+      if (saved) setFeedbackMap(JSON.parse(saved));
+    } catch { /* 数据损坏时静默忽略 */ }
+  }, []);
+
+  /** 处理反馈（toggle 模式：同按钮再点取消，异按钮切换） */
+  const handleFeedback = useCallback((messageIndex: number, rating: 'up' | 'down') => {
+    const key = `${activeConversationId}:${messageIndex}`;
+    setFeedbackMap((prev) => {
+      const current = prev[key];
+      const newRating = current === rating ? null : rating;
+      const next = { ...prev, [key]: newRating };
+      try { localStorage.setItem('rag_feedback', JSON.stringify(next)); } catch { /* 静默降级 */ }
+      return next;
+    });
+  }, [activeConversationId]);
+
   // ── ref ──
   const bottomRef = useRef<HTMLDivElement>(null);
   const pendingRef = useRef({ query: '', history: [] as { role: string; content: string }[] });
@@ -454,22 +477,46 @@ export default function ChatPage() {
             </div>
           )}
 
-          {messages.map((msg, i) => (
-            <ChatMessage
-              key={i}
-              role={msg.role}
-              content={msg.content}
-              sources={msg.sources}
-              onCitationClick={handleCitationClick}
-            />
-          ))}
+          {messages.map((msg, i) => {
+            const isLastAssistant = msg.role === 'assistant' && i === messages.length - 1;
+            const isStreaming = loading && isLastAssistant && msg.content.length > 0;
+            const feedbackKey = activeConversationId ? `${activeConversationId}:${i}` : '';
+            return (
+              <ChatMessage
+                key={i}
+                role={msg.role}
+                content={msg.content}
+                sources={msg.sources}
+                onCitationClick={handleCitationClick}
+                messageIndex={i}
+                isStreaming={isStreaming}
+                feedbackRating={feedbackMap[feedbackKey] ?? null}
+                onFeedback={handleFeedback}
+              />
+            );
+          })}
 
           {loading && (
             <div style={{ textAlign: 'center', padding: 20 }}>
-              <Spin />
-              <Typography.Text type="secondary" style={{ display: 'block', marginTop: 8 }}>
-                AI 思考中...
-              </Typography.Text>
+              {(() => {
+                const lastMsg = messages[messages.length - 1];
+                const hasTokens = lastMsg && lastMsg.role === 'assistant' && lastMsg.content.length > 0;
+                if (hasTokens) {
+                  return (
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      生成中...
+                    </Typography.Text>
+                  );
+                }
+                return (
+                  <>
+                    <Spin />
+                    <Typography.Text type="secondary" style={{ display: 'block', marginTop: 8 }}>
+                      AI 思考中...
+                    </Typography.Text>
+                  </>
+                );
+              })()}
             </div>
           )}
 

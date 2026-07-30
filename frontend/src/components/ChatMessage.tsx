@@ -22,7 +22,8 @@
  * ## 为什么气泡用 max-width 72%？
  * 太宽的文字行在阅读时容易跳行，72% 在桌面和移动端都能保持舒适的阅读体验。
  */
-import { Typography, Tag } from 'antd';
+import { Typography } from 'antd';
+import { LikeOutlined, DislikeOutlined } from '@ant-design/icons';
 import type { SourceItem } from '../types/rag';
 
 interface ChatMessageProps {
@@ -30,6 +31,14 @@ interface ChatMessageProps {
   content: string;
   sources?: SourceItem[];
   onCitationClick?: (refIndex: number) => void;
+  /** 消息在列表中的索引，用于 feedback 标识 */
+  messageIndex?: number;
+  /** 是否正在流式输出（仅 AI 消息使用） */
+  isStreaming?: boolean;
+  /** 当前反馈状态 */
+  feedbackRating?: 'up' | 'down' | null;
+  /** 反馈回调 */
+  onFeedback?: (messageIndex: number, rating: 'up' | 'down') => void;
 }
 
 /**
@@ -81,15 +90,26 @@ export default function ChatMessage({
   content,
   sources,
   onCitationClick,
+  messageIndex,
+  isStreaming,
+  feedbackRating,
+  onFeedback,
 }: ChatMessageProps) {
   const isUser = role === 'user';
 
   return (
-    /**
-     * 消息行容器
+    <>
+      <style>{`
+        @keyframes blink-cursor {
+          0%, 50% { opacity: 1; }
+          51%, 100% { opacity: 0; }
+        }
+      `}</style>
+      {/**
+       * 消息行容器
      * row-reverse（用户）：气泡在右，头像在右
      * row（AI）：气泡在左，头像在左
-     */
+     */}
     <div
       style={{
         display: 'flex',
@@ -152,29 +172,54 @@ export default function ChatMessage({
           <div>
             {parseCitations(content).map((part, i) =>
               part.type === 'citation' ? (
-                /* 引用标记 [n]：可点击 Tag，弹出原文 Modal */
-                <Tag
+                /* 引用标记 [n]：紧凑浅蓝 badge，hover 加深 */
+                <span
                   key={i}
-                  color="#1e40af"
                   style={{
+                    display: 'inline-block',
+                    padding: '0 5px',
+                    fontSize: 12,
+                    background: '#dbeafe',
+                    color: '#1e40af',
+                    border: '1px solid #93c5fd',
+                    borderRadius: 3,
                     cursor: 'pointer',
-                    margin: '0 2px',
-                    borderRadius: 4,
-                    padding: '8px 10px',
-                    lineHeight: '28px',
-                    fontSize: 16,
-                    fontWeight: 600,
+                    verticalAlign: 'baseline',
+                    lineHeight: '18px',
+                    transition: 'all 0.15s ease',
                   }}
                   onClick={(e) => { e.stopPropagation(); onCitationClick?.(part.refIndex); }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = '#bfdbfe';
+                    e.currentTarget.style.borderColor = '#60a5fa';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = '#dbeafe';
+                    e.currentTarget.style.borderColor = '#93c5fd';
+                  }}
                 >
                   [{part.refIndex}]
-                </Tag>
+                </span>
               ) : (
                 /* 普通文本段 */
                 <Typography.Text key={i} style={{ margin: 0, color: '#0f172a' }}>
                   {part.value}
                 </Typography.Text>
               ),
+            )}
+            {/* 打字光标（流式输出中，2px 闪烁竖线） */}
+            {!isUser && isStreaming && (
+              <span
+                style={{
+                  display: 'inline-block',
+                  width: 2,
+                  height: 14,
+                  background: '#1e40af',
+                  marginLeft: 2,
+                  verticalAlign: 'middle',
+                  animation: 'blink-cursor 0.8s infinite',
+                }}
+              />
             )}
             {/* 引用来源列表（气泡底部） */}
             {sources && sources.length > 0 && (
@@ -192,9 +237,45 @@ export default function ChatMessage({
                 </Typography.Text>
               </div>
             )}
+            {/* 反馈按钮（仅在完整 AI 回复中显示） */}
+            {!isUser && !isStreaming && onFeedback && messageIndex !== undefined && (
+              <div style={{ marginTop: 8, display: 'flex', gap: 4 }}>
+                <span
+                  onClick={() => onFeedback(messageIndex, 'up')}
+                  style={{
+                    cursor: 'pointer',
+                    padding: '2px 6px',
+                    borderRadius: 4,
+                    background: feedbackRating === 'up' ? '#dbeafe' : 'transparent',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    transition: 'all 0.15s ease',
+                  }}
+                  title="有帮助"
+                >
+                  <LikeOutlined style={{ fontSize: 14, color: feedbackRating === 'up' ? '#1e40af' : '#94a3b8' }} />
+                </span>
+                <span
+                  onClick={() => onFeedback(messageIndex, 'down')}
+                  style={{
+                    cursor: 'pointer',
+                    padding: '2px 6px',
+                    borderRadius: 4,
+                    background: feedbackRating === 'down' ? '#fee2e2' : 'transparent',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    transition: 'all 0.15s ease',
+                  }}
+                  title="无帮助"
+                >
+                  <DislikeOutlined style={{ fontSize: 14, color: feedbackRating === 'down' ? '#dc2626' : '#94a3b8' }} />
+                </span>
+              </div>
+            )}
           </div>
         )}
       </div>
     </div>
+    </>
   );
 }
