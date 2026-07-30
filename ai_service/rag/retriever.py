@@ -200,10 +200,11 @@ class HybridRetriever:
         """
         sql = text("""
             SELECT
-                id, title, content, source, page_num, metadata, created_at,
+                id, title, content, source, page_num, metadata, created_at, parent_id,
                 ts_rank(to_tsvector('simple', content), plainto_tsquery('simple', :query)) AS score
             FROM documents
             WHERE to_tsvector('simple', content) @@ plainto_tsquery('simple', :query)
+              AND parent_id IS NOT NULL
             ORDER BY score DESC
             LIMIT :limit
         """)
@@ -233,10 +234,11 @@ class HybridRetriever:
         embedding_str = f"[{','.join(str(v) for v in query_embedding)}]"
         sql = text("""
             SELECT
-                id, title, content, source, page_num, metadata, created_at,
+                id, title, content, source, page_num, metadata, created_at, parent_id,
                 1 - (embedding <=> :query_embedding) AS score
             FROM documents
             WHERE embedding IS NOT NULL
+              AND parent_id IS NOT NULL
             ORDER BY embedding <=> :query_embedding ASC
             LIMIT :limit
         """)
