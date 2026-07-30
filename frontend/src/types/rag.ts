@@ -99,3 +99,21 @@ export interface DocumentUpload {
   /** 来源标识（可选，如文件名或 URL） */
   source?: string;
 }
+
+/** 单条文档摘要 — 知识库列表展示 */
+export interface DocumentInfo {
+  id: number;
+  title: string;
+  source: string;
+  content_preview: string;
+  chunk_count: number;
+  created_at: string;
+}
+
+/** 文档列表响应 */
+export interface DocumentListResponse {
+  documents: DocumentInfo[];
+  total: number;
+  page: number;
+  page_size: number;
+}

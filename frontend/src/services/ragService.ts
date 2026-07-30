@@ -22,7 +22,7 @@
  * - 超时：http 实例 timeout=60000ms，超时抛 Error
  */
 import axios from 'axios';
-import type { ChatResponse, SearchResult, SearchResponse, DocumentUpload } from '../types/rag';
+import type { ChatResponse, SearchResult, SearchResponse, DocumentUpload, DocumentListResponse } from '../types/rag';
 import type { ApiResponse } from '../types/api';
 
 /**
@@ -176,4 +176,19 @@ export async function uploadDocument(data: DocumentUpload): Promise<{ id: number
     throw new Error(body.msg || '上传失败');
   }
   return body.data || { id: 0 };
+}
+
+/** 获取知识库文档列表（分页） */
+export async function listDocuments(page = 1, pageSize = 20): Promise<DocumentListResponse> {
+  const response = await http.get<ApiResponse<DocumentListResponse>>('/documents', { params: { page, page_size: pageSize } });
+  const body = response.data;
+  if (body.code !== 0) throw new Error(body.msg || '获取文档列表失败');
+  return body.data || { documents: [], total: 0, page: 1, page_size: 20 };
+}
+
+/** 删除知识库文档 */
+export async function deleteDocument(id: number): Promise<void> {
+  const response = await http.delete<ApiResponse<unknown>>(`/documents/${id}`);
+  const body = response.data;
+  if (body.code !== 0) throw new Error(body.msg || '删除失败');
 }

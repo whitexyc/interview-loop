@@ -4,57 +4,44 @@
  * ## 组件职责
  * 1. 管理聊天消息列表（用户消息 + AI 回复）
  * 2. 管理输入框状态（文本输入、发送、清空）
- * 3. 展示 Agentic 执行流程管线（PipelinePanel）
- * 4. 处理加载 / 错误 / 空状态三种 UI 分支
+ * 3. 管理多会话（创建/切换/删除，持久化到后端）
+ * 4. 展示 Agentic 执行流程管线（PipelinePanel）
+ * 5. 处理加载 / 错误 / 空状态三种 UI 分支
  *
  * ## 数据流
  * 用户输入 → handleSend / handlePromptClick
  *          → doSend（统一发送入口）
- *            → startPipeline（启动管线动画）
- *            → chat()（调用后端 API）
- *            → completePipeline（管线完成）
- *            → setMessages（追加 AI 回复）
+ *            → chatStream()（调用 AI 后端，SSE 流式）
+ *              → onStep（更新管线步骤）
+ *              → onToken（逐字追加 AI 回复）
+ *            → 流完成 → saveMessages()（持久化到 Java 后端）
+ *            → setPipelineStep(6)（管线完成）
  *
- * ## 状态设计
- * - messages: MessageItem[]        → 对话历史（纯展示，不参与 API 调用）
- * - input: string                  → 输入框受控值
- * - loading: boolean               → 请求进行中（禁用按钮 + spinner）
- * - error: string | null           → 错误信息（Alert 展示 + 重试）
- * - pipelineStep: 0-6             → 管线步骤动画状态
- *   - 0 = idle（未发送请求）
- *   - 1-5 = 步骤依次亮起
- *   - 6 = 全部完成
- *
- * ## 关键设计决策
- * 1. 为什么用 doSend 统一入口？
- *    无论是普通输入还是提示词点击，发送逻辑完全一致，
- *    避免 handleSend 和 handlePromptClick 重复实现。
- * 2. 为什么用 ref 存 pending 请求？
- *    useRef 不触发重渲染，适合存"当前正在处理的请求"，
- *    重试时需要取最后一次请求的参数。
- * 3. 为什么管线动画用 setTimeout 链？
- *    后端暂未返回中间步骤数据，前端模拟步骤流转
- *    让用户感知到"系统在工作"，减少等待焦虑。
- *    setTimeout 链用 ref 存储便于清理（组件卸载时取消）。
+ * ## 会话持久化（M9）
+ * - 会话和消息存储在 PostgreSQL，通过 Java 后端 API 读写
+ * - 首次使用时自动迁移 localStorage 中的历史消息到数据库
+ * - 流式回复完成后自动保存，保存失败时静默降级（消息仍在 React 内存中）
+ * - 会话切换时先保存当前会话再加载目标会话
  */
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Input, Button, Spin, Alert, Typography, Flex, Tag } from 'antd';
-import { SendOutlined, BulbOutlined } from '@ant-design/icons';
+import { Input, Button, Spin, Alert, Typography, Flex, Tag, Select, Popconfirm } from 'antd';
+import { SendOutlined, BulbOutlined, PlusOutlined } from '@ant-design/icons';
 import ChatMessage from '../components/ChatMessage';
 import PipelinePanel from '../components/PipelinePanel';
 import UploadPanel from '../components/UploadPanel';
 import CitationModal from '../components/CitationModal';
 import { chatStream } from '../services/ragService';
 import type { SourceItem, PipelineSteps } from '../types/rag';
+import type { ConversationInfo, MessageDTO } from '../types/conversation';
+import {
+  listConversations,
+  createConversation,
+  deleteConversation,
+  getMessages,
+  saveMessages,
+} from '../services/conversationService';
 
-/** 消息项：区分用户和 AI，AI 消息可附带引用来源 */
-interface MessageItem {
-  role: 'user' | 'assistant';
-  content: string;
-  sources?: SourceItem[];
-}
-
-/** 空状态提示词按钮 — 覆盖个人背景和技术知识两类 */
+/** 空状态提示词按钮 */
 const promptSuggestions = [
   '我的学习情况',
   '我的比赛经历',
@@ -67,63 +54,121 @@ const promptSuggestions = [
 ];
 
 export default function ChatPage() {
-  // ── 核心状态 ──
-  const [messages, setMessages] = useState<MessageItem[]>([]);
+  // ── 聊天状态 ──
+  const [messages, setMessages] = useState<MessageDTO[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [citationSources, setCitationSources] = useState<SourceItem[]>([]);
   const [citationVisible, setCitationVisible] = useState(false);
-  const [pipelineStep, setPipelineStep] = useState(0); // 0=idle, 1-5=processing, 6=done
-  const [pipelineSteps, setPipelineSteps] = useState<PipelineSteps | null>(null); // 后端返回的步骤数据
+  const [pipelineStep, setPipelineStep] = useState(0);
+  const [pipelineSteps, setPipelineSteps] = useState<PipelineSteps | null>(null);
 
-  // ── ref（不触发重渲染，用于跨渲染周期保持数据） ──
-  const bottomRef = useRef<HTMLDivElement>(null);           // 消息区底部锚点，用于自动滚动
-  const pendingRef = useRef({ query: '', history: [] as { role: string; content: string }[] }); // 最后一次请求的参数（重试用）
-  const STORAGE_KEY = 'rag_chat_messages';
+  // ── 会话管理状态（M9） ──
+  const [conversations, setConversations] = useState<ConversationInfo[]>([]);
+  const [activeConversationId, setActiveConversationId] = useState<number | null>(null);
 
-  /** 启动时从 localStorage 恢复消息 */
+  // ── 反馈状态（M10） ──
+  const [feedbackMap, setFeedbackMap] = useState<Record<string, 'up' | 'down' | null>>({});
+
+  /** 挂载时从 localStorage 加载反馈数据 */
   useEffect(() => {
     try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          setMessages(parsed);
-        }
-      }
-    } catch {
-      // localStorage 不可用时静默降级
-    }
+      const saved = localStorage.getItem('rag_feedback');
+      if (saved) setFeedbackMap(JSON.parse(saved));
+    } catch { /* 数据损坏时静默忽略 */ }
   }, []);
 
-  /** 消息变化时自动持久化到 localStorage */
+  /** 处理反馈（toggle 模式：同按钮再点取消，异按钮切换） */
+  const handleFeedback = useCallback((messageIndex: number, rating: 'up' | 'down') => {
+    const key = `${activeConversationId}:${messageIndex}`;
+    setFeedbackMap((prev) => {
+      const current = prev[key];
+      const newRating = current === rating ? null : rating;
+      const next = { ...prev, [key]: newRating };
+      try { localStorage.setItem('rag_feedback', JSON.stringify(next)); } catch { /* 静默降级 */ }
+      return next;
+    });
+  }, [activeConversationId]);
+
+  // ── ref ──
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const pendingRef = useRef({ query: '', history: [] as { role: string; content: string }[] });
+  const messagesRef = useRef<MessageDTO[]>([]);
+  const saveSuppressed = useRef(false); // 挂载加载后跳过首次 save
+
+  /** 同步 messages 到 ref（避免闭包过期） */
   useEffect(() => {
-    if (messages.length > 0) {
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(messages));
-      } catch {
-        // 存储满时静默失败
-      }
-    }
+    messagesRef.current = messages;
   }, [messages]);
 
-  /** 自动滚动到底部：当 messages 变化时触发 */
+  /**
+   * 挂载时：加载会话列表 → 加载最近会话的消息
+   * 如果数据库为空，尝试从 localStorage 迁移
+   */
+  useEffect(() => {
+    (async () => {
+      try {
+        const list = await listConversations();
+        if (list.length > 0) {
+          setConversations(list);
+          const msgs = await getMessages(list[0].id);
+          setActiveConversationId(list[0].id);
+          saveSuppressed.current = true;
+          setMessages(msgs);
+        } else {
+          // 尝试从 localStorage 迁移
+          const saved = localStorage.getItem('rag_chat_messages');
+          if (saved) {
+            try {
+              const parsed = JSON.parse(saved);
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                const conv = await createConversation();
+                const dtos: MessageDTO[] = parsed.map((m: MessageDTO, i: number) => ({
+                  role: m.role,
+                  content: m.content,
+                  sources: m.sources || [],
+                  conversationId: conv.id,
+                  sortOrder: i,
+                }));
+                await saveMessages(conv.id, dtos);
+                localStorage.removeItem('rag_chat_messages');
+                setConversations([conv]);
+                setActiveConversationId(conv.id);
+                saveSuppressed.current = true;
+                setMessages(dtos);
+                return;
+              }
+            } catch {
+              // 迁移失败则创建空会话
+            }
+          }
+          // 创建首个空会话
+          const conv = await createConversation();
+          setConversations([conv]);
+          setActiveConversationId(conv.id);
+        }
+      } catch (err) {
+        setError('加载会话失败: ' + (err instanceof Error ? err.message : ''));
+      }
+    })();
+  }, []);
+
+  /** 自动滚动到底部 */
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
   /**
    * 统一发送逻辑（流式版）
-   * 步骤：追加用户消息 → loading → 启动管线 → onStep 实时更新步骤数据
-   *       → onToken 逐字追加到 AI 气泡 → API 完成 → 更新引用来源 → 管线完成
+   * 发送 → 流式展示 → 完成后自动持久化
    */
   const doSend = useCallback(async (text: string) => {
-    if (loading) return;
-    const history = messages.map((m) => ({ role: m.role, content: m.content }));
+    if (loading || !activeConversationId) return;
+
+    const history = messagesRef.current.map((m) => ({ role: m.role, content: m.content }));
     pendingRef.current = { query: text, history };
 
-    // 追加用户消息 + 占位 AI 消息（onToken 逐步填充）
     setMessages((prev) => [...prev, { role: 'user', content: text }, { role: 'assistant', content: '' }]);
     setLoading(true);
     setError(null);
@@ -131,22 +176,19 @@ export default function ChatPage() {
     setPipelineSteps(null);
 
     try {
-      const data = await chatStream(text, history, (step, data) => {
-        // onStep — 实时更新管线步骤
+      const data = await chatStream(text, history, (step, stepData) => {
         setPipelineSteps((prev) => {
           const updated = { ...(prev || {}) } as PipelineSteps;
-          if (step === 'intent') updated.intent = data as PipelineSteps['intent'];
-          if (step === 'retrieval') updated.retrieval = data as PipelineSteps['retrieval'];
-          if (step === 'rerank') updated.rerank = data as PipelineSteps['rerank'];
-          if (step === 'reflection') updated.reflection = data as PipelineSteps['reflection'];
+          if (step === 'intent') updated.intent = stepData as PipelineSteps['intent'];
+          if (step === 'retrieval') updated.retrieval = stepData as PipelineSteps['retrieval'];
+          if (step === 'rerank') updated.rerank = stepData as PipelineSteps['rerank'];
+          if (step === 'reflection') updated.reflection = stepData as PipelineSteps['reflection'];
           return updated;
         });
-        // 推进步骤指示器（1-indexed）
         const stepMap: Record<string, number> = { intent: 1, retrieval: 2, rerank: 3, reflection: 4 };
         const idx = stepMap[step];
         if (idx) setPipelineStep(idx);
       }, (token) => {
-        // onToken — 逐字追加到 AI 消息
         setMessages((prev) => {
           const updated = [...prev];
           const lastIdx = updated.length - 1;
@@ -157,7 +199,6 @@ export default function ChatPage() {
         });
       });
 
-      // 流结束后，更新引用来源 + 管线完成
       setMessages((prev) => {
         const updated = [...prev];
         const lastIdx = updated.length - 1;
@@ -174,7 +215,26 @@ export default function ChatPage() {
     } finally {
       setLoading(false);
     }
-  }, [loading, messages]);
+  }, [loading, activeConversationId]);
+
+  /** 流完成后自动保存（fire-and-forget，跳过挂载加载后的首次触发） */
+  useEffect(() => {
+    if (loading || !activeConversationId || messages.length === 0) return;
+    if (saveSuppressed.current) { saveSuppressed.current = false; return; }
+    const lastMsg = messages[messages.length - 1];
+    if (lastMsg.role !== 'assistant' || !lastMsg.content) return;
+
+    const dtos: MessageDTO[] = messages.map((m, i) => ({
+      role: m.role,
+      content: m.content,
+      sources: m.sources || [],
+      conversationId: activeConversationId,
+      sortOrder: i,
+    }));
+    saveMessages(activeConversationId, dtos).catch(() => {
+      // 保存失败静默降级
+    });
+  }, [messages, loading, activeConversationId]);
 
   /** 发送输入框内容 */
   const handleSend = useCallback(async () => {
@@ -184,32 +244,40 @@ export default function ChatPage() {
     await doSend(trimmed);
   }, [input, loading, doSend]);
 
-  /** 点击提示词按钮直接发送（跳过输入框） */
+  /** 点击提示词按钮直接发送 */
   const handlePromptClick = useCallback(async (text: string) => {
     await doSend(text);
   }, [doSend]);
 
-  /** 失败重试：重新发送上一次请求（取 pendingRef 中缓存的参数） */
+  /** 失败重试：移除失败的消息对再发起 */
   const handleRetry = useCallback(async () => {
     const { query, history } = pendingRef.current;
-    if (!query) {
-      setError(null);
-      return;
-    }
+    if (!query) { setError(null); return; }
+
     setLoading(true);
     setError(null);
     setPipelineStep(1);
     setPipelineSteps(null);
-    setMessages((prev) => [...prev, { role: 'user', content: query }, { role: 'assistant', content: '' }]);
+
+    setMessages((prev) => {
+      const cleaned = [...prev];
+      const len = cleaned.length;
+      if (len >= 2
+        && cleaned[len - 2].role === 'user'
+        && cleaned[len - 1].role === 'assistant') {
+        cleaned.splice(len - 2, 2);
+      }
+      return [...cleaned, { role: 'user', content: query }, { role: 'assistant', content: '' }];
+    });
 
     try {
-      const data = await chatStream(query, history, (step, data) => {
+      const data = await chatStream(query, history, (step, stepData) => {
         setPipelineSteps((prev) => {
           const updated = { ...(prev || {}) } as PipelineSteps;
-          if (step === 'intent') updated.intent = data as PipelineSteps['intent'];
-          if (step === 'retrieval') updated.retrieval = data as PipelineSteps['retrieval'];
-          if (step === 'rerank') updated.rerank = data as PipelineSteps['rerank'];
-          if (step === 'reflection') updated.reflection = data as PipelineSteps['reflection'];
+          if (step === 'intent') updated.intent = stepData as PipelineSteps['intent'];
+          if (step === 'retrieval') updated.retrieval = stepData as PipelineSteps['retrieval'];
+          if (step === 'rerank') updated.rerank = stepData as PipelineSteps['rerank'];
+          if (step === 'reflection') updated.reflection = stepData as PipelineSteps['reflection'];
           return updated;
         });
         const stepMap: Record<string, number> = { intent: 1, retrieval: 2, rerank: 3, reflection: 4 };
@@ -244,12 +312,70 @@ export default function ChatPage() {
     }
   }, []);
 
+  // ── 会话管理操作（M9） ──
+
+  /** 切换会话 */
+  const handleSelectConversation = useCallback(async (id: number) => {
+    if (id === activeConversationId) return;
+
+    const currentMessages = messagesRef.current;
+    if (activeConversationId && currentMessages.length > 0) {
+      const dtos: MessageDTO[] = currentMessages.map((m, i) => ({
+        role: m.role,
+        content: m.content,
+        sources: m.sources || [],
+        conversationId: activeConversationId,
+        sortOrder: i,
+      }));
+      try { await saveMessages(activeConversationId, dtos); } catch { /* 忽略 */ }
+    }
+
+    try {
+      const msgs = await getMessages(id);
+      setActiveConversationId(id);
+      setMessages(msgs);
+      setError(null);
+      setPipelineStep(0);
+      setPipelineSteps(null);
+    } catch (err) {
+      setError('加载消息失败: ' + (err instanceof Error ? err.message : ''));
+    }
+  }, [activeConversationId]);
+
+  /** 新建会话 */
+  const handleNewConversation = useCallback(async () => {
+    try {
+      const conv = await createConversation();
+      setConversations((prev) => [conv, ...prev]);
+      setActiveConversationId(conv.id);
+      setMessages([]);
+      setError(null);
+      setPipelineStep(0);
+      setPipelineSteps(null);
+    } catch (err) {
+      setError('创建会话失败: ' + (err instanceof Error ? err.message : ''));
+    }
+  }, []);
+
+  /** 删除当前会话 */
+  const handleDeleteConversation = useCallback(async () => {
+    if (!activeConversationId || conversations.length <= 1) return;
+    try {
+      await deleteConversation(activeConversationId);
+      const remaining = conversations.filter((c) => c.id !== activeConversationId);
+      setConversations(remaining);
+      if (remaining.length > 0) {
+        const msgs = await getMessages(remaining[0].id);
+        setActiveConversationId(remaining[0].id);
+        setMessages(msgs);
+      }
+    } catch (err) {
+      setError('删除会话失败: ' + (err instanceof Error ? err.message : ''));
+    }
+  }, [activeConversationId, conversations]);
+
   /**
    * 引用标记点击处理
-   * 用户在 AI 消息中点击 [1][2] 标记时，查找对应的 SourceItem 并弹出 Modal 展示原文。
-   * 查找策略：
-   *   1. 优先从当前消息的 sources 中查找精确匹配 ref_index 的
-   *   2. 找不到则兜底展示最近一条 AI 消息的所有来源
    */
   const handleCitationClick = useCallback(
     (refIndex: number) => {
@@ -275,29 +401,55 @@ export default function ChatPage() {
     [messages],
   );
 
-  /**
-   * 渲染 — 两栏布局
-   * 左栏（260px）：上传面板 + 搜索面板 + Agentic 流程面板
-   * 右栏（flex：占大部分宽度）：聊天消息 + 提示词 + 输入框
-   */
   return (
     <Flex style={{ height: 'calc(100vh - 104px)', gap: 16 }}>
-      {/* ====== 左栏：上传 + 管线 ====== */}
+      {/* ====== 左栏 ====== */}
       <div style={{ width: 320, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
         <UploadPanel />
         <PipelinePanel currentStep={pipelineStep} steps={pipelineSteps} />
       </div>
 
-      {/* ====== 右栏：聊天区域（占大部分宽度） ====== */}
+      {/* ====== 右栏 ====== */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-        {/* 消息列表（可滚动） */}
+        {/* 会话选择器（M9） */}
         <div
           style={{
-            flex: 1,
-            overflowY: 'auto',
-            padding: '0 8px 8px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            padding: '8px 12px',
+            background: '#fff',
+            borderRadius: 12,
+            marginBottom: 8,
+            border: '1px solid rgba(226,232,240,0.6)',
+            flexShrink: 0,
           }}
         >
+          <Select
+            value={activeConversationId}
+            onChange={handleSelectConversation}
+            style={{ flex: 1 }}
+            options={conversations.map((c) => ({ value: c.id, label: c.title }))}
+            placeholder="选择对话"
+            loading={conversations.length === 0}
+          />
+          <Button size="small" onClick={handleNewConversation} icon={<PlusOutlined />}>
+            新建
+          </Button>
+          <Popconfirm
+            title="确定删除此对话？"
+            onConfirm={handleDeleteConversation}
+            okText="删除"
+            cancelText="取消"
+          >
+            <Button size="small" danger disabled={conversations.length <= 1}>
+              删除
+            </Button>
+          </Popconfirm>
+        </div>
+
+        {/* 消息列表 */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '0 8px 8px' }}>
           {messages.length === 0 && !error && (
             <div style={{ textAlign: 'center', paddingTop: 40 }}>
               <div
@@ -325,22 +477,46 @@ export default function ChatPage() {
             </div>
           )}
 
-          {messages.map((msg, i) => (
-            <ChatMessage
-              key={i}
-              role={msg.role}
-              content={msg.content}
-              sources={msg.sources}
-              onCitationClick={handleCitationClick}
-            />
-          ))}
+          {messages.map((msg, i) => {
+            const isLastAssistant = msg.role === 'assistant' && i === messages.length - 1;
+            const isStreaming = loading && isLastAssistant && msg.content.length > 0;
+            const feedbackKey = activeConversationId ? `${activeConversationId}:${i}` : '';
+            return (
+              <ChatMessage
+                key={i}
+                role={msg.role}
+                content={msg.content}
+                sources={msg.sources}
+                onCitationClick={handleCitationClick}
+                messageIndex={i}
+                isStreaming={isStreaming}
+                feedbackRating={feedbackMap[feedbackKey] ?? null}
+                onFeedback={handleFeedback}
+              />
+            );
+          })}
 
           {loading && (
             <div style={{ textAlign: 'center', padding: 20 }}>
-              <Spin />
-              <Typography.Text type="secondary" style={{ display: 'block', marginTop: 8 }}>
-                AI 思考中...
-              </Typography.Text>
+              {(() => {
+                const lastMsg = messages[messages.length - 1];
+                const hasTokens = lastMsg && lastMsg.role === 'assistant' && lastMsg.content.length > 0;
+                if (hasTokens) {
+                  return (
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      生成中...
+                    </Typography.Text>
+                  );
+                }
+                return (
+                  <>
+                    <Spin />
+                    <Typography.Text type="secondary" style={{ display: 'block', marginTop: 8 }}>
+                      AI 思考中...
+                    </Typography.Text>
+                  </>
+                );
+              })()}
             </div>
           )}
 
@@ -363,7 +539,7 @@ export default function ChatPage() {
           />
         )}
 
-        {/* 提示词按钮 — 始终显示在输入框上方 */}
+        {/* 提示词按钮 */}
         <Flex justify="center" gap={6} wrap="wrap" style={{ marginBottom: 8 }}>
           {promptSuggestions.map((text) => (
             <Tag
@@ -394,7 +570,7 @@ export default function ChatPage() {
           ))}
         </Flex>
 
-        {/* 输入框区域 */}
+        {/* 输入框 */}
         <div
           style={{
             background: '#fff',
