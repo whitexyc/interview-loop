@@ -28,6 +28,7 @@
 | module-008 | 知识库文档管理面板 | 0.8.0-module-008 | 2026-07-30 | ✅ |
 | module-009 | 聊天记录持久化 | 0.9.0-module-009 | 2026-07-30 | ✅ |
 | module-010 | RAG UI 优化 | 0.10.0-module-010 | 2026-07-30 | ✅ |
+| module-013 | RAGAS Evaluation System | 0.13.0-module-013 | 2026-07-30 | ✅ |
 | module-014 | HyDE Query Rewriting | 0.14.0-module-014 | 2026-07-30 | ✅ |
 
 ## 4. 架构决策记录（ADR）索引
