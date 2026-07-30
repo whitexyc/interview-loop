@@ -30,6 +30,7 @@
 | module-010 | RAG UI 优化 | 0.10.0-module-010 | 2026-07-30 | ✅ |
 | module-013 | RAGAS Evaluation System | 0.13.0-module-013 | 2026-07-30 | ✅ |
 | module-014 | HyDE Query Rewriting | 0.14.0-module-014 | 2026-07-30 | ✅ |
+| module-015 | Redis Query Cache | 0.15.0-module-015 | 2026-07-30 | ✅ |
 
 ## 4. 架构决策记录（ADR）索引
 | ADR 编号 | 决策标题 | 状态 | 日期 |

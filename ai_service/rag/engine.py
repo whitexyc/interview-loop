@@ -26,6 +26,7 @@ from sqlalchemy import select
 from src.config import settings
 from src.database import async_session_factory
 from llm.client import LLMFactory
+from src.cache import cache
 from rag.schemas import SearchRequest, SearchResponse, ChatRequest, ChatResponse, ChatSteps
 from rag.models import Document
 from rag.embeddings import embedding_service
@@ -252,6 +253,13 @@ class RAGEngine:
         """
         from agent.reflector import reflector
 
+        # ── Redis 缓存检查 ──
+        cache_key = f"rag:retrieve:{hashlib.sha256(query.encode()).hexdigest()[:12]}"
+        cached = await cache.get(cache_key)
+        if cached is not None:
+            logger.info("检索缓存命中: key=%s, docs=%d", cache_key, len(cached))
+            return cached
+
         all_docs: list[dict] = []
         existing_ids: set[int] = set()
         current_query = query
@@ -312,6 +320,11 @@ class RAGEngine:
             d for d in docs
             if d.get("hybrid_score", d.get("score", 0)) >= min_score
         ] if docs else []
+
+        # ── Redis 缓存写入 ──
+        if docs:
+            await cache.set(cache_key, docs, ttl=300)
+            logger.info("检索结果已缓存: key=%s, docs=%d", cache_key, len(docs))
 
         return docs
 

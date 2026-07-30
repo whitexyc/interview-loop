@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     # 数据库
     database_url: str = "postgresql+asyncpg://postgres:postgres123@localhost:5432/personal_website"
 
+    # Redis 缓存
+    redis_url: str = "redis://localhost:6379/0"
+
     # LLM 供应商
     llm_provider: str = "claude"  # claude | deepseek
 
