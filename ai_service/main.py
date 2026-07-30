@@ -14,10 +14,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 
 from src.config import settings
-from src.database import init_db
+from src.database import init_db, async_session_factory
 from src.ratelimit import check_rate_limit, get_client_ip
 from rag.engine import rag_engine
 from rag.schemas import SearchRequest, SearchResponse, ChatRequest, ChatResponse
+from rag.models import Document
 from llm.client import LLMFactory
 
 
@@ -50,9 +51,16 @@ async def lifespan(app: FastAPI):
     logger.info("预热 LLM 客户端...")
     try:
         LLMFactory.get_client()  # 触发默认 provider 的初始化
-        logger.info("LLM 客户端已预热")
+        logger.info("LLM 客户端已预热 (default)")
     except Exception as e:
         logger.warning("LLM 客户端预热失败（可接受）: %s", e)
+
+    # 额外预热 ModelScope，避免首次切换供应商时的冷启动
+    try:
+        LLMFactory.get_client("modelscope")
+        logger.info("ModelScope 客户端已预热")
+    except Exception as e:
+        logger.warning("ModelScope 预热失败（可接受）: %s", e)
 
     yield
     logger.info("AI 服务关闭")
@@ -384,6 +392,71 @@ async def upload_document(
     result["page_count"] = page_count
 
     return {"code": 0, "data": result}
+
+
+@app.get("/ai/documents")
+async def list_documents(page: int = 1, page_size: int = 20):
+    """查看知识库文档列表（分页，按原始标题聚类去重）"""
+    from sqlalchemy import func, select
+
+    async with async_session_factory() as session:
+        # 按原始标题分组取最旧 id 作为代表
+        subq = (
+            select(
+                Document.title,
+                func.min(Document.id).label("min_id"),
+                func.count(Document.id).label("chunk_count"),
+            )
+            .group_by(Document.title)
+            .subquery()
+        )
+        q = (
+            select(Document, subq.c.chunk_count)
+            .join(subq, Document.id == subq.c.min_id)
+            .order_by(Document.created_at.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+        total = (await session.execute(
+            select(func.count()).select_from(subq)
+        )).scalar() or 0
+        rows = await session.execute(q)
+        docs = []
+        for doc, chunk_count in rows:
+            docs.append({
+                "id": doc.id,
+                "title": doc.title,
+                "source": doc.source or "",
+                "content_preview": doc.content[:120] if doc.content else "",
+                "chunk_count": chunk_count,
+                "created_at": doc.created_at.isoformat() if doc.created_at else "",
+            })
+
+    return {"code": 0, "data": {"documents": docs, "total": total, "page": page, "page_size": page_size}}
+
+
+@app.delete("/ai/documents/{doc_id}")
+async def delete_document(doc_id: int):
+    """删除文档及其所有相关分块"""
+    from sqlalchemy import select as sel
+
+    async with async_session_factory() as session:
+        doc = await session.get(Document, doc_id)
+        if not doc:
+            return {"code": 1, "message": "文档不存在"}
+
+        title = doc.title
+        stmt = sel(Document).where(
+            (Document.title == title) | (Document.title.like(f"{title} > %"))
+        )
+        rows = await session.execute(stmt)
+        to_delete = rows.scalars().all()
+        for d in to_delete:
+            await session.delete(d)
+        await session.commit()
+
+    logger.info("删除文档: id=%d, title=%s, chunks=%d", doc_id, title, len(to_delete))
+    return {"code": 0, "message": f"已删除 {len(to_delete)} 条记录"}
 
 
 if __name__ == "__main__":

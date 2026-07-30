@@ -17,6 +17,7 @@ RAG 知识库引擎 — 核心编排层
   （检索、重排、反思、生成）按正确顺序串联起来。每个步骤失败时都有
   降级策略（fallback），保证系统的鲁棒性。
 """
+import asyncio
 import hashlib
 import logging
 
@@ -126,7 +127,10 @@ class RAGEngine:
             seen_ids: set[int] = set()
 
             for round_num in range(3):
-                docs = await hybrid_retriever.retrieve(current_query, top_k=20)
+                docs = await asyncio.wait_for(
+                    hybrid_retriever.retrieve(current_query, top_k=20),
+                    timeout=15,
+                )
                 docs = await reranker.rerank(current_query, docs, top_k=5)
                 for d in docs:
                     doc_id = d.get("id")
@@ -135,7 +139,10 @@ class RAGEngine:
                         seen_ids.add(doc_id)
 
                 if round_num < 2:
-                    check = await reflector.check_sufficiency(current_query, docs)
+                    check = await asyncio.wait_for(
+                        reflector.check_sufficiency(current_query, docs),
+                        timeout=10,
+                    )
                     if check.get("sufficient", True):
                         break
                     rewritten = check.get("rewritten_query", "")
@@ -202,7 +209,13 @@ class RAGEngine:
 
         for round_num in range(3):  # 最多 3 轮
             try:
-                docs = await hybrid_retriever.retrieve(current_query, top_k=top_k)
+                docs = await asyncio.wait_for(
+                    hybrid_retriever.retrieve(current_query, top_k=top_k),
+                    timeout=15,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("第 %d 轮检索超时 (15s)", round_num + 1)
+                break
             except Exception as e:
                 logger.warning("第 %d 轮检索失败: %s", round_num + 1, e)
                 break
@@ -217,7 +230,10 @@ class RAGEngine:
             # 前两轮尝试反思改写，最后一轮直接结束
             if round_num < 2:
                 try:
-                    check = await reflector.check_sufficiency(current_query, docs)
+                    check = await asyncio.wait_for(
+                        reflector.check_sufficiency(current_query, docs),
+                        timeout=10,
+                    )
                     if check.get("sufficient", True):
                         break  # 充分则提前结束
                     rewritten = check.get("rewritten_query", current_query)
@@ -225,6 +241,9 @@ class RAGEngine:
                         break
                     current_query = rewritten
                     logger.info("检索改写第 %d 次: %s", round_num + 1, rewritten)
+                except asyncio.TimeoutError:
+                    logger.warning("反思检查超时 (10s)，终止检索")
+                    break
                 except Exception as e:
                     logger.warning("反思检查失败，终止检索: %s", e)
                     break

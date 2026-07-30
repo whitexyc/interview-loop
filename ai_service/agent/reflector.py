@@ -40,12 +40,19 @@ logger = logging.getLogger(__name__)
 # 反思 prompt：判断检索结果是否充分
 # 要求 LLM 输出 JSON，包含 sufficient（是否充分）和 rewritten_query（改写后的查询）。
 # 如果不充分，rewritten_query 会被用于二次检索。
-_CHECK_PROMPT = """你是一个答案质量检查员。判断已有文档是否足够回答用户问题。
+_CHECK_PROMPT = """你是一个严格的答案质量检查员，倾向于使用已有文档。
+只有在现有文档完全无法回答问题时才判定不充分。
 
 用户问题: {query}
 
 检索到的文档摘要:
 {docs_summary}
+
+规则（严格遵守）：
+1. 如果文档内容与问题部分相关、间接相关、或能提供部分信息 → sufficient=true
+2. 即使文档没有直接给出答案，但只要包含相关的背景知识 → sufficient=true
+3. 只有文档内容与问题完全无关（完全不沾边）才 → sufficient=false
+4. 默认倾向 sufficient=true，宁可使用不完美的文档也不要空跑二次检索
 
 如果文档信息充分，返回: {{"sufficient": true, "reason": "..."}}
 如果文档信息不充分，返回: {{"sufficient": false, "reason": "...", "rewritten_query": "改写的搜索关键词"}}
