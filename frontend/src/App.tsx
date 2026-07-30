@@ -5,6 +5,7 @@ import AppLayout from './components/AppLayout';
 import ResumePage from './pages/ResumePage';
 import ChatPage from './pages/ChatPage';
 import EditResumePage from './pages/EditResumePage';
+import KnowledgePage from './pages/KnowledgePage';
 
 const customTheme = {
   token: {
@@ -56,6 +57,14 @@ export default function App() {
             element={
               <AppLayout>
                 <EditResumePage />
+              </AppLayout>
+            }
+          />
+          <Route
+            path="/knowledge"
+            element={
+              <AppLayout>
+                <KnowledgePage />
               </AppLayout>
             }
           />

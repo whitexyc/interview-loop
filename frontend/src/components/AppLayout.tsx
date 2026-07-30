@@ -8,6 +8,7 @@ const { Header, Content } = Layout;
 const navItems = [
   { key: '/', label: '个人简历' },
   { key: '/chat', label: '知识库问答' },
+  { key: '/knowledge', label: '知识库' },
 ];
 
 interface AppLayoutProps {
