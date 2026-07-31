@@ -28,7 +28,6 @@ import { Input, Button, Spin, Alert, Typography, Flex, Tag } from 'antd';
 import { SendOutlined, BulbOutlined, PlusOutlined } from '@ant-design/icons';
 import ChatMessage from '../components/ChatMessage';
 import PipelinePanel from '../components/PipelinePanel';
-import UploadPanel from '../components/UploadPanel';
 import CitationModal from '../components/CitationModal';
 import { chatStream } from '../services/ragService';
 import type { SourceItem, PipelineSteps } from '../types/rag';
@@ -386,7 +385,6 @@ export default function ChatPage() {
     <Flex style={{ height: 'calc(100vh - 104px)', gap: 16 }}>
       {/* ====== 左栏 ====== */}
       <div style={{ width: 320, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
-        <UploadPanel />
         <PipelinePanel currentStep={pipelineStep} steps={pipelineSteps} />
       </div>
 

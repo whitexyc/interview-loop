@@ -50,17 +50,18 @@ async def lifespan(app: FastAPI):
     from llm.client import LLMFactory
     logger.info("预热 LLM 客户端...")
     try:
-        LLMFactory.get_client()  # 触发默认 provider 的初始化
-        logger.info("LLM 客户端已预热 (default)")
+        LLMFactory.get_client()  # 触发默认 provider（fallback 降级链）
+        logger.info("LLM 客户端已预热 (default/fallback)")
     except Exception as e:
         logger.warning("LLM 客户端预热失败（可接受）: %s", e)
 
-    # 额外预热 ModelScope，避免首次切换供应商时的冷启动
-    try:
-        LLMFactory.get_client("modelscope")
-        logger.info("ModelScope 客户端已预热")
-    except Exception as e:
-        logger.warning("ModelScope 预热失败（可接受）: %s", e)
+    # 预热 Qwen + Zhipu（ModelScope 降级链的前两环），避免首次调用冷启动
+    for label, provider in [("Qwen", "qwen"), ("ZhipuAI GLM", "zhipu")]:
+        try:
+            LLMFactory.get_client(provider)
+            logger.info("%s 客户端已预热", label)
+        except Exception as e:
+            logger.warning("%s 预热失败（可接受）: %s", label, e)
 
     yield
     logger.info("AI 服务关闭")

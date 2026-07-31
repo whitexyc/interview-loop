@@ -204,6 +204,7 @@ class HybridRetriever:
                 ts_rank(to_tsvector('simple', content), plainto_tsquery('simple', :query)) AS score
             FROM documents
             WHERE to_tsvector('simple', content) @@ plainto_tsquery('simple', :query)
+              AND parent_id IS NOT NULL
             ORDER BY score DESC
             LIMIT :limit
         """)
@@ -237,6 +238,7 @@ class HybridRetriever:
                 1 - (embedding <=> :query_embedding) AS score
             FROM documents
             WHERE embedding IS NOT NULL
+              AND parent_id IS NOT NULL
             ORDER BY embedding <=> :query_embedding ASC
             LIMIT :limit
         """)

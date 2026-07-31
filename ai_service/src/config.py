@@ -18,7 +18,12 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
 
     # LLM 供应商
-    llm_provider: str = "claude"  # claude | deepseek
+    # fallback: 按 fallback_chain 顺序自动降级（默认 qwen → zhipu → deepseek）
+    # 单供应商: claude | deepseek | qwen | zhipu | modelscope
+    llm_provider: str = "fallback"
+
+    # 降级链（逗号分隔，仅 llm_provider=fallback 时生效）
+    fallback_chain: str = "qwen,zhipu,deepseek"
 
     # Claude
     claude_api_key: str = ""
@@ -29,15 +34,21 @@ class Settings(BaseSettings):
     deepseek_model: str = "deepseek-chat"
     deepseek_base_url: str = "https://api.deepseek.com/v1"
 
+    # Qwen (通过 ModelScope API，默认首选)
+    qwen_model: str = "Qwen/Qwen3.5-35B-A3B"
+
+    # ZhipuAI GLM (通过 ModelScope API，Qwen 降级备用)
+    zhipu_model: str = "ZhipuAI/GLM-5.2"
+
     # ModelScope（魔搭）
     modelscope_api_key: str = ""
     modelscope_model: str = "deepseek-ai/DeepSeek-V4-Pro"
     modelscope_base_url: str = "https://api-inference.modelscope.cn/v1"
 
-    # 文本嵌入（默认使用 ModelScope）
+    # 文本嵌入（默认使用 ModelScope 云端 API）
     embedding_api_key: str = ""
     embedding_base_url: str = ""
-    embedding_model: str = "BAAI/bge-m3"
+    embedding_model: str = "OllmOne/bge-m3-GGUF"
 
     # 混合检索
     hybrid_search_alpha: float = 0.3  # BM25 权重，向量权重为 1-alpha
