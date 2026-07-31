@@ -21,7 +21,7 @@ INITIAL_CONFIG = [
     ("chunk_size", "300", "子块目标字符数"),
     ("chunk_overlap", "50", "子块重叠字符数"),
     ("min_chars", "50", "父块最小字符数（低于则过滤）"),
-    ("reranker_model", "BAAI/bge-reranker-v2-m3", "重排模型（本地 CrossEncoder）"),
+    ("reranker_model", "Qwen/Qwen3-Reranker-0.6B", "重排模型（本地 CrossEncoder）"),
     ("rerank_top_k", "5", "重排后保留条数"),
     ("hybrid_search_alpha", "0.3", "混合检索 BM25 权重（向量权重为 1-alpha）"),
     ("graph_name", "knowledge_graph", "Graph RAG 图名（Apache AGE）"),
