@@ -1,1 +1,8 @@
-{\" "permissions\:{\allow\:[\agent\,\git\]}} 
+{
+  "permissions": {
+    "allow": [
+      "agent",
+      "git"
+    ]
+  }
+}
