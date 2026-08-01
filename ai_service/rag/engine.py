@@ -54,6 +54,26 @@ _HYDE_PROMPT = """你是一个知识库助手。根据用户问题，写一段2-
 假设回答（2-3句话）:"""
 
 
+def _retrieve_cache_key(query: str, top_k: int, min_score: float) -> str:
+    """生成检索缓存键：query + top_k + min_score 共同决定
+
+    检索结果依赖 top_k/min_score，不同参数若复用同一 key 会返回
+    错误结果，故 hash 输入必须纳入这两个参数。前缀保持
+    "rag:retrieve:" 不变，供 cache.delete_by_prefix 前缀失效。
+    16 位十六进制 = 64 bits，碰撞概率足够低。
+
+    Args:
+        query: 用户查询
+        top_k: 每次检索的候选数
+        min_score: 低分过滤阈值
+
+    Returns:
+        形如 "rag:retrieve:<sha256 前 16 位>" 的缓存键
+    """
+    digest = hashlib.sha256((query + str(top_k) + str(min_score)).encode()).hexdigest()
+    return f"rag:retrieve:{digest[:16]}"
+
+
 class RAGEngine:
     """RAG 检索与问答引擎
 
@@ -260,7 +280,8 @@ class RAGEngine:
         from agent.reflector import reflector
 
         # ── Redis 缓存检查 ──
-        cache_key = f"rag:retrieve:{hashlib.sha256(query.encode()).hexdigest()[:12]}"
+        # key 纳入 top_k/min_score：不同参数生成不同 key，避免错误复用缓存
+        cache_key = _retrieve_cache_key(query, top_k, min_score)
         cached = await cache.get(cache_key)
         if cached is not None:
             logger.info("检索缓存命中: key=%s, docs=%d", cache_key, len(cached))
@@ -533,6 +554,10 @@ class RAGEngine:
 
                 logger.info("文档入库成功: title=%s, parents=%d, children=%d",
                             title, len(parent_objs), len(children))
+
+                # ── 检索缓存失效：文档变更影响所有查询的候选集，全量清空 ──
+                # 缓存是优化层，失效失败降级（delete_by_prefix 内部 catch，返回 False）
+                await cache.delete_by_prefix("rag:retrieve:")
 
                 # ── 知识图谱实体提取（异步，失败不影响入库） ──
                 try:

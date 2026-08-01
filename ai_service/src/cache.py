@@ -7,9 +7,10 @@ Redis 查询缓存 — 检索结果缓存层
   不参与核心检索逻辑，Redis 不可用时静默降级（不影响检索功能）。
 
 设计决策：
-  1. 为什么用 SHA256 的前 12 位作为 key？
+  1. 为什么用 SHA256 前缀作为 key？
      完整 query 可能很长（包含中文和特殊字符），SHA256 提供固定
-     长度的唯一标识，12 位十六进制 = 48 bits 碰撞概率极低。
+     长度的唯一标识。检索 key 使用 16 位十六进制 = 64 bits 碰撞概率
+     极低，且 hash 输入纳入 top_k/min_score（见 engine._retrieve_cache_key）。
      比直接截断 query 更可靠（不同语义的 query 可能前缀相同）。
 
   2. 为什么用 300 秒 TTL？
@@ -138,6 +139,40 @@ class RedisCache:
             return True
         except Exception as e:
             logger.warning("Redis 缓存写入失败: %s", e)
+            self._connected = False
+            self._client = None      # 释放死连接，下次尝试重连
+            return False
+
+    async def delete_by_prefix(self, prefix: str) -> bool:
+        """按前缀失效缓存（SCAN 分批 + DEL，避免 KEYS 阻塞）
+
+        文档增删后检索结果可能变化，调用方应在数据变更成功后
+        调用本方法清空对应前缀的所有缓存 key（全量失效，简单正确）。
+
+        使用 SCAN 游标分批扫描（而非 KEYS）避免大 key 空间下阻塞 Redis；
+        命中即 DEL，直到游标归零结束。缓存是可选优化层，任何失败
+        都降级返回 False，不抛异常（不影响检索正确性，只影响新鲜度）。
+
+        Args:
+            prefix: 缓存键前缀（如 "rag:retrieve:"）
+
+        Returns:
+            True 如果成功（含无匹配 key），False 如果 Redis 不可用/失败
+        """
+        try:
+            client = await self._ensure_client()
+            if client is None or not self._connected:
+                return False
+            cursor = 0
+            while True:
+                cursor, keys = await client.scan(cursor=cursor, match=f"{prefix}*", count=100)
+                if keys:
+                    await client.delete(*keys)
+                if cursor == 0:
+                    break
+            return True
+        except Exception as e:
+            logger.warning("Redis 缓存失效失败 (prefix=%s): %s", prefix, e)
             self._connected = False
             self._client = None      # 释放死连接，下次尝试重连
             return False

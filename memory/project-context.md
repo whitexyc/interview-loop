@@ -37,6 +37,7 @@
 | module-019 | 评估闭环（Golden 检索集 + Hit@k/MRR + 消融） | 0.19.0-module-019 | 2026-08-01 | ✅ |
 | module-020 | 中文 FTS 复活（jieba 预分词） | 0.20.0-module-020 | 2026-08-01 | ✅ |
 | module-021 | 图分数归一化（graph_score 真实相关度） | 0.21.0-module-021 | 2026-08-01 | ✅ |
+| module-022 | 检索缓存修复（key 参数化 + 失效策略） | 0.22.0-module-022 | 2026-08-01 | ✅ |
 
 ## 4. 架构决策记录（ADR）索引
 | ADR 编号 | 决策标题 | 状态 | 日期 |
@@ -44,9 +45,9 @@
 | — | — | — | — |
 
 ## 5. 当前迭代状态
-- 当前迭代版本: v0.21.0
-- 正在进行的模块: 无（module-021 已测试验收完成）
-- 下一个待开发模块: 待定（候选：缓存修复 / 长期记忆）
+- 当前迭代版本: v0.22.0
+- 正在进行的模块: 无（module-022 已完成，2026-08-01 Tester 验收通过）
+- 下一个待开发模块: 待定（候选：长期记忆 / 延迟优化）
 
 ## 7. 关键技术决策记录
 - 所有 API 返回格式统一为 {code, msg, data, timestamp, request_id}（详见 CLAUDE.md 第5节）
@@ -65,3 +66,4 @@
 - 图检索真实分数方案（module-021，2026-08-01）：`graph_store.search_related` 的 `hybrid_score` 由硬编码 0.6 改为「命中实体数」驱动。每篇 doc 的相关度 = 被「查询实体 e ∪ 一跳邻居 related」多少个实体引用（Cypher UNWIND + `count(DISTINCT ename)`），Python 层 min-max 归一化到 [0,1]，全同分/单结果保底 0.6（复用 `retriever._normalize` 范式但保底值不同，故独立实现 `_normalize_graph_scores`）；排序用真实命中数降序取 top_k，Cypher `LIMIT top_k*2`。接口 `search_related(entities, top_k=10)` 不变。候选池由旧 COALESCE（仅 e 无关系时含 e.doc_ids）扩大为同时含 e 与 related 的 doc_ids，召回不降
 - AGE 方言坑（module-021）：Cypher `ORDER BY` 对聚合别名排序报 `could not find rte for hits`，必须用 `count(DISTINCT ename)` 表达式；AGE 支持 UNWIND（1.6.0 实测通过）
 - 环境阻塞（module-021）：ModelScope LLM API（qwen/zhipu）2026-08-01 当日 429 配额超限，完整 `graph_only` 评估无法运行（实体提取失败全题跳过）。替代验证：golden doc 有图实体引用的 19 题真实引用实体查询 Hit@5=1.0000；固定实体 A/B 新实现 0.6957 > 旧行为 0.6522 ≥ 基线 0.50。配额恢复后需重跑 `python -m eval.golden_retrieval --mode graph_only` 复核
+- 检索缓存方案（module-022，2026-08-01）：① cache_key 由 `rag:retrieve:{sha256(query)[:12]}` 改为 `rag:retrieve:{sha256(query + str(top_k) + str(min_score))[:16]}`（提取纯函数 `engine._retrieve_cache_key`），不同参数不同 key；② `cache.delete_by_prefix(prefix)` 用 Redis SCAN cursor 分批 + DEL 前缀失效（避免 KEYS 阻塞），失败降级返回 False；③ `add_document`/`delete_document` 数据变更成功后全量失效 `rag:retrieve:`（文档增删影响所有查询候选集，简单正确）。cache.get/set 接口不变

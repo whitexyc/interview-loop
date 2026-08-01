@@ -16,6 +16,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from src.config import settings
 from src.database import init_db, async_session_factory
 from src.ratelimit import check_rate_limit, get_client_ip
+from src.cache import cache
 from rag.engine import rag_engine
 from rag.schemas import SearchRequest, SearchResponse, ChatRequest, ChatResponse
 from rag.models import Document
@@ -455,6 +456,10 @@ async def delete_document(doc_id: int):
         for d in to_delete:
             await session.delete(d)
         await session.commit()
+
+    # 检索缓存失效：删除文档后结果可能变化，全量清空
+    # 缓存是优化层，失效失败降级（delete_by_prefix 内部 catch，返回 False）
+    await cache.delete_by_prefix("rag:retrieve:")
 
     logger.info("删除文档: id=%d, title=%s, chunks=%d", doc_id, title, len(to_delete))
     return {"code": 0, "message": f"已删除 {len(to_delete)} 条记录"}
