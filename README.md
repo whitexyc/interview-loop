@@ -18,7 +18,8 @@
 | 后端 | Spring Boot 3.2 + MyBatis-Plus |
 | AI 层 | Python FastAPI + LangChain + pgvector |
 | 数据库 | PostgreSQL 16 (pgvector + Apache AGE) + Redis |
-| LLM | DeepSeek / Claude / ModelScope 多供应商适配 |
+| LLM | ModelScope 多模型降级链（Qwen → GLM → DeepSeek） |
+| 嵌入 | ModelScope 云端 bge-m3（1024 维） |
 
 ## 功能
 
@@ -28,11 +29,13 @@
 
 ### Agentic RAG 知识库问答
 - **混合检索**: PG FTS + pgvector 余弦相似度并行召回
+- **云端嵌入**: ModelScope bge-m3，1024 维向量
 - **语义重排**: 本地 CrossEncoder 精排 Top-5
 - **父子块分块**: MD 标题级父块 + 300 字符子块精确召回
 - **HyDE 查询改写**: LLM 生成假设回答做首轮检索
 - **Self-Reflection**: 自我反思纠错，最多 2 次重试改写
 - **Graph RAG**: Apache AGE 知识图谱实体关联召回
+- **LLM 降级链**: Qwen → GLM → DeepSeek 自动切换，避免单点故障
 - **Redis 缓存**: 相同查询 5 分钟缓存
 - **流式 SSE**: 逐 token 输出 + 管线步骤动画
 
@@ -85,6 +88,7 @@ npm run dev
 | `PW_DEEPSEEK_API_KEY` | DeepSeek API Key | — |
 | `PW_CLAUDE_API_KEY` | Claude API Key | — |
 | `VITE_EDIT_PASSWORD` | 文档上传密码 | `` |
+
 
 
 

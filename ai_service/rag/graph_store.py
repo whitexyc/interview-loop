@@ -72,6 +72,16 @@ class GraphStore:
     async def ensure_graph(self) -> bool:
         """确保 AGE 图和扩展已就绪（幂等）
 
+        创建流程：
+          1. CREATE EXTENSION age（首次）
+          2. LOAD 'age'（每次会话）
+          3. 检查图是否已存在 → 不存在才 create_graph
+
+        注意：
+          - 不再吞异常：create_graph 失败必须记录，避免"图没建出来但系统
+            假装成功"的静默降级（之前导致 Graph RAG 长期无数据）。
+          - 只忽略一种情况：图已存在（查询 ag_graph 表确认）。
+
         Returns:
             True 如果就绪，False 如果创建失败
         """
@@ -82,14 +92,20 @@ class GraphStore:
                 await session.execute(text(
                     "SET search_path = ag_catalog, \"$user\", public"
                 ))
-                try:
+
+                # 检查图是否已存在（避免 create_graph 抛"已存在"异常）
+                exists = await session.execute(text(
+                    "SELECT 1 FROM ag_catalog.ag_graph WHERE name = :name LIMIT 1"
+                ), {"name": GRAPH_NAME})
+                if exists.scalar_one_or_none() is None:
                     await session.execute(text(
                         f"SELECT create_graph('{_escape(GRAPH_NAME)}')"
                     ))
-                except Exception:
-                    pass  # 图已存在
+                    logger.info("AGE 图已创建: %s", GRAPH_NAME)
+                else:
+                    logger.info("AGE 图已存在: %s", GRAPH_NAME)
+
                 await session.commit()
-                logger.info("AGE 图已就绪: %s", GRAPH_NAME)
                 return True
         except Exception as e:
             logger.warning("AGE 图初始化失败: %s", e)
@@ -97,6 +113,14 @@ class GraphStore:
 
     async def upsert_entity(self, name: str, entity_type: str, doc_id: int) -> bool:
         """创建或更新实体节点，追加关联文档 ID
+
+        实现说明（重要）：
+          Apache AGE 1.6.0 的 openCypher 方言不支持 MERGE 的
+          ON CREATE SET / ON MATCH SET 子句（语法错误），所以拆成两步：
+            1. 先 MATCH 检查节点是否存在
+            2. 不存在 → CREATE（doc_ids 初始为数组 ['doc_id']）
+               已存在 → WHERE NOT doc_id IN e.doc_ids + SET 数组追加
+          doc_ids 存为 agtype 数组，与 search_related 的 json.loads 解析兼容。
 
         Args:
             name: 实体名称
@@ -116,21 +140,36 @@ class GraphStore:
                 await session.execute(text(
                     "SET search_path = ag_catalog, \"$user\", public"
                 ))
-                query = text(f"""
+
+                # Step 1: 检查实体是否已存在
+                exists = await session.execute(text(f"""
                     SELECT * FROM cypher('{GRAPH_NAME}', $$
-                        MERGE (e:Entity {{name: '{safe_name}', type: '{safe_type}'}})
-                        ON CREATE SET e.doc_ids = '{doc_id_str}'
-                        ON MATCH SET e.doc_ids =
-                            CASE
-                                WHEN e.doc_ids IS NULL THEN '{doc_id_str}'
-                                WHEN CAST(e.doc_ids AS TEXT) NOT LIKE '%{doc_id_str}%'
-                                THEN CAST(e.doc_ids AS TEXT) || ', {doc_id_str}'
-                                ELSE CAST(e.doc_ids AS TEXT)
-                            END
+                        MATCH (e:Entity {{name: '{safe_name}', type: '{safe_type}'}})
                         RETURN e.name
                     $$) AS (name agtype)
-                """)
-                await session.execute(query)
+                """))
+                if exists.fetchone() is None:
+                    # Step 2a: 不存在 → 创建，doc_ids 初始为单元素数组
+                    query = text(f"""
+                        SELECT * FROM cypher('{GRAPH_NAME}', $$
+                            CREATE (e:Entity {{name: '{safe_name}', type: '{safe_type}',
+                                              doc_ids: ['{doc_id_str}']}})
+                            RETURN e.name
+                        $$) AS (name agtype)
+                    """)
+                    await session.execute(query)
+                else:
+                    # Step 2b: 已存在 → 若 doc_id 不在数组内则追加
+                    query = text(f"""
+                        SELECT * FROM cypher('{GRAPH_NAME}', $$
+                            MATCH (e:Entity {{name: '{safe_name}', type: '{safe_type}'}})
+                            WHERE NOT '{doc_id_str}' IN e.doc_ids
+                            SET e.doc_ids = e.doc_ids || ['{doc_id_str}']
+                            RETURN e.name
+                        $$) AS (name agtype)
+                    """)
+                    await session.execute(query)
+
                 await session.commit()
                 return True
         except Exception as e:
@@ -198,8 +237,8 @@ class GraphStore:
                     SELECT * FROM cypher('{GRAPH_NAME}', $$
                         MATCH (e:Entity)
                         WHERE e.name IN {entity_str}
-                        OPTIONAL MATCH (e)-[:RELATED_TO]->(related:Entity)
-                        RETURN DISTINCT COALESCE(related.doc_ids::TEXT, e.doc_ids::TEXT) AS doc_ids
+                        OPTIONAL MATCH (e)-[r:RELATED_TO]->(related:Entity)
+                        RETURN DISTINCT COALESCE(related.doc_ids, e.doc_ids) AS doc_ids
                         LIMIT {top_k * 2}
                     $$) AS (doc_ids agtype)
                 """)

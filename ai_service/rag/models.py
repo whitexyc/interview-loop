@@ -29,7 +29,7 @@ class Document(Base):
     # 使用 meta 避免与 SQLAlchemy 保留属性 metadata 冲突
     meta = Column("metadata", JSONB, nullable=False, default=dict, comment="元数据")
     content_hash = Column(String(64), nullable=True, index=True, comment="内容 SHA256 哈希（去重用）")
-    embedding = Column(Vector(384), nullable=True, comment="向量嵌入")
+    embedding = Column(Vector(1024), nullable=True, comment="向量嵌入")
     parent_id = Column(Integer, ForeignKey("documents.id"),
                        nullable=True, index=True,
                        comment="父块 ID（NULL=父块/根块，非NULL=子块指向其父块）")

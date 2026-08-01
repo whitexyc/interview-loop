@@ -1,0 +1,164 @@
+[
+  {
+    "question": "什么是G1垃圾收集器？它的核心创新是什么？",
+    "golden_docs": ["1-G1垃圾收集器的Region分区机制与MixedGC全流程_2026-07-11"],
+    "category": "java_gc"
+  },
+  {
+    "question": "CMS收集器和G1收集器的主要区别是什么？",
+    "golden_docs": ["1-G1垃圾收集器的Region分区机制与MixedGC全流程_2026-07-11"],
+    "category": "java_gc"
+  },
+  {
+    "question": "ZGC的特点和适用场景是什么？",
+    "golden_docs": ["1-G1垃圾收集器的Region分区机制与MixedGC全流程_2026-07-11"],
+    "category": "java_gc"
+  },
+  {
+    "question": "Java对象什么时候会进入老年代？",
+    "golden_docs": ["1-G1垃圾收集器的Region分区机制与MixedGC全流程_2026-07-11"],
+    "category": "java_gc"
+  },
+  {
+    "question": "什么情况下会触发Full GC？如何优化以减少Full GC？",
+    "golden_docs": ["1-G1垃圾收集器的Region分区机制与MixedGC全流程_2026-07-11"],
+    "category": "java_gc"
+  },
+  {
+    "question": "Java线程池的核心参数有哪些？各自的作用是什么？",
+    "golden_docs": ["6-Java线程池ThreadPoolExecutor核心参数与工作原理_2026-07-16"],
+    "category": "java_concurrency"
+  },
+  {
+    "question": "volatile关键字的作用和实现原理是什么？",
+    "golden_docs": ["16-volatile与Java内存模型JMM_2026-07-27"],
+    "category": "java_concurrency"
+  },
+  {
+    "question": "synchronized的底层实现原理是什么？锁升级过程是怎样的？",
+    "golden_docs": [
+      "12-HashMap与ConcurrentHashMap底层原理_2026-07-23",
+      "15-AQS抽象队列同步器与ReentrantLock实现原理_2026-07-26"
+    ],
+    "category": "java_concurrency"
+  },
+  {
+    "question": "AQS (AbstractQueuedSynchronizer) 的工作原理是什么？ReentrantLock如何基于AQS实现？",
+    "golden_docs": ["15-AQS抽象队列同步器与ReentrantLock实现原理_2026-07-26"],
+    "category": "java_concurrency"
+  },
+  {
+    "question": "CompletableFuture和Future有什么区别？如何使用CompletableFuture进行异步编排？",
+    "golden_docs": ["6-Java线程池ThreadPoolExecutor核心参数与工作原理_2026-07-16"],
+    "category": "java_concurrency"
+  },
+  {
+    "question": "Transformer模型的Self-Attention机制是如何工作的？",
+    "golden_docs": [
+      "4-RoPE旋转位置编码_2026-07-14",
+      "11-归一化与稳定训练_2026-07-22"
+    ],
+    "category": "ai_llm"
+  },
+  {
+    "question": "什么是MoE (Mixture of Experts)架构？它的优势和挑战是什么？",
+    "golden_docs": ["6-MoE混合专家模型_2026-07-16"],
+    "category": "ai_llm"
+  },
+  {
+    "question": "LoRA (Low-Rank Adaptation)微调的原理是什么？",
+    "golden_docs": ["5-LoRA低秩适配微调_2026-07-15"],
+    "category": "ai_llm"
+  },
+  {
+    "question": "LLM中的KV Cache是什么？为什么能加速推理？",
+    "golden_docs": ["7-KVCache与注意力优化_2026-07-17"],
+    "category": "ai_llm"
+  },
+  {
+    "question": "RAG (Retrieval-Augmented Generation)的核心流程是怎样的？与传统LLM生成有什么优势？",
+    "golden_docs": ["2-AdvancedRAG全链路_2026-07-12"],
+    "category": "ai_llm"
+  },
+  {
+    "question": "Kafka的Partition机制有什么作用？如何保证消息顺序性？",
+    "golden_docs": ["5-Kafka消息可靠性与高吞吐设计_2026-07-15"],
+    "category": "kafka"
+  },
+  {
+    "question": "Kafka Consumer Group的Rebalance机制是什么？有哪些Rebalance策略？",
+    "golden_docs": ["5-Kafka消息可靠性与高吞吐设计_2026-07-15"],
+    "category": "kafka"
+  },
+  {
+    "question": "Kafka如何实现Exactly-Once语义？",
+    "golden_docs": ["5-Kafka消息可靠性与高吞吐设计_2026-07-15"],
+    "category": "kafka"
+  },
+  {
+    "question": "Kafka的零拷贝(Zero-Copy)技术是如何实现的？",
+    "golden_docs": [
+      "5-Kafka消息可靠性与高吞吐设计_2026-07-15",
+      "7-Netty高性能IO与Reactor线程模型_2026-07-17"
+    ],
+    "category": "kafka"
+  },
+  {
+    "question": "Kafka相比其他消息队列（如RabbitMQ）的核心优势是什么？",
+    "golden_docs": ["5-Kafka消息可靠性与高吞吐设计_2026-07-15"],
+    "category": "kafka"
+  },
+  {
+    "question": "张三的主要技术方向是什么？",
+    "golden_docs": [],
+    "category": "resume"
+  },
+  {
+    "question": "张三参加过哪些比赛？获得过什么奖项？",
+    "golden_docs": [],
+    "category": "resume"
+  },
+  {
+    "question": "张三在校期间的学习情况如何？主修课程有哪些？",
+    "golden_docs": [],
+    "category": "resume"
+  },
+  {
+    "question": "张三最近在学习和研究什么技术？",
+    "golden_docs": [],
+    "category": "resume"
+  },
+  {
+    "question": "张三的个人网站项目包含哪些技术栈？",
+    "golden_docs": [],
+    "category": "resume"
+  },
+  {
+    "question": "什么是CAP定理？在分布式系统设计中如何权衡？",
+    "golden_docs": ["8-Spring-Cloud-Nacos服务注册发现与配置中心_2026-07-18"],
+    "category": "comprehensive"
+  },
+  {
+    "question": "HTTP/2相比HTTP/1.1有什么核心改进？",
+    "golden_docs": [],
+    "category": "comprehensive"
+  },
+  {
+    "question": "Redis的持久化方式RDB和AOF有什么区别？如何选择？",
+    "golden_docs": ["10-Redis持久化机制_2026-07-20"],
+    "category": "comprehensive"
+  },
+  {
+    "question": "什么是微服务架构？与单体架构相比有哪些优缺点？",
+    "golden_docs": [
+      "8-Spring-Cloud-Nacos服务注册发现与配置中心_2026-07-18",
+      "9-分布式事务-Seata-AT模式与TCC方案深度对比_2026-07-19"
+    ],
+    "category": "comprehensive"
+  },
+  {
+    "question": "Docker和虚拟机的核心区别是什么？容器化有什么优势？",
+    "golden_docs": [],
+    "category": "comprehensive"
+  }
+]
