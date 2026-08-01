@@ -35,6 +35,7 @@ from datasets import Dataset
 from rag.engine import rag_engine
 from agent.reflector import reflector
 from src.config import settings
+from eval.golden_retrieval import get_git_commit, load_rag_config, save_eval_run
 
 logging.basicConfig(
     level=logging.INFO,
@@ -189,6 +190,25 @@ async def main():
         encoding="utf-8",
     )
     logger.info("报告已保存到: %s", output_path)
+
+    # ── 7. 版本化记录（module-019：注入 eval_runs） ──
+    # 复用 golden_retrieval 的落库逻辑，eval_type='ragas'，
+    # 使 RAGAS 生成侧评估结果也能与检索评估一起做版本化回归对比。
+    saved_id = await save_eval_run(
+        eval_type="ragas",
+        git_commit=get_git_commit(),
+        config_snapshot=await load_rag_config(),
+        scores={
+            "summary": summary,
+            "elapsed_seconds": round(elapsed, 1),
+            "dataset_size": len(raw),
+        },
+        per_question=report["per_question"],
+    )
+    if saved_id:
+        logger.info("RAGAS 评估已记录到 eval_runs (id=%s)", saved_id)
+    else:
+        logger.warning("RAGAS 评估记录失败（不影响报告输出）")
 
 
 if __name__ == "__main__":

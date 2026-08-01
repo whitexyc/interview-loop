@@ -48,6 +48,14 @@ class RetrievalException(Exception):
         self.__cause__ = cause
 
 
+# 检索模式（module-019 消融评估用）：
+#   hybrid       组合检索（FTS + 向量融合），默认值，行为与之前完全一致
+#   vector_only  仅向量检索（pgvector）
+#   fts_only     仅全文检索（PG FTS / BM25 风格）
+#   graph_only   仅图检索（Graph RAG，LLM 提取实体 → 图遍历）
+VALID_MODES = ("hybrid", "vector_only", "fts_only", "graph_only")
+
+
 class HybridRetriever:
     """混合检索器
 
@@ -70,47 +78,166 @@ class HybridRetriever:
         query: str,
         top_k: int = 5,
         session: Optional[AsyncSession] = None,
+        mode: str = "hybrid",
     ) -> list[dict]:
-        """执行混合检索
+        """执行混合检索（支持按通道消融）
 
-        流程：
-        1. 将 query 转为向量
-        2. 并行执行 FTS 和向量检索（各取 top_k * 2 以扩大召回）
-        3. 对两路分数做 min-max 归一化
-        4. 按 alpha 加权融合，返回 top_k 结果
+        hybrid 模式：query 向量化 → 并行 FTS + 向量检索（各取 top_k*2）
+        → min-max 归一化 → alpha 加权融合，返回 top_k 结果（与原行为一致）。
+        消融模式（fts_only/vector_only/graph_only）委托 _dispatch_mode 分派，
+        各通道独立打分互不影响，详见 _dispatch_mode。
 
         Args:
             query: 用户查询
             top_k: 返回结果数量
-            session: 数据库会话（可选，不传则自动创建）
+            session: 数据库会话（可选）
+            mode: 检索模式，见 VALID_MODES，默认 hybrid 与之前完全一致
 
         Returns:
-            检索结果列表，每项包含文档字段及 fts_score / vector_score / hybrid_score
+            检索结果列表（含 fts_score / vector_score / hybrid_score）
 
         Raises:
             RetrievalException: 检索失败时抛出
+            ValueError: mode 不在 VALID_MODES 中
         """
         if not query or not query.strip():
             raise RetrievalException("检索查询不能为空")
+        if mode not in VALID_MODES:
+            raise ValueError(f"非法检索模式: {mode}，可选: {VALID_MODES}")
 
-        # Step 1: 查询向量化
-        # 先用 embedding 模型把自然语言 query 转成向量。
-        # 为什么先向量化？因为需要它同时用于向量检索和后续的 score fusion。
+        # 消融模式（fts_only/vector_only/graph_only）：单通道检索，互不影响
+        if mode != "hybrid":
+            return await self._dispatch_mode(query, top_k, session, mode)
+
+        # ── hybrid 模式（原逻辑，零回归） ──
+        # Step 1: 查询向量化（同时用于向量检索与后续 score fusion）
         try:
             query_embedding = await self._embedding_service.embed_text(query)
         except Exception as e:
             raise RetrievalException("查询向量化失败", cause=e)
 
-        # 扩大召回以覆盖更多候选
-        # 取的候选越多，rerank 阶段的提升空间越大；
-        # 但越多也意味着数据库查询越慢。这里取 2 倍是经验值。
+        # Step 2: 扩大召回，取 2 倍候选给 rerank 更大提升空间
         fetch_k = top_k * 2
 
         if session is not None:
             return await self._execute(query, query_embedding, fetch_k, top_k, session)
-        else:
-            async with async_session_factory() as sess:
-                return await self._execute(query, query_embedding, fetch_k, top_k, sess)
+        async with async_session_factory() as sess:
+            return await self._execute(query, query_embedding, fetch_k, top_k, sess)
+
+    async def _dispatch_mode(
+        self,
+        query: str,
+        top_k: int,
+        session: Optional[AsyncSession],
+        mode: str,
+    ) -> list[dict]:
+        """消融模式分派：fts_only / vector_only / graph_only 单通道检索
+
+        retrieve() 的非 hybrid 分支统一委托到本方法，互不影响：
+        - fts_only：只跑全文检索（不依赖 embedding）
+        - vector_only：只跑向量检索（需先向量化，失败抛 RetrievalException）
+        - graph_only：图遍历返回关联文档，失败降级为空
+
+        Args:
+            query: 用户查询
+            top_k: 返回结果数量
+            session: 数据库会话（可选，不传则自动创建）
+            mode: 消融模式（调用方已校验在 VALID_MODES 且非 hybrid）
+
+        Returns:
+            单通道检索结果列表；通道失败降级返回空列表
+
+        Raises:
+            RetrievalException: vector_only 向量化失败时抛出
+        """
+        if mode == "fts_only":
+            return await self._retrieve_single_channel(
+                query, None, top_k, session, channel="fts"
+            )
+        if mode == "vector_only":
+            # 向量通道必须先向量化（embedding API 不可用时抛 RetrievalException）
+            try:
+                query_embedding = await self._embedding_service.embed_text(query)
+            except Exception as e:
+                raise RetrievalException("查询向量化失败", cause=e)
+            return await self._retrieve_single_channel(
+                query, query_embedding, top_k, session, channel="vector"
+            )
+        return await self._retrieve_graph_only(query, top_k)
+
+    async def _retrieve_single_channel(
+        self,
+        query: str,
+        query_embedding: Optional[list[float]],
+        top_k: int,
+        session: Optional[AsyncSession],
+        channel: str,
+    ) -> list[dict]:
+        """单通道检索（vector_only / fts_only）
+
+        与 hybrid 的 _execute 不同：不做跨通道归一化与融合，
+        直接按通道原始分数排序取 top_k（_fts_search / _vector_search
+        已在 SQL 层按分数倒序返回）。
+
+        Args:
+            query: 用户查询
+            query_embedding: 查询向量（channel="vector" 时必填）
+            top_k: 返回结果数量
+            session: 数据库会话（可选）
+            channel: "fts" 或 "vector"
+
+        Returns:
+            检索结果列表；单通道失败时降级返回空列表（不影响其他通道）
+        """
+        fetch_k = top_k * 2
+
+        async def _run(sess: AsyncSession) -> list[dict]:
+            try:
+                if channel == "vector":
+                    return await self._vector_search(query_embedding, fetch_k, sess)
+                return await self._fts_search(query, fetch_k, sess)
+            except Exception as e:
+                logger.warning("%s 检索失败，降级返回空: %s", channel, e)
+                return []
+
+        if session is not None:
+            return (await _run(session))[:top_k]
+        async with async_session_factory() as sess:
+            return (await _run(sess))[:top_k]
+
+    async def _retrieve_graph_only(self, query: str, top_k: int) -> list[dict]:
+        """图检索（graph_only）——仅 Graph RAG 通道
+
+        复用 engine._retrieve 的图路径：
+        LLM 从查询提取实体 → graph_store.search_related 图遍历返回关联文档。
+        任一步失败或超时都降级返回空（评估时该通道记 0 分，不影响其他通道）。
+
+        Args:
+            query: 用户查询
+            top_k: 返回最大文档数
+
+        Returns:
+            关联文档列表；失败返回空列表
+        """
+        try:
+            from rag.graph_extractor import graph_extractor
+            from rag.graph_store import graph_store
+
+            entities = await asyncio.wait_for(
+                graph_extractor.extract_from_query(query), timeout=10
+            )
+            if not entities:
+                return []
+            results = await asyncio.wait_for(
+                graph_store.search_related(entities, top_k=top_k), timeout=15
+            )
+            return list(results) if results else []
+        except asyncio.TimeoutError:
+            logger.warning("图检索超时，降级返回空: query=%s", query[:40])
+            return []
+        except Exception as e:
+            logger.warning("图检索失败，降级返回空: %s", e)
+            return []
 
     async def _execute(
         self,

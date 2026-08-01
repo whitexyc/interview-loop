@@ -237,8 +237,8 @@ class GraphStore:
                     SELECT * FROM cypher('{GRAPH_NAME}', $$
                         MATCH (e:Entity)
                         WHERE e.name IN {entity_str}
-                        OPTIONAL MATCH (e)-[:RELATED_TO]->(related:Entity)
-                        RETURN DISTINCT COALESCE(related.doc_ids::TEXT, e.doc_ids::TEXT) AS doc_ids
+                        OPTIONAL MATCH (e)-[r:RELATED_TO]->(related:Entity)
+                        RETURN DISTINCT COALESCE(related.doc_ids, e.doc_ids) AS doc_ids
                         LIMIT {top_k * 2}
                     $$) AS (doc_ids agtype)
                 """)
