@@ -17,7 +17,8 @@
   但通过 prompt engineering 实现了类似的效果。
 
 设计决策：
-  1. 反思和生成使用同一 LLM 实例（ModelScope DeepSeek-V4-Pro）。
+  1. 反思和生成走同一 fallback 降级链（消除单点，不再硬编码 deepseek）。
+     反思用低温度（0.1）保证结构化 JSON 稳定，生成保持默认 0.7（module-026）。
      反思任务不需要专门的"评估模型"，通用 LLM 通过 prompt 即可胜任。
 
   2. 反思 prompt 要求返回结构化 JSON，而不是自由文本。
@@ -94,11 +95,11 @@ class Reflector:
     """
 
     def __init__(self, provider: Optional[str] = None):
-        # 默认用 modelscope 作为反思/生成模型
-        # 为什么不用默认 LLM provider（deepseek）？
-        # 因为反思任务对模型能力要求更高（需要推理能力），
-        # ModelScope 上的 DeepSeek-V4-Pro 比 DeepSeek Flash 更强。
-        self._provider = provider or "deepseek"  # ModelScope API 有 moderation 过滤问题，改用 DeepSeek
+        # module-026：反思/生成走 fallback 降级链（消除单点，不再硬编码 deepseek）。
+        # 反思用低温度 0.1 保证结构化 JSON 稳定；生成保持默认 0.7，不受反思低温度影响。
+        self._provider = provider or "fallback"
+        self._reflection_temperature = 0.1  # 结构化 JSON 判断需确定性
+        self._generation_temperature = 0.7  # 生成保持创造性
 
     async def check_sufficiency(self, query: str, documents: list[dict]) -> dict:
         """检查检索结果是否充分
@@ -124,7 +125,9 @@ class Reflector:
                 f"- [{i + 1}] {d.get('title', '')}: {d.get('content', '')[:200]}"
                 for i, d in enumerate(documents[:5])
             )
-            client = LLMFactory.get_client(self._provider)
+            client = LLMFactory.get_client(
+                self._provider, temperature=self._reflection_temperature,
+            )
             prompt = _CHECK_PROMPT.format(query=query, docs_summary=docs_summary)
             response = await client.generate(prompt)
             result = self._parse_check(response)
@@ -179,7 +182,9 @@ class Reflector:
                 f"[{i + 1}] {d.get('title', '')}\n来源: {d.get('source', '')}\n内容: {d.get('content', '')}"
                 for i, d in enumerate(documents)
             )
-            client = LLMFactory.get_client(self._provider)
+            client = LLMFactory.get_client(
+                self._provider, temperature=self._generation_temperature,
+            )
             # 合并历史段与记忆段：两者为空时 sections=""，prompt 与旧版逐字节一致
             sections = history_section + (f"{memory}\n" if memory else "")
             prompt = _GENERATE_PROMPT.format(
@@ -225,7 +230,9 @@ class Reflector:
                 for i, d in enumerate(documents)
             )
 
-            client = LLMFactory.get_client(self._provider)
+            client = LLMFactory.get_client(
+                self._provider, temperature=self._generation_temperature,
+            )
             # 合并历史段与记忆段：两者为空时 sections=""，prompt 与旧版逐字节一致
             sections = history_section + (f"{memory}\n" if memory else "")
             prompt = _GENERATE_PROMPT.format(

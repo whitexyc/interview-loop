@@ -120,10 +120,9 @@ class HybridRetriever:
         # 扩大召回，取 2 倍候选给 rerank 更大提升空间
         fetch_k = top_k * 2
 
-        if session is not None:
-            return await self._execute(query, query_embedding, fetch_k, top_k, session, source_pattern)
-        async with async_session_factory() as sess:
-            return await self._execute(query, query_embedding, fetch_k, top_k, sess, source_pattern)
+        # session 可选：传入则共享串行，不传则 _execute 内为两路各建独立 session
+        # 并行（module-026 并发修复，session 由 _execute 内部按需创建）
+        return await self._execute(query, query_embedding, fetch_k, top_k, session, source_pattern)
 
     async def _dispatch_mode(
         self,
@@ -253,20 +252,58 @@ class HybridRetriever:
         query_embedding: list[float],
         fetch_k: int,
         top_k: int,
-        session: AsyncSession,
+        session: Optional[AsyncSession] = None,
         source_pattern: Optional[str] = None,
     ) -> list[dict]:
-        """执行检索主逻辑"""
+        """执行检索主逻辑（module-026 并发修复）
+
+        并发竞态背景：asyncpg 单连接禁止并发操作。旧实现用 gather 在同一个
+        session（同一连接）上并行跑 FTS + 向量，冷缓存时偶发
+        "concurrent operations are not permitted"，导致结果不稳定（0 vs 2 篇）。
+
+        修复方案（独立 session）：
+          - 未传外部 session（默认路径）：为 FTS / 向量各开独立 session
+            （各占独立连接），仍用 gather 并行执行，保留并行性能且互不冲突
+          - 传了外部 session（兼容路径）：共享 session 上串行执行两路，
+            保证事务可见性与连接安全（asyncpg 禁止单连接并发）
+          - 独立 session 创建失败：降级为单共享 session 串行执行
+          - 两路均单路降级：一路失败不影响另一路
+
+        Args:
+            query: 用户查询
+            query_embedding: 查询向量
+            fetch_k: 召回候选数（top_k 的 2 倍）
+            top_k: 最终返回数
+            session: 外部数据库会话（可选，不传则两路各建独立 session）
+            source_pattern: source LIKE 过滤（透传两路 SQL）
+
+        Returns:
+            融合排序后的检索结果列表（含 fts_score / vector_score / hybrid_score）
+        """
         # Step 2: 并行执行 FTS 和向量检索
         # 用 asyncio.gather 同时查询两个通道，性能提升约 2x。
         # return_exceptions=True：一路失败不影响另一路。
-        fts_task = self._fts_search(query, fetch_k, session, source_pattern)
-        vector_task = self._vector_search(query_embedding, fetch_k, session, source_pattern)
-
-        fts_results, vector_results = await asyncio.gather(
-            fts_task, vector_task,
-            return_exceptions=True,
-        )
+        if session is not None:
+            # 外部 session：共享连接上串行执行（asyncpg 单连接禁止并发）
+            fts_results, vector_results = await self._search_serial(
+                query, query_embedding, fetch_k, session, source_pattern,
+            )
+        else:
+            # 默认路径：FTS / 向量各开独立 session（module-026 并发修复）
+            try:
+                async with async_session_factory() as fts_sess, async_session_factory() as vec_sess:
+                    fts_task = self._fts_search(query, fetch_k, fts_sess, source_pattern)
+                    vector_task = self._vector_search(query_embedding, fetch_k, vec_sess, source_pattern)
+                    fts_results, vector_results = await asyncio.gather(
+                        fts_task, vector_task, return_exceptions=True,
+                    )
+            except Exception as e:
+                # 独立 session 创建失败 → 降级为单共享 session 串行
+                logger.warning("独立 session 创建失败，降级为共享 session 串行: %s", e)
+                async with async_session_factory() as shared_sess:
+                    fts_results, vector_results = await self._search_serial(
+                        query, query_embedding, fetch_k, shared_sess, source_pattern,
+                    )
 
         # 处理异常：某一路失败时降级为单路
         # 这是 graceful degradation 的设计——即使全文索引坏了，
@@ -318,6 +355,42 @@ class HybridRetriever:
         # Step 6: 排序取 top_k，返回给上层（reranker 或直接输出）
         results = sorted(merged.values(), key=lambda x: x["hybrid_score"], reverse=True)
         return results[:top_k]
+
+    async def _search_serial(
+        self,
+        query: str,
+        query_embedding: list[float],
+        fetch_k: int,
+        session: AsyncSession,
+        source_pattern: Optional[str] = None,
+    ) -> tuple[list[dict], list[dict]]:
+        """共享 session 上串行执行 FTS + 向量两路检索（module-026）
+
+        外部传入 session（或独立 session 创建失败降级）时使用：
+        同一连接上 asyncpg 不允许并发操作，只能串行；单路失败各自捕获
+        降级为空，保持与并行路径一致的"一路失败不影响另一路"语义。
+
+        Args:
+            query: 用户查询
+            query_embedding: 查询向量
+            fetch_k: 召回候选数
+            session: 共享数据库会话
+            source_pattern: source LIKE 过滤（透传两路 SQL）
+
+        Returns:
+            (fts_results, vector_results)，失败路为空列表
+        """
+        try:
+            fts_results = await self._fts_search(query, fetch_k, session, source_pattern)
+        except Exception as e:
+            logger.warning("全文检索失败，降级为仅向量检索: %s", e)
+            fts_results = []
+        try:
+            vector_results = await self._vector_search(query_embedding, fetch_k, session, source_pattern)
+        except Exception as e:
+            logger.warning("向量检索失败，降级为仅全文检索: %s", e)
+            vector_results = []
+        return fts_results, vector_results
 
     async def _fts_search(
         self, query: str, fetch_k: int, session: AsyncSession,
