@@ -40,6 +40,7 @@
 | module-022 | 检索缓存修复（key 参数化 + 失效策略） | 0.22.0-module-022 | 2026-08-01 | ✅ |
 | module-023 | 长期记忆（跨会话记忆沉淀） | 0.23.0-module-023 | 2026-08-01 | ✅ |
 | module-024 | 检索延迟优化（超时收敛 + HyDE 缓存 + 提前终止） | 0.24.0-module-024 | 2026-08-01 | ✅ 完成（测试通过 2026-08-01） |
+| module-025 | 流式记忆接入（chat_stream 记忆注入） | 0.25.0-module-025 | 2026-08-01 | ✅ 完成（测试通过 2026-08-01） |
 
 ## 4. 架构决策记录（ADR）索引
 | ADR 编号 | 决策标题 | 状态 | 日期 |
@@ -47,9 +48,9 @@
 | — | — | — | — |
 
 ## 5. 当前迭代状态
-- 当前迭代版本: v0.24.0
-- 正在进行的模块: module-024（检索延迟优化 — 超时收敛 + HyDE 缓存 + 提前终止）【✅ 已完成，测试通过 2026-08-01（见 specs/module-024-latency/test-report.md + acceptance-criteria.md 验收结论）】
-- 下一个待开发模块: 待定（候选：Agent 编排 / 流式记忆接入）
+- 当前迭代版本: v0.25.0
+- 正在进行的模块: 无（module-025 已测试通过并标记完成，2026-08-01）
+- 下一个待开发模块: 待定（候选：Agent 编排 / 并发修复）
 
 ## 7. 关键技术决策记录
 - 所有 API 返回格式统一为 {code, msg, data, timestamp, request_id}（详见 CLAUDE.md 第5节）
@@ -71,3 +72,5 @@
 - 检索缓存方案（module-022，2026-08-01）：① cache_key 由 `rag:retrieve:{sha256(query)[:12]}` 改为 `rag:retrieve:{sha256(query + str(top_k) + str(min_score))[:16]}`（提取纯函数 `engine._retrieve_cache_key`），不同参数不同 key；② `cache.delete_by_prefix(prefix)` 用 Redis SCAN cursor 分批 + DEL 前缀失效（避免 KEYS 阻塞），失败降级返回 False；③ `add_document`/`delete_document` 数据变更成功后全量失效 `rag:retrieve:`（文档增删影响所有查询候选集，简单正确）。cache.get/set 接口不变
 - 检索延迟优化（module-024，2026-08-01）：engine._retrieve 四项优化——① round 0 向量/图检索 `asyncio.gather(..., return_exceptions=True)` 单路降级（向量超时→仅图结果，图超时→仅向量结果，两路都失败→空，不整链路崩；图检索新增 wait_for(15s) 超时）；② HyDE 缓存 `rag:hyde:{sha256(query)[:12]}`（TTL 300s，注意用 sha256 而非内置 hash()——PYTHONHASHSEED 跨进程不稳定会导致 Redis 永远 miss；key 前缀与检索缓存 `rag:retrieve:` 独立）；③ 整链路预算 30s（deadline 在 HyDE 前设定，每轮循环检查超预算用已收集 docs 提前结束）；④ 提前终止强化 round 0 ≥3 篇文档跳过反思与后续轮次。`_retrieve` 返回格式不变，hybrid Hit@5=0.9130 ≥ 0.91 基线。实现/单测见 `ai_service/tests/test_engine_latency.py`
 - module-024 测试结论（2026-08-01，Tester）：① 单测 13/13 通过；② 全量回归 96 passed，2 个既有 async 技术债务失败（test_engine.py 缺 pytest-asyncio，module-018 已记录，非本次回归）；③ golden_retrieval hybrid Hit@5=0.9130 与基线持平；④ 延迟实测：检索结果缓存命中 0.003s、提前终止跳过反思（真实链路日志确认）、HyDE 缓存单测通过。**环境阻塞**：ModelScope LLM 当日 429 配额超限，HyDE/实体提取/反思真实链路均降级（降级路径验证正确）；**环境观察（既有问题，非 module-024）**：retriever._execute 用 gather 在单 asyncpg 连接上并发跑 FTS+向量，连接 provisioning 时偶发 `concurrent operations are not permitted`，导致冷缓存 `_retrieve` 结果不一致（0 vs 2 docs），建议后续模块给两路独立 session 或串行化
+- 流式记忆接入（module-025，2026-08-01）：chat_stream Step 5 生成前调用 `rag_engine._recall_memory(query, client_ip)`（复用 module-023，5s 超时 + 失败返回空串），结果传给 `reflector.generate_answer_stream(..., memory=memory)`；client_ip 从 `request.state.client_ip` 获取（与 chat 端点同款 `getattr(..., "unknown")`），取不到默认 'unknown'（此时 _recall_memory 内部直接返回空串）。无记忆时 memory 为空串零回归；casual_chat / 无 docs 分支在 Step 5 前提前 return 不触发召回。SSE 事件格式不变。单测见 `ai_service/tests/test_stream_memory.py`（httpx ASGITransport + mock 全链路）
+- module-025 测试结论（2026-08-01，Tester）：① 单测 5/5 通过（test_stream_memory.py：有记忆注入 / 无记忆零回归 / 召回失败契约 / client_ip 透传 / casual_chat 跳过）；② 全量回归 101 passed，2 个既有 async 技术债务失败（test_engine.py 缺 pytest-asyncio，module-018 已记录，非本次回归）；③ 半真实 E2E 通过（真实保存记忆到 PG + 本地 bge-m3 → 真实 chat_stream 端点 → 真实 `_recall_memory` 从真实库召回 `"历史记忆:\n- ..."` → 传入 generate_answer_stream，SSE 事件 step×4/token×2/done 正常；无记忆 IP memory 空串零回归；测试记忆已清理）。**环境阻塞**：LLM 当日 429 配额超限（qwen/zhipu）+ deepseek 未配 key，完整 LLM 端到端无法运行，按任务指引验证逻辑正确性（记忆检索 + 参数传递）；配额恢复后可补跑「保存记忆 → 真实流式对话 → 回答引用记忆」完整端到端

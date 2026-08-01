@@ -207,11 +207,15 @@ async def chat(request: ChatRequest, fastapi_req: Request):
 
 
 @app.post("/ai/rag/chat/stream")
-async def chat_stream(request: ChatRequest):
+async def chat_stream(request: ChatRequest, fastapi_req: Request):
     """RAG 知识库问答（流式输出）
 
     先完成前置步骤（意图→检索→Rerank→反思），每步结果通过 SSE step 事件推送，
     LLM 生成部分通过 token 事件逐字输出。
+
+    长期记忆（module-025）：流式路径在 Step 5 生成前调用
+    rag_engine._recall_memory 召回跨会话记忆（5s 超时 + 失败降级返回空串），
+    无记忆时 memory 为空串，行为与之前完全一致（零回归）。
 
     SSE 事件：
       event: step   data: {"step":str, "data":dict, "timing_ms":int}
@@ -219,6 +223,9 @@ async def chat_stream(request: ChatRequest):
       event: done   data: {"sources":[...]}
       event: error  data: {"message":str}
     """
+    # client_ip 由限流中间件注入 request.state（module-023 透传），取不到默认 'unknown'
+    client_ip = getattr(fastapi_req.state, "client_ip", "unknown")
+
     async def event_stream():
         import time
         _t = time.monotonic
@@ -309,7 +316,10 @@ async def chat_stream(request: ChatRequest):
             yield f"event: step\ndata: {step_data}\n\n"
 
             # ====== Step 5: 流式生成 ======
-            async for token in reflector.generate_answer_stream(request.query, docs, history=request.history):
+            # module-025: 流式路径接入长期记忆（复用 engine._recall_memory，
+            # 5s 超时 + 失败降级返回空串；无记忆时 memory 为空串，零回归）
+            memory = await rag_engine._recall_memory(request.query, client_ip)
+            async for token in reflector.generate_answer_stream(request.query, docs, history=request.history, memory=memory):
                 yield f"event: token\ndata: {json.dumps(token)}\n\n"
 
             # ====== Step 6: 引用溯源 ======
