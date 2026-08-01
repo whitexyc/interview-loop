@@ -375,6 +375,13 @@ class RAGEngine:
         """
         from agent.reflector import reflector
 
+        # ── 空 query 防护（module-022 遗留，module-027 收敛） ──
+        # 在缓存检查之前提前返回：空 query 不生成缓存 key、不调 HyDE/
+        # 检索/反思（空串的 sha256 key 无意义且纯浪费资源）。
+        if not query or not query.strip():
+            logger.warning("检索 query 为空，返回空结果")
+            return []
+
         # ── Redis 缓存检查 ──
         # key 纳入 top_k/min_score：不同参数生成不同 key，避免错误复用缓存
         cache_key = _retrieve_cache_key(query, top_k, min_score)

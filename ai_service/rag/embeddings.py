@@ -15,6 +15,7 @@
 import asyncio
 import logging
 import os
+import threading
 import numpy as np
 from typing import Optional
 
@@ -46,6 +47,10 @@ class EmbeddingService:
         self._model_path = model_path or _LOCAL_MODEL_DIR
         self._model = None
         self._dim = 1024  # bge-m3 固定 1024 维
+        # module-027 并发修复：threading.Lock（而非 asyncio.Lock）——
+        # asyncio.to_thread 在真线程中执行 _embed_sync，asyncio.Lock 无法
+        # 跨线程互斥。锁保证单 Llama 实例访问完全串行，杜绝 GGML_ASSERT 崩溃。
+        self._lock = threading.Lock()
 
     def _validate_model_file(self):
         """校验本地模型文件完整性
@@ -76,19 +81,29 @@ class EmbeddingService:
             logger.info("嵌入模型就绪, dim=%d", self._dim)
 
     def _embed_sync(self, text: str) -> list[float]:
-        """同步嵌入单条文本（由 to_thread 调用）"""
-        self._lazy_load()
-        resp = self._model.create_embedding(text)
+        """同步嵌入单条文本（由 to_thread 调用）
+
+        module-027 并发修复：llama-cpp 底层非线程安全，多个真线程
+        并发调用单 Llama 实例会触发 GGML_ASSERT 崩溃。锁包住
+        _lazy_load + create_embedding（lazy_load 本身有"双加载"竞态），
+        归一化在锁外（无状态 numpy 操作，减少持锁时间）。
+        """
+        with self._lock:
+            self._lazy_load()
+            resp = self._model.create_embedding(text)
         return self._normalize(resp["data"][0]["embedding"])
 
     def _embed_documents_sync(self, texts: list[str]) -> list[list[float]]:
-        """同步批量嵌入（由 to_thread 调用）"""
-        self._lazy_load()
-        result = []
-        for text in texts:
-            resp = self._model.create_embedding(text)
-            result.append(self._normalize(resp["data"][0]["embedding"]))
-        return result
+        """同步批量嵌入（由 to_thread 调用）
+
+        module-027 并发修复：批量内部循环连续调用同一 Llama 实例，
+        若循环内放锁会让他线程插队、仍构成并发访问。整批持锁保证
+        该批次对模型的访问完全串行；归一化在锁外（无状态）。
+        """
+        with self._lock:
+            self._lazy_load()
+            raw = [self._model.create_embedding(t)["data"][0]["embedding"] for t in texts]
+        return [self._normalize(v) for v in raw]
 
     @staticmethod
     def _normalize(embedding: list[float]) -> list[float]:
