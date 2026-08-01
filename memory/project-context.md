@@ -39,6 +39,7 @@
 | module-021 | 图分数归一化（graph_score 真实相关度） | 0.21.0-module-021 | 2026-08-01 | ✅ |
 | module-022 | 检索缓存修复（key 参数化 + 失效策略） | 0.22.0-module-022 | 2026-08-01 | ✅ |
 | module-023 | 长期记忆（跨会话记忆沉淀） | 0.23.0-module-023 | 2026-08-01 | ✅ |
+| module-024 | 检索延迟优化（超时收敛 + HyDE 缓存 + 提前终止） | 0.24.0-module-024 | 2026-08-01 | ✅ 完成（测试通过 2026-08-01） |
 
 ## 4. 架构决策记录（ADR）索引
 | ADR 编号 | 决策标题 | 状态 | 日期 |
@@ -46,9 +47,9 @@
 | — | — | — | — |
 
 ## 5. 当前迭代状态
-- 当前迭代版本: v0.23.0
-- 正在进行的模块: module-023（长期记忆 — 跨会话记忆沉淀）→ ✅ 已完成（2026-08-01 Tester 重新验收通过）。v4 修复阻塞项：`save` 改传 `date.today()`（date 对象，SQLAlchemy 绑定 DATE），`date(created_at) = $1::DATE` 正常执行，真实 `/ai/memory/save` 返回 `{code:0, data:{id, title:'记忆-<日期>-NN', status:'saved'}}`。验收：单测 29/29、真实 DB 冒烟 9/9（save→recall 命中→IP 隔离→1024 维→序号递增→清理）、HTTP 端点 9/9、全量回归 83 passed / 2 既有环境失败（test_engine async 缺 pytest-asyncio）、`/ai/documents` 排除记忆行、`rag/memory.py` 行覆盖 98.4%。验收标准 40/40 通过。详见 `specs/module-023-memory/test-report.md`
-- 下一个待开发模块: 待定（候选：延迟优化 / Agent 编排）
+- 当前迭代版本: v0.24.0
+- 正在进行的模块: module-024（检索延迟优化 — 超时收敛 + HyDE 缓存 + 提前终止）【✅ 已完成，测试通过 2026-08-01（见 specs/module-024-latency/test-report.md + acceptance-criteria.md 验收结论）】
+- 下一个待开发模块: 待定（候选：Agent 编排 / 流式记忆接入）
 
 ## 7. 关键技术决策记录
 - 所有 API 返回格式统一为 {code, msg, data, timestamp, request_id}（详见 CLAUDE.md 第5节）
@@ -68,3 +69,5 @@
 - AGE 方言坑（module-021）：Cypher `ORDER BY` 对聚合别名排序报 `could not find rte for hits`，必须用 `count(DISTINCT ename)` 表达式；AGE 支持 UNWIND（1.6.0 实测通过）
 - 环境阻塞（module-021）：ModelScope LLM API（qwen/zhipu）2026-08-01 当日 429 配额超限，完整 `graph_only` 评估无法运行（实体提取失败全题跳过）。替代验证：golden doc 有图实体引用的 19 题真实引用实体查询 Hit@5=1.0000；固定实体 A/B 新实现 0.6957 > 旧行为 0.6522 ≥ 基线 0.50。配额恢复后需重跑 `python -m eval.golden_retrieval --mode graph_only` 复核
 - 检索缓存方案（module-022，2026-08-01）：① cache_key 由 `rag:retrieve:{sha256(query)[:12]}` 改为 `rag:retrieve:{sha256(query + str(top_k) + str(min_score))[:16]}`（提取纯函数 `engine._retrieve_cache_key`），不同参数不同 key；② `cache.delete_by_prefix(prefix)` 用 Redis SCAN cursor 分批 + DEL 前缀失效（避免 KEYS 阻塞），失败降级返回 False；③ `add_document`/`delete_document` 数据变更成功后全量失效 `rag:retrieve:`（文档增删影响所有查询候选集，简单正确）。cache.get/set 接口不变
+- 检索延迟优化（module-024，2026-08-01）：engine._retrieve 四项优化——① round 0 向量/图检索 `asyncio.gather(..., return_exceptions=True)` 单路降级（向量超时→仅图结果，图超时→仅向量结果，两路都失败→空，不整链路崩；图检索新增 wait_for(15s) 超时）；② HyDE 缓存 `rag:hyde:{sha256(query)[:12]}`（TTL 300s，注意用 sha256 而非内置 hash()——PYTHONHASHSEED 跨进程不稳定会导致 Redis 永远 miss；key 前缀与检索缓存 `rag:retrieve:` 独立）；③ 整链路预算 30s（deadline 在 HyDE 前设定，每轮循环检查超预算用已收集 docs 提前结束）；④ 提前终止强化 round 0 ≥3 篇文档跳过反思与后续轮次。`_retrieve` 返回格式不变，hybrid Hit@5=0.9130 ≥ 0.91 基线。实现/单测见 `ai_service/tests/test_engine_latency.py`
+- module-024 测试结论（2026-08-01，Tester）：① 单测 13/13 通过；② 全量回归 96 passed，2 个既有 async 技术债务失败（test_engine.py 缺 pytest-asyncio，module-018 已记录，非本次回归）；③ golden_retrieval hybrid Hit@5=0.9130 与基线持平；④ 延迟实测：检索结果缓存命中 0.003s、提前终止跳过反思（真实链路日志确认）、HyDE 缓存单测通过。**环境阻塞**：ModelScope LLM 当日 429 配额超限，HyDE/实体提取/反思真实链路均降级（降级路径验证正确）；**环境观察（既有问题，非 module-024）**：retriever._execute 用 gather 在单 asyncpg 连接上并发跑 FTS+向量，连接 provisioning 时偶发 `concurrent operations are not permitted`，导致冷缓存 `_retrieve` 结果不一致（0 vs 2 docs），建议后续模块给两路独立 session 或串行化
