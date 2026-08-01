@@ -211,7 +211,11 @@ class GraphStore:
             return False
 
     async def search_related(self, entities: list[str], top_k: int = 10) -> list[dict]:
-        """从查询实体出发图遍历，返回关联文档
+        """从查询实体出发图遍历，返回关联文档（含真实 graph_score）
+
+        相关度 = 每篇文档被「查询实体 + 一跳邻居」引用的次数（命中实体数），
+        命中越多越相关。流程：Cypher 统计命中数（_count_doc_hits）→ Python
+        min-max 归一化到 [0,1]（全同分保底 0.6）→ 按真实命中数降序取 top_k。
 
         Args:
             entities: 查询中提取的实体名称列表
@@ -224,67 +228,112 @@ class GraphStore:
             return []
 
         try:
-            async with async_session_factory() as session:
-                await session.execute(text("LOAD 'age'"))
-                await session.execute(text(
-                    "SET search_path = ag_catalog, \"$user\", public"
-                ))
-                # 构建 Cypher 兼容的列表字符串 ["a","b","c"]
-                safe_entities = ",".join(f"'{_escape(e)}'" for e in entities)
-                entity_str = f"[{safe_entities}]"
-
-                query = text(f"""
-                    SELECT * FROM cypher('{GRAPH_NAME}', $$
-                        MATCH (e:Entity)
-                        WHERE e.name IN {entity_str}
-                        OPTIONAL MATCH (e)-[r:RELATED_TO]->(related:Entity)
-                        RETURN DISTINCT COALESCE(related.doc_ids, e.doc_ids) AS doc_ids
-                        LIMIT {top_k * 2}
-                    $$) AS (doc_ids agtype)
-                """)
-                result = await session.execute(query)
-                rows = result.fetchall()
-
-            doc_ids: set[int] = set()
-            for row in rows:
-                try:
-                    raw = str(row[0])
-                    ids = json.loads(raw) if raw else []
-                    if isinstance(ids, list):
-                        for did in ids:
-                            if isinstance(did, int) or (isinstance(did, str) and did.isdigit()):
-                                doc_ids.add(int(did))
-                except (json.JSONDecodeError, ValueError, TypeError):
-                    continue
-
-            if not doc_ids:
+            hit_map = await self._count_doc_hits(entities, top_k)
+            if not hit_map:
                 return []
 
             async with async_session_factory() as session:
                 result = await session.execute(
                     select(Document)
-                    .where(Document.id.in_(list(doc_ids)))
+                    .where(Document.id.in_(list(hit_map.keys())))
                     .where(Document.parent_id.is_(None))
-                    .limit(top_k)
                 )
                 docs = result.scalars().all()
 
-            output = []
-            for d in docs:
-                output.append({
-                    "id": d.id,
-                    "title": d.title,
-                    "content": d.content,
-                    "source": d.source,
-                    "hybrid_score": 0.6,
-                    "parent_id": None,
-                })
+            # 命中实体数 → graph_score（min-max 归一化，全同分保底 0.6）
+            scores = self._normalize_graph_scores([hit_map.get(d.id, 0) for d in docs])
+
+            # 排序用真实命中数降序（归一化只改分数值）
+            ranked = sorted(zip(docs, scores),
+                            key=lambda x: hit_map.get(x[0].id, 0), reverse=True)
+
+            output = [
+                {"id": d.id, "title": d.title, "content": d.content,
+                 "source": d.source, "hybrid_score": s, "parent_id": None}
+                for d, s in ranked[:top_k]
+            ]
 
             logger.info("图搜索完成: entities=%d, docs=%d", len(entities), len(output))
             return output
         except Exception as e:
             logger.warning("图搜索失败，降级返回空: %s", e)
             return []
+
+    async def _count_doc_hits(self, entities: list[str], top_k: int) -> dict[int, int]:
+        """Cypher 统计每篇文档被查询实体及一跳邻居引用的次数
+
+        命中实体数 = 多少实体（查询实体 e ∪ 一跳邻居 related）的 doc_ids
+        数组包含该文档。UNWIND [e] + [related] 逐实体展开 doc_ids，
+        count(DISTINCT ename) 去重计数。
+
+        AGE 方言注意：ORDER BY 用 count(...) 表达式而非别名（别名排序报
+        "could not find rte for hits"）；新查询含 e 与 related 的 doc_ids。
+
+        Args:
+            entities: 查询中提取的实体名称列表
+            top_k: 返回的最大文档数（Cypher 取 2 倍候选）
+
+        Returns:
+            {doc_id: 命中实体数} 映射，无命中返回空 dict
+        """
+        async with async_session_factory() as session:
+            await session.execute(text("LOAD 'age'"))
+            await session.execute(text('SET search_path = ag_catalog, "$user", public'))
+            # 构建 Cypher 兼容的列表字符串 ["a","b","c"]
+            safe_entities = ",".join(f"'{_escape(e)}'" for e in entities)
+            entity_str = f"[{safe_entities}]"
+
+            query = text(f"""
+                SELECT * FROM cypher('{GRAPH_NAME}', $$
+                    MATCH (e:Entity)
+                    WHERE e.name IN {entity_str}
+                    OPTIONAL MATCH (e)-[r:RELATED_TO]->(related:Entity)
+                    WITH e, related
+                    UNWIND [e] + CASE WHEN related IS NULL THEN [] ELSE [related] END AS ent
+                    WITH ent.name AS ename, ent.doc_ids AS ids
+                    UNWIND ids AS doc_id
+                    RETURN doc_id, count(DISTINCT ename) AS hits
+                    ORDER BY count(DISTINCT ename) DESC
+                    LIMIT {top_k * 2}
+                $$) AS (doc_id agtype, hits agtype)
+            """)
+            rows = (await session.execute(query)).fetchall()
+
+        # 解析 (doc_id, hits)：agtype 序列化为 JSON 字符串，json.loads 还原
+        hit_map: dict[int, int] = {}
+        for row in rows:
+            try:
+                did = json.loads(str(row[0])) if row[0] is not None else None
+                if isinstance(did, (int, str)) and str(did).isdigit():
+                    hit_map[int(did)] = int(json.loads(str(row[1]) or "0"))
+            except (json.JSONDecodeError, ValueError, TypeError):
+                continue
+        return hit_map
+
+    @staticmethod
+    def _normalize_graph_scores(counts: list[int]) -> list[float]:
+        """Min-Max 归一化命中实体数到 [0, 1]
+
+        与 retriever._normalize 同范式，但保底值不同：
+          全同分/单结果时 retriever._normalize 返回 1.0，
+          本方法返回 0.6 —— 与历史硬编码 0.6 一致，避免图结果
+          在无区分度时给融合通道一个突兀的高分。
+
+        Args:
+            counts: 每篇文档的命中实体数列表
+
+        Returns:
+            归一化分数列表，长度与 counts 相同
+        """
+        if not counts:
+            return []
+        min_c = min(counts)
+        max_c = max(counts)
+        score_range = max_c - min_c
+        if score_range < 1e-9:
+            # 所有文档命中数相同（单结果/全同分）→ 保底 0.6
+            return [0.6] * len(counts)
+        return [(c - min_c) / score_range for c in counts]
 
 
 # 全局单例
