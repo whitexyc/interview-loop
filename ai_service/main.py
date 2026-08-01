@@ -18,8 +18,12 @@ from src.database import init_db, async_session_factory
 from src.ratelimit import check_rate_limit, get_client_ip
 from src.cache import cache
 from rag.engine import rag_engine
-from rag.schemas import SearchRequest, SearchResponse, ChatRequest, ChatResponse
+from rag.schemas import (
+    SearchRequest, SearchResponse, ChatRequest, ChatResponse,
+    MemorySaveRequest, MemoryRecallRequest,
+)
 from rag.models import Document
+from rag.memory import memory_service
 from llm.client import LLMFactory
 
 
@@ -189,11 +193,15 @@ async def search(request: SearchRequest):
 
 @app.post("/ai/rag/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, fastapi_req: Request):
-    """RAG 知识库问答（自动保存会话到 IP 缓存）"""
-    result = await rag_engine.chat(request)
+    """RAG 知识库问答（自动保存会话到 IP 缓存）
+
+    将客户端 IP 传给 rag_engine.chat，用于按 IP 隔离检索长期记忆
+    （module-023；无记忆时零回归）。
+    """
+    client_ip = getattr(fastapi_req.state, "client_ip", "unknown")
+    result = await rag_engine.chat(request, client_ip=client_ip)
     # 保存消息到 IP 会话缓存（仅知识库路径保存）
     if result.message not in ("casual_chat", "realtime_not_implemented") and result.answer:
-        client_ip = getattr(fastapi_req.state, "client_ip", "unknown")
         save_messages_to_session(client_ip, request.query, result.answer, result.sources)
     return result
 
@@ -327,6 +335,37 @@ async def chat_stream(request: ChatRequest):
     )
 
 
+# ─── 长期记忆 API（module-023；复用 documents 表，source='memory:<ip>:' 区分） ───
+
+
+@app.post("/ai/memory/save")
+async def memory_save(request: MemorySaveRequest):
+    """保存长期记忆（按 IP 隔离写入 documents，source='memory:<ip>:'）
+
+    分块 → 本地 bge-m3 向量化 → 写 documents（父块 + 子块）。
+    content 为空返回错误；embedding 不可用返回错误码（不崩）。
+    """
+    try:
+        result = await memory_service.save(request.content, request.ip)
+        return {"code": 0, "data": result}
+    except ValueError as e:
+        return {"code": 1, "message": str(e)}
+    except Exception as e:
+        logger.error("记忆保存失败: %s", e, exc_info=True)
+        return {"code": 2, "message": "记忆保存失败"}
+
+
+@app.post("/ai/memory/recall")
+async def memory_recall(request: MemoryRecallRequest):
+    """检索与 query 相关的长期记忆（按 IP 隔离，source 过滤）"""
+    try:
+        memories = await memory_service.recall(request.query, request.ip)
+        return {"code": 0, "data": {"memories": memories}}
+    except Exception as e:
+        logger.error("记忆检索失败: %s", e, exc_info=True)
+        return {"code": 1, "data": {"memories": []}, "message": "记忆检索失败"}
+
+
 @app.post("/ai/rag/documents")
 async def add_document(
     title: str = Body(...),
@@ -399,16 +438,19 @@ async def upload_document(
 @app.get("/ai/documents")
 async def list_documents(page: int = 1, page_size: int = 20):
     """查看知识库文档列表（分页，按原始标题聚类去重）"""
-    from sqlalchemy import func, select
+    from sqlalchemy import func, or_, select
 
     async with async_session_factory() as session:
-        # 按原始标题分组取最旧 id 作为代表
+        # 按原始标题分组取最旧 id 作为代表；
+        # 排除记忆文档（source='memory:%'，module-023 复用 documents 表），
+        # 避免记忆行污染知识库管理面板（review #7）
         subq = (
             select(
                 Document.title,
                 func.min(Document.id).label("min_id"),
                 func.count(Document.id).label("chunk_count"),
             )
+            .where(or_(Document.source.is_(None), Document.source.not_like("memory:%")))
             .group_by(Document.title)
             .subquery()
         )

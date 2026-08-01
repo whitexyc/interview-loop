@@ -80,19 +80,20 @@ class HybridRetriever:
         top_k: int = 5,
         session: Optional[AsyncSession] = None,
         mode: str = "hybrid",
+        source_pattern: Optional[str] = None,
     ) -> list[dict]:
         """执行混合检索（支持按通道消融）
 
-        hybrid 模式：query 向量化 → 并行 FTS + 向量检索（各取 top_k*2）
-        → min-max 归一化 → alpha 加权融合，返回 top_k 结果（与原行为一致）。
-        消融模式（fts_only/vector_only/graph_only）委托 _dispatch_mode 分派，
-        各通道独立打分互不影响，详见 _dispatch_mode。
+        hybrid 模式：query 向量化 → 并行 FTS+向量 → min-max 归一化 → alpha 融合。
+        消融模式（fts_only/vector_only/graph_only）委托 _dispatch_mode 分派。
 
         Args:
             query: 用户查询
             top_k: 返回结果数量
             session: 数据库会话（可选）
             mode: 检索模式，见 VALID_MODES，默认 hybrid 与之前完全一致
+            source_pattern: source LIKE 过滤（module-023 记忆检索 'memory:<ip>:%'）；
+                为空默认排除 'memory:%'（防记忆污染知识库检索）；None 与之前一致
 
         Returns:
             检索结果列表（含 fts_score / vector_score / hybrid_score）
@@ -108,22 +109,21 @@ class HybridRetriever:
 
         # 消融模式（fts_only/vector_only/graph_only）：单通道检索，互不影响
         if mode != "hybrid":
-            return await self._dispatch_mode(query, top_k, session, mode)
+            return await self._dispatch_mode(query, top_k, session, mode, source_pattern)
 
-        # ── hybrid 模式（原逻辑，零回归） ──
-        # Step 1: 查询向量化（同时用于向量检索与后续 score fusion）
+        # hybrid 模式（原逻辑，零回归）：向量化 → 并行检索 → 归一化融合
         try:
             query_embedding = await self._embedding_service.embed_text(query)
         except Exception as e:
             raise RetrievalException("查询向量化失败", cause=e)
 
-        # Step 2: 扩大召回，取 2 倍候选给 rerank 更大提升空间
+        # 扩大召回，取 2 倍候选给 rerank 更大提升空间
         fetch_k = top_k * 2
 
         if session is not None:
-            return await self._execute(query, query_embedding, fetch_k, top_k, session)
+            return await self._execute(query, query_embedding, fetch_k, top_k, session, source_pattern)
         async with async_session_factory() as sess:
-            return await self._execute(query, query_embedding, fetch_k, top_k, sess)
+            return await self._execute(query, query_embedding, fetch_k, top_k, sess, source_pattern)
 
     async def _dispatch_mode(
         self,
@@ -131,6 +131,7 @@ class HybridRetriever:
         top_k: int,
         session: Optional[AsyncSession],
         mode: str,
+        source_pattern: Optional[str] = None,
     ) -> list[dict]:
         """消融模式分派：fts_only / vector_only / graph_only 单通道检索
 
@@ -144,6 +145,7 @@ class HybridRetriever:
             top_k: 返回结果数量
             session: 数据库会话（可选，不传则自动创建）
             mode: 消融模式（调用方已校验在 VALID_MODES 且非 hybrid）
+            source_pattern: source LIKE 过滤模式（透传给单通道检索）
 
         Returns:
             单通道检索结果列表；通道失败降级返回空列表
@@ -153,7 +155,7 @@ class HybridRetriever:
         """
         if mode == "fts_only":
             return await self._retrieve_single_channel(
-                query, None, top_k, session, channel="fts"
+                query, None, top_k, session, channel="fts", source_pattern=source_pattern,
             )
         if mode == "vector_only":
             # 向量通道必须先向量化（embedding API 不可用时抛 RetrievalException）
@@ -162,7 +164,8 @@ class HybridRetriever:
             except Exception as e:
                 raise RetrievalException("查询向量化失败", cause=e)
             return await self._retrieve_single_channel(
-                query, query_embedding, top_k, session, channel="vector"
+                query, query_embedding, top_k, session, channel="vector",
+                source_pattern=source_pattern,
             )
         return await self._retrieve_graph_only(query, top_k)
 
@@ -173,6 +176,7 @@ class HybridRetriever:
         top_k: int,
         session: Optional[AsyncSession],
         channel: str,
+        source_pattern: Optional[str] = None,
     ) -> list[dict]:
         """单通道检索（vector_only / fts_only）
 
@@ -186,6 +190,7 @@ class HybridRetriever:
             top_k: 返回结果数量
             session: 数据库会话（可选）
             channel: "fts" 或 "vector"
+            source_pattern: source LIKE 过滤模式（透传给单通道 SQL）
 
         Returns:
             检索结果列表；单通道失败时降级返回空列表（不影响其他通道）
@@ -195,8 +200,10 @@ class HybridRetriever:
         async def _run(sess: AsyncSession) -> list[dict]:
             try:
                 if channel == "vector":
-                    return await self._vector_search(query_embedding, fetch_k, sess)
-                return await self._fts_search(query, fetch_k, sess)
+                    return await self._vector_search(
+                        query_embedding, fetch_k, sess, source_pattern,
+                    )
+                return await self._fts_search(query, fetch_k, sess, source_pattern)
             except Exception as e:
                 logger.warning("%s 检索失败，降级返回空: %s", channel, e)
                 return []
@@ -247,13 +254,14 @@ class HybridRetriever:
         fetch_k: int,
         top_k: int,
         session: AsyncSession,
+        source_pattern: Optional[str] = None,
     ) -> list[dict]:
         """执行检索主逻辑"""
         # Step 2: 并行执行 FTS 和向量检索
         # 用 asyncio.gather 同时查询两个通道，性能提升约 2x。
         # return_exceptions=True：一路失败不影响另一路。
-        fts_task = self._fts_search(query, fetch_k, session)
-        vector_task = self._vector_search(query_embedding, fetch_k, session)
+        fts_task = self._fts_search(query, fetch_k, session, source_pattern)
+        vector_task = self._vector_search(query_embedding, fetch_k, session, source_pattern)
 
         fts_results, vector_results = await asyncio.gather(
             fts_task, vector_task,
@@ -311,7 +319,10 @@ class HybridRetriever:
         results = sorted(merged.values(), key=lambda x: x["hybrid_score"], reverse=True)
         return results[:top_k]
 
-    async def _fts_search(self, query: str, fetch_k: int, session: AsyncSession) -> list[dict]:
+    async def _fts_search(
+        self, query: str, fetch_k: int, session: AsyncSession,
+        source_pattern: Optional[str] = None,
+    ) -> list[dict]:
         """PG 全文检索（BM25 风格，中文 jieba 预分词）
 
         使用 PostgreSQL 内建的全文搜索：
@@ -336,7 +347,7 @@ class HybridRetriever:
         if not tokenized_query:
             logger.debug("FTS 检索: query 分词后为空，返回空列表")
             return []
-        sql = text("""
+        sql = text(f"""
             SELECT
                 id, title, content, source, page_num, metadata, created_at, parent_id,
                 ts_rank(to_tsvector('simple', search_tokens),
@@ -345,10 +356,14 @@ class HybridRetriever:
             WHERE to_tsvector('simple', search_tokens) @@ plainto_tsquery('simple', :query)
               AND search_tokens IS NOT NULL
               AND parent_id IS NOT NULL
+              {self._source_condition(source_pattern)}
             ORDER BY score DESC
             LIMIT :limit
         """)
-        rows = await session.execute(sql, {"query": tokenized_query, "limit": fetch_k})
+        params: dict = {"query": tokenized_query, "limit": fetch_k}
+        if source_pattern is not None:
+            params["source_pattern"] = source_pattern
+        rows = await session.execute(sql, params)
         results = []
         for row in rows.mappings():
             d = dict(row)
@@ -357,7 +372,10 @@ class HybridRetriever:
         logger.debug("FTS 检索: query=%s, results=%d", query, len(results))
         return results
 
-    async def _vector_search(self, query_embedding: list[float], fetch_k: int, session: AsyncSession) -> list[dict]:
+    async def _vector_search(
+        self, query_embedding: list[float], fetch_k: int, session: AsyncSession,
+        source_pattern: Optional[str] = None,
+    ) -> list[dict]:
         """pgvector 向量检索（余弦相似度）
 
         使用 pgvector 扩展的 <=> 操作符计算余弦距离：
@@ -372,17 +390,21 @@ class HybridRetriever:
         注意：embedding IS NOT NULL 条件过滤掉未向量化的文档。
         """
         embedding_str = f"[{','.join(str(v) for v in query_embedding)}]"
-        sql = text("""
+        sql = text(f"""
             SELECT
                 id, title, content, source, page_num, metadata, created_at, parent_id,
                 1 - (embedding <=> :query_embedding) AS score
             FROM documents
             WHERE embedding IS NOT NULL
               AND parent_id IS NOT NULL
+              {self._source_condition(source_pattern)}
             ORDER BY embedding <=> :query_embedding ASC
             LIMIT :limit
         """)
-        rows = await session.execute(sql, {"query_embedding": embedding_str, "limit": fetch_k})
+        params: dict = {"query_embedding": embedding_str, "limit": fetch_k}
+        if source_pattern is not None:
+            params["source_pattern"] = source_pattern
+        rows = await session.execute(sql, params)
         results = []
         for row in rows.mappings():
             d = dict(row)
@@ -390,6 +412,25 @@ class HybridRetriever:
             results.append(d)
         logger.debug("向量检索: results=%d", len(results))
         return results
+
+    @staticmethod
+    def _source_condition(source_pattern: Optional[str]) -> str:
+        """构造 source 过滤 SQL 片段（module-023 记忆隔离）
+
+        - source_pattern 非空（记忆检索）：source LIKE :source_pattern，
+          只查该 IP 的记忆文档，避免知识库文档污染记忆结果
+        - source_pattern 为空（普通知识库检索）：排除 'memory:%' 前缀，
+          保证记忆文档不会出现在知识库检索结果中
+
+        Args:
+            source_pattern: source LIKE 模式（None 表示普通知识库检索）
+
+        Returns:
+            拼入 WHERE 的 SQL 片段
+        """
+        if source_pattern is not None:
+            return "AND source LIKE :source_pattern"
+        return "AND (source IS NULL OR source NOT LIKE 'memory:%')"
 
     @staticmethod
     def _normalize(results: list[dict], score_key: str) -> list[dict]:

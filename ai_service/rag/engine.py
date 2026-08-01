@@ -38,6 +38,7 @@ from agent.router import router_agent
 from agent.reflector import reflector
 from rag.graph_store import graph_store
 from rag.graph_extractor import graph_extractor
+from rag.memory import memory_service
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +131,7 @@ class RAGEngine:
             logger.error("检索失败: %s", e, exc_info=True)
             return SearchResponse(results=[], message="检索服务暂不可用")
 
-    async def chat(self, request: ChatRequest) -> ChatResponse:
+    async def chat(self, request: ChatRequest, client_ip: str = "unknown") -> ChatResponse:
         """RAG 问答：意图路由 → 检索+反思循环（最多 3 轮）→ 生成
 
         手写循环替代 LangGraph（更直观的流程控制）：
@@ -140,6 +141,14 @@ class RAGEngine:
            - 不充分则改写 query 继续
            - 充分或达到上限则结束
         3. 用收集到的所有文档生成答案 + 引用溯源
+
+        长期记忆（module-023）：意图识别后调用 memory.recall(query, client_ip)，
+        命中记忆以"历史记忆: ..."拼入生成 prompt；无记忆/召回失败时不注入，
+        行为与之前完全一致（零回归）。
+
+        Args:
+            request: 聊天请求
+            client_ip: 用户 IP 标识（用于按 IP 隔离检索长期记忆）
         """
         logger.info("RAG chat: query=%s, history=%d", request.query, len(request.history))
 
@@ -149,20 +158,26 @@ class RAGEngine:
             intent = intent_result.get("intent", "knowledge")
             intent_labels = {"knowledge": "知识库", "casual_chat": "闲聊", "realtime": "实时数据"}
 
+            # 实时数据路径：直接返回，不召回记忆（review #5，避免无谓的 5s 召回延迟）
+            if intent == "realtime":
+                return ChatResponse(answer="实时数据查询功能正在开发中，请稍后再试。",
+                    sources=[], message="realtime_not_implemented")
+
+            # ========== 1.5 长期记忆召回（module-023；闲聊/知识库路径，失败降级为空） ==========
+            memory_text = await self._recall_memory(request.query, client_ip)
+
             # 闲聊路径
             if intent == "casual_chat":
                 client = LLMFactory.get_client()
+                system_prompt = "你是张三个人网站的 AI 助手，友好地回答用户的问题。"
+                if memory_text:
+                    system_prompt += f"\n\n{memory_text}"
                 answer = await client.chat([
-                    {"role": "system", "content": "你是张三个人网站的 AI 助手，友好地回答用户的问题。"},
+                    {"role": "system", "content": system_prompt},
                     *request.history,
                     {"role": "user", "content": request.query},
                 ])
                 return ChatResponse(answer=answer, sources=[], message="casual_chat")
-
-            # 实时数据路径
-            if intent == "realtime":
-                return ChatResponse(answer="实时数据查询功能正在开发中，请稍后再试。",
-                    sources=[], message="realtime_not_implemented")
 
             # ========== 2. 检索+反思循环（最多 3 轮） ==========
             current_query = request.query
@@ -202,14 +217,15 @@ class RAGEngine:
             # ========== 3. 降级：无结果时直接 LLM ==========
             if not docs:
                 client = LLMFactory.get_client()
-                answer = await client.generate(
-                    f"用户问：{request.query}\n\n知识库暂无相关信息，请如实告知用户。"
-                )
+                prompt = f"用户问：{request.query}\n\n知识库暂无相关信息，请如实告知用户。"
+                if memory_text:
+                    prompt = f"{memory_text}\n\n{prompt}"
+                answer = await client.generate(prompt)
                 return ChatResponse(answer=answer, sources=[], message="ok")
 
             # ========== 4. 生成答案 + 引用溯源 ==========
             answer = await reflector.generate_answer(
-                request.query, docs, history=request.history,
+                request.query, docs, history=request.history, memory=memory_text,
             )
 
             sources = []
@@ -231,6 +247,35 @@ class RAGEngine:
                 sources=[],
                 message="internal_error" if not settings.debug else f"error: {e}",
             )
+
+    async def _recall_memory(self, query: str, client_ip: str, top_k: int = 3) -> str:
+        """召回相关长期记忆并格式化为生成 prompt 片段
+
+        module-023：chat 生成前调用 memory_service.recall(query, ip)。
+        失败/超时/无记忆时返回空串，生成 prompt 不包含记忆段，
+        与无记忆时行为完全一致（零回归）。
+
+        Args:
+            query: 用户当前问题
+            client_ip: 用户 IP 标识（用于按 IP 隔离检索记忆）
+            top_k: 最多召回记忆条数
+
+        Returns:
+            "历史记忆:\n- ..." 格式字符串；无记忆/失败返回 ""
+        """
+        if not client_ip:
+            return ""
+        try:
+            memories = await asyncio.wait_for(
+                memory_service.recall(query, client_ip, top_k=top_k),
+                timeout=5,
+            )
+        except Exception as e:
+            logger.warning("长期记忆召回失败，跳过注入: %s", e)
+            return ""
+        if not memories:
+            return ""
+        return "历史记忆:\n" + "\n".join(f"- {m['content']}" for m in memories)
 
     async def _hyde_expand(self, query: str) -> str:
         """使用 LLM 生成假设性回答作为检索查询

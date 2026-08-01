@@ -61,7 +61,10 @@ _CHECK_PROMPT = """你是一个严格的答案质量检查员，倾向于使用�
 
 # 生成 prompt：基于检索文档生成回答
 # 要求 LLM 用 [1][2] 格式标注引用来源，这是 RAG 答案"可溯源"的关键。
-# history_section 是可选的，由 generate_answer 方法根据传入的 history 参数填充。
+# sections（= 历史对话段 + 记忆段）是可选的，由 generate_answer 方法根据
+# 传入的 history / memory 参数填充；两者均为空时 sections 为空串，
+# 模板保留 {sections} 后的换行（对齐旧版 {history_section}\n 结构），
+# 故空 sections 时 prompt 与旧版逐字节一致（零回归，review #2 实测验证）。
 _GENERATE_PROMPT = """你是一个知识库问答助手。基于检索到的文档回答用户问题。
 
 要求：
@@ -69,7 +72,7 @@ _GENERATE_PROMPT = """你是一个知识库问答助手。基于检索到的文�
 2. 如果文档信息不足以回答问题，如实告知
 3. 回答后附带引用文档列表
 
-{history_section}
+{sections}
 用户问题: {query}
 
 检索到的文档:
@@ -139,6 +142,7 @@ class Reflector:
         query: str,
         documents: list[dict],
         history: Optional[list[dict]] = None,
+        memory: str = "",
     ) -> str:
         """基于文档生成带引用的回答
 
@@ -146,10 +150,14 @@ class Reflector:
         例如用户先问"G1 GC的核心创新是什么"，再问"它和CMS有什么区别"，
         第二问的 prompt 中会包含第一问的对话记录，LLM 能理解"它"的指代。
 
+        memory（module-023）：跨会话长期记忆片段，命中时以"历史记忆: ..."
+        拼入生成 prompt；为空时不生成记忆段，行为与之前完全一致（零回归）。
+
         Args:
             query: 用户当前问题
             documents: 检索到的文档列表
             history: 历史对话列表，每项 {"role": str, "content": str}
+            memory: 长期记忆文本片段（无记忆时为空字符串）
         """
         if not documents:
             return "抱歉，未检索到相关信息。"
@@ -172,10 +180,12 @@ class Reflector:
                 for i, d in enumerate(documents)
             )
             client = LLMFactory.get_client(self._provider)
+            # 合并历史段与记忆段：两者为空时 sections=""，prompt 与旧版逐字节一致
+            sections = history_section + (f"{memory}\n" if memory else "")
             prompt = _GENERATE_PROMPT.format(
                 query=query,
                 docs_detail=docs_detail,
-                history_section=history_section,
+                sections=sections,
             )
             response = await client.generate(prompt)
             return response
@@ -188,11 +198,13 @@ class Reflector:
         query: str,
         documents: list[dict],
         history: Optional[list[dict]] = None,
+        memory: str = "",
     ) -> AsyncGenerator[str, None]:
         """流式生成答案，逐 token 产出
 
         与 generate_answer 逻辑相同，但使用 astream 替代 ainvoke。
         前置步骤（检索、反思）已完成，只流式传输 LLM 生成部分。
+        memory（module-023）默认空串，不改变流式路径原有行为（零回归）。
         """
         if not documents:
             yield "抱歉，未检索到相关信息。"
@@ -214,10 +226,12 @@ class Reflector:
             )
 
             client = LLMFactory.get_client(self._provider)
+            # 合并历史段与记忆段：两者为空时 sections=""，prompt 与旧版逐字节一致
+            sections = history_section + (f"{memory}\n" if memory else "")
             prompt = _GENERATE_PROMPT.format(
                 query=query,
                 docs_detail=docs_detail,
-                history_section=history_section,
+                sections=sections,
             )
             async for token in client.generate_stream(prompt):
                 yield token

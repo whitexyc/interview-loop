@@ -38,6 +38,7 @@
 | module-020 | 中文 FTS 复活（jieba 预分词） | 0.20.0-module-020 | 2026-08-01 | ✅ |
 | module-021 | 图分数归一化（graph_score 真实相关度） | 0.21.0-module-021 | 2026-08-01 | ✅ |
 | module-022 | 检索缓存修复（key 参数化 + 失效策略） | 0.22.0-module-022 | 2026-08-01 | ✅ |
+| module-023 | 长期记忆（跨会话记忆沉淀） | 0.23.0-module-023 | 2026-08-01 | ✅ |
 
 ## 4. 架构决策记录（ADR）索引
 | ADR 编号 | 决策标题 | 状态 | 日期 |
@@ -45,9 +46,9 @@
 | — | — | — | — |
 
 ## 5. 当前迭代状态
-- 当前迭代版本: v0.22.0
-- 正在进行的模块: 无（module-022 已完成，2026-08-01 Tester 验收通过）
-- 下一个待开发模块: 待定（候选：长期记忆 / 延迟优化）
+- 当前迭代版本: v0.23.0
+- 正在进行的模块: module-023（长期记忆 — 跨会话记忆沉淀）→ ✅ 已完成（2026-08-01 Tester 重新验收通过）。v4 修复阻塞项：`save` 改传 `date.today()`（date 对象，SQLAlchemy 绑定 DATE），`date(created_at) = $1::DATE` 正常执行，真实 `/ai/memory/save` 返回 `{code:0, data:{id, title:'记忆-<日期>-NN', status:'saved'}}`。验收：单测 29/29、真实 DB 冒烟 9/9（save→recall 命中→IP 隔离→1024 维→序号递增→清理）、HTTP 端点 9/9、全量回归 83 passed / 2 既有环境失败（test_engine async 缺 pytest-asyncio）、`/ai/documents` 排除记忆行、`rag/memory.py` 行覆盖 98.4%。验收标准 40/40 通过。详见 `specs/module-023-memory/test-report.md`
+- 下一个待开发模块: 待定（候选：延迟优化 / Agent 编排）
 
 ## 7. 关键技术决策记录
 - 所有 API 返回格式统一为 {code, msg, data, timestamp, request_id}（详见 CLAUDE.md 第5节）
