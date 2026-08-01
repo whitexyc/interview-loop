@@ -89,18 +89,8 @@ npm run dev
 | `PW_CLAUDE_API_KEY` | Claude API Key | — |
 | `VITE_EDIT_PASSWORD` | 文档上传密码 | `` |
 
-## 开发流程
 
-本项目采用 **Vibe Coding 4-Agent 闭环工作流**：
 
-```
-Planner → plan.md + acceptance-criteria.md
-  → Developer → 代码 + changelog.md
-    → Reviewer → review-report.md
-      → Tester → test-report.md
-```
-
-每个模块经过完整的闭环才交付。
 
 ## License
 
