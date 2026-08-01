@@ -103,14 +103,14 @@ class ClaudeClient(LLMClient):
     用于需要 Claude 推理能力的高质量生成场景。
     """
 
-    def __init__(self):
+    def __init__(self, temperature: float = 0.7):
         if not settings.claude_api_key:
             raise LLMException("claude", "CLAUDE_API_KEY 未配置")
         self._llm = ChatAnthropic(
             model=settings.claude_model,
             api_key=settings.claude_api_key,
-            temperature=0.7,  # 0.7 在创造性和确定性之间平衡
-            timeout=120,      # RAG 全链路多次 LLM 调用，设 120s 避免过早超时
+            temperature=temperature,  # 默认 0.7；反思等结构化任务可传低温度（module-026）
+            timeout=120,              # RAG 全链路多次 LLM 调用，设 120s 避免过早超时
         )
 
     async def generate(self, prompt: str) -> str:
@@ -152,14 +152,14 @@ class DeepSeekClient(LLMClient):
     这是项目的默认 LLM 供应商。
     """
 
-    def __init__(self):
+    def __init__(self, temperature: float = 0.7):
         if not settings.deepseek_api_key:
             raise LLMException("deepseek", "DEEPSEEK_API_KEY 未配置")
         self._llm = ChatOpenAI(
             model=settings.deepseek_model,
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
-            temperature=0.7,
+            temperature=temperature,  # 默认 0.7；反思等结构化任务可传低温度（module-026）
             timeout=120,   # RAG 全链路多次 LLM 调用，设 120s 避免过早超时
         )
 
@@ -198,7 +198,7 @@ class _ModelScopeBaseClient(LLMClient):
     只是 model 参数不同。这个基类通过构造函数参数区分。
     """
 
-    def __init__(self, model: str, label: str):
+    def __init__(self, model: str, label: str, temperature: float = 0.7):
         if not settings.modelscope_api_key:
             raise LLMException(label, "MODELSCOPE_API_KEY 未配置")
         self._label = label
@@ -207,7 +207,7 @@ class _ModelScopeBaseClient(LLMClient):
             model=model,
             api_key=settings.modelscope_api_key,
             base_url=settings.modelscope_base_url,
-            temperature=0.7,
+            temperature=temperature,  # 默认 0.7；反思等结构化任务可传低温度（module-026）
             timeout=120,
         )
 
@@ -242,22 +242,22 @@ class _ModelScopeBaseClient(LLMClient):
 class QwenClient(_ModelScopeBaseClient):
     """Qwen 客户端（ModelScope API，默认首选）"""
 
-    def __init__(self):
-        super().__init__(model=settings.qwen_model, label="qwen")
+    def __init__(self, temperature: float = 0.7):
+        super().__init__(model=settings.qwen_model, label="qwen", temperature=temperature)
 
 
 class ZhipuClient(_ModelScopeBaseClient):
     """ZhipuAI GLM 客户端（ModelScope API，Qwen 降级备用）"""
 
-    def __init__(self):
-        super().__init__(model=settings.zhipu_model, label="zhipu")
+    def __init__(self, temperature: float = 0.7):
+        super().__init__(model=settings.zhipu_model, label="zhipu", temperature=temperature)
 
 
 class ModelScopeClient(_ModelScopeBaseClient):
     """ModelScope 客户端（保留兼容旧配置）"""
 
-    def __init__(self):
-        super().__init__(model=settings.modelscope_model, label="modelscope")
+    def __init__(self, temperature: float = 0.7):
+        super().__init__(model=settings.modelscope_model, label="modelscope", temperature=temperature)
 
 
 class FallbackClient(LLMClient):
@@ -266,19 +266,22 @@ class FallbackClient(LLMClient):
     降级链: qwen → zhipu → deepseek（由 PW_FALLBACK_CHAIN 配置）
     当 Qwen 次数用完或不可用时，自动切换到 ZhipuAI GLM，
     两个都不可用时回退到 DeepSeek。
+
+    temperature 透传给链上各供应商（module-026：反思低温度贯穿降级链）。
     """
 
-    def __init__(self, chain: list[str]):
+    def __init__(self, chain: list[str], temperature: float = 0.7):
         if not chain:
             raise LLMException("fallback", "降级链为空")
         self._chain = chain
+        self._temperature = temperature
         logger.info("Fallback 降级链: %s", " → ".join(chain))
 
     async def generate(self, prompt: str) -> str:
         last_error = None
         for provider in self._chain:
             try:
-                client = LLMFactory.get_client(provider)
+                client = LLMFactory.get_client(provider, temperature=self._temperature)
                 return await client.generate(prompt)
             except Exception as e:
                 last_error = e
@@ -289,7 +292,7 @@ class FallbackClient(LLMClient):
         last_error = None
         for provider in self._chain:
             try:
-                client = LLMFactory.get_client(provider)
+                client = LLMFactory.get_client(provider, temperature=self._temperature)
                 return await client.chat(messages)
             except Exception as e:
                 last_error = e
@@ -300,7 +303,7 @@ class FallbackClient(LLMClient):
         last_error = None
         for provider in self._chain:
             try:
-                client = LLMFactory.get_client(provider)
+                client = LLMFactory.get_client(provider, temperature=self._temperature)
                 async for chunk in client.generate_stream(prompt):
                     yield chunk
                 return  # 成功，退出
@@ -325,35 +328,53 @@ class LLMFactory:
         client = LLMFactory.get_client("modelscope")  # 指定 ModelScope
     """
 
-    _instances: dict[str, LLMClient] = {}
+    _instances: dict[tuple[str, float], LLMClient] = {}
 
     @classmethod
-    def get_client(cls, provider: Optional[str] = None) -> LLMClient:
-        """获取 LLM 客户端实例
+    def get_client(cls, provider: Optional[str] = None,
+                   temperature: Optional[float] = None) -> LLMClient:
+        """获取 LLM 客户端实例（支持按温度创建）
 
         实例化后缓存，后续调用直接返回缓存的实例。
         如果调用方没有指定 provider，使用配置文件中的默认供应商。
+
+        temperature：覆盖默认温度。None 用默认 0.7（与历史行为一致）；
+        传 0.1 等低温度用于反思等结构化 JSON 任务（module-026）。
+        实例按 (provider, temperature) 缓存，不同温度各建独立实例，
+        不影响其他调用方使用的默认温度实例。
+
+        Args:
+            provider: 供应商（claude/deepseek/qwen/zhipu/modelscope/fallback）
+            temperature: 生成温度（None=默认 0.7）
+
+        Returns:
+            LLM 客户端实例
+
+        Raises:
+            ValueError: 不支持的供应商或 fallback 链为空
         """
         provider = provider or settings.llm_provider
-        if provider not in cls._instances:
+        temp = 0.7 if temperature is None else temperature
+        key = (provider, temp)
+        if key not in cls._instances:
             if provider == "claude":
-                cls._instances[provider] = ClaudeClient()
+                cls._instances[key] = ClaudeClient(temperature=temp)
             elif provider == "deepseek":
-                cls._instances[provider] = DeepSeekClient()
+                cls._instances[key] = DeepSeekClient(temperature=temp)
             elif provider == "modelscope":
-                cls._instances[provider] = ModelScopeClient()
+                cls._instances[key] = ModelScopeClient(temperature=temp)
             elif provider == "qwen":
-                cls._instances[provider] = QwenClient()
+                cls._instances[key] = QwenClient(temperature=temp)
             elif provider == "zhipu":
-                cls._instances[provider] = ZhipuClient()
+                cls._instances[key] = ZhipuClient(temperature=temp)
             elif provider == "fallback":
                 chain = [p.strip() for p in settings.fallback_chain.split(",") if p.strip()]
                 if not chain:
                     raise ValueError("PW_FALLBACK_CHAIN 为空，无法创建降级客户端")
-                cls._instances[provider] = FallbackClient(chain)
+                cls._instances[key] = FallbackClient(chain, temperature=temp)
             else:
                 raise ValueError(f"不支持的 LLM 供应商: {provider}")
-        return cls._instances[provider]
+        return cls._instances[key]
 
     @classmethod
     def clear_cache(cls):

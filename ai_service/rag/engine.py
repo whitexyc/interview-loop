@@ -38,6 +38,7 @@ from agent.router import router_agent
 from agent.reflector import reflector
 from rag.graph_store import graph_store
 from rag.graph_extractor import graph_extractor
+from rag.memory import memory_service
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,52 @@ _HYDE_PROMPT = """你是一个知识库助手。根据用户问题，写一段2-
 用户问题: {query}
 
 假设回答（2-3句话）:"""
+
+
+def _retrieve_cache_key(query: str, top_k: int, min_score: float) -> str:
+    """生成检索缓存键：query + top_k + min_score 共同决定
+
+    检索结果依赖 top_k/min_score，不同参数若复用同一 key 会返回
+    错误结果，故 hash 输入必须纳入这两个参数。前缀保持
+    "rag:retrieve:" 不变，供 cache.delete_by_prefix 前缀失效。
+    16 位十六进制 = 64 bits，碰撞概率足够低。
+
+    Args:
+        query: 用户查询
+        top_k: 每次检索的候选数
+        min_score: 低分过滤阈值
+
+    Returns:
+        形如 "rag:retrieve:<sha256 前 16 位>" 的缓存键
+    """
+    digest = hashlib.sha256((query + str(top_k) + str(min_score)).encode()).hexdigest()
+    return f"rag:retrieve:{digest[:16]}"
+
+
+# ── 检索延迟优化（module-024）配置常量 ──
+_RETRIEVE_BUDGET_SECONDS = 30.0  # 整链路检索总预算（秒），超预算用已收集 docs 提前结束
+_MIN_DOCS_SKIP_REFLECT = 3       # round 0 已收集文档数达到该值，跳过反思与后续轮次
+_HYDE_CACHE_TTL = 300            # HyDE 缓存 TTL（秒），与检索结果缓存一致
+
+
+def _hyde_cache_key(query: str) -> str:
+    """生成 HyDE 缓存键：仅由 query 决定，与检索结果缓存 key 独立
+
+    前缀 "rag:hyde:" 与检索缓存 "rag:retrieve:" 不同，互不污染；
+    HyDE 结果只依赖 query（与 top_k/min_score 无关），故 key 不含参数。
+
+    用 sha256 而非 Python 内置 hash()：内置 hash 受 PYTHONHASHSEED
+    影响跨进程不稳定，Redis 缓存跨进程共享时会永远 miss。
+    12 位十六进制 = 48 bits，碰撞概率足够低。
+
+    Args:
+        query: 用户查询
+
+    Returns:
+        形如 "rag:hyde:<sha256 前 12 位>" 的缓存键
+    """
+    digest = hashlib.sha256(query.encode("utf-8")).hexdigest()
+    return f"rag:hyde:{digest[:12]}"
 
 
 class RAGEngine:
@@ -110,7 +157,7 @@ class RAGEngine:
             logger.error("检索失败: %s", e, exc_info=True)
             return SearchResponse(results=[], message="检索服务暂不可用")
 
-    async def chat(self, request: ChatRequest) -> ChatResponse:
+    async def chat(self, request: ChatRequest, client_ip: str = "unknown") -> ChatResponse:
         """RAG 问答：意图路由 → 检索+反思循环（最多 3 轮）→ 生成
 
         手写循环替代 LangGraph（更直观的流程控制）：
@@ -120,6 +167,14 @@ class RAGEngine:
            - 不充分则改写 query 继续
            - 充分或达到上限则结束
         3. 用收集到的所有文档生成答案 + 引用溯源
+
+        长期记忆（module-023）：意图识别后调用 memory.recall(query, client_ip)，
+        命中记忆以"历史记忆: ..."拼入生成 prompt；无记忆/召回失败时不注入，
+        行为与之前完全一致（零回归）。
+
+        Args:
+            request: 聊天请求
+            client_ip: 用户 IP 标识（用于按 IP 隔离检索长期记忆）
         """
         logger.info("RAG chat: query=%s, history=%d", request.query, len(request.history))
 
@@ -129,20 +184,26 @@ class RAGEngine:
             intent = intent_result.get("intent", "knowledge")
             intent_labels = {"knowledge": "知识库", "casual_chat": "闲聊", "realtime": "实时数据"}
 
+            # 实时数据路径：直接返回，不召回记忆（review #5，避免无谓的 5s 召回延迟）
+            if intent == "realtime":
+                return ChatResponse(answer="实时数据查询功能正在开发中，请稍后再试。",
+                    sources=[], message="realtime_not_implemented")
+
+            # ========== 1.5 长期记忆召回（module-023；闲聊/知识库路径，失败降级为空） ==========
+            memory_text = await self._recall_memory(request.query, client_ip)
+
             # 闲聊路径
             if intent == "casual_chat":
                 client = LLMFactory.get_client()
+                system_prompt = "你是张三个人网站的 AI 助手，友好地回答用户的问题。"
+                if memory_text:
+                    system_prompt += f"\n\n{memory_text}"
                 answer = await client.chat([
-                    {"role": "system", "content": "你是张三个人网站的 AI 助手，友好地回答用户的问题。"},
+                    {"role": "system", "content": system_prompt},
                     *request.history,
                     {"role": "user", "content": request.query},
                 ])
                 return ChatResponse(answer=answer, sources=[], message="casual_chat")
-
-            # 实时数据路径
-            if intent == "realtime":
-                return ChatResponse(answer="实时数据查询功能正在开发中，请稍后再试。",
-                    sources=[], message="realtime_not_implemented")
 
             # ========== 2. 检索+反思循环（最多 3 轮） ==========
             current_query = request.query
@@ -182,14 +243,15 @@ class RAGEngine:
             # ========== 3. 降级：无结果时直接 LLM ==========
             if not docs:
                 client = LLMFactory.get_client()
-                answer = await client.generate(
-                    f"用户问：{request.query}\n\n知识库暂无相关信息，请如实告知用户。"
-                )
+                prompt = f"用户问：{request.query}\n\n知识库暂无相关信息，请如实告知用户。"
+                if memory_text:
+                    prompt = f"{memory_text}\n\n{prompt}"
+                answer = await client.generate(prompt)
                 return ChatResponse(answer=answer, sources=[], message="ok")
 
             # ========== 4. 生成答案 + 引用溯源 ==========
             answer = await reflector.generate_answer(
-                request.query, docs, history=request.history,
+                request.query, docs, history=request.history, memory=memory_text,
             )
 
             sources = []
@@ -212,13 +274,48 @@ class RAGEngine:
                 message="internal_error" if not settings.debug else f"error: {e}",
             )
 
+    async def _recall_memory(self, query: str, client_ip: str, top_k: int = 3) -> str:
+        """召回相关长期记忆并格式化为生成 prompt 片段
+
+        module-023：chat 生成前调用 memory_service.recall(query, ip)。
+        失败/超时/无记忆时返回空串，生成 prompt 不包含记忆段，
+        与无记忆时行为完全一致（零回归）。
+
+        Args:
+            query: 用户当前问题
+            client_ip: 用户 IP 标识（用于按 IP 隔离检索记忆）
+            top_k: 最多召回记忆条数
+
+        Returns:
+            "历史记忆:\n- ..." 格式字符串；无记忆/失败返回 ""
+        """
+        if not client_ip:
+            return ""
+        try:
+            memories = await asyncio.wait_for(
+                memory_service.recall(query, client_ip, top_k=top_k),
+                timeout=5,
+            )
+        except Exception as e:
+            logger.warning("长期记忆召回失败，跳过注入: %s", e)
+            return ""
+        if not memories:
+            return ""
+        return "历史记忆:\n" + "\n".join(f"- {m['content']}" for m in memories)
+
     async def _hyde_expand(self, query: str) -> str:
-        """使用 LLM 生成假设性回答作为检索查询
+        """使用 LLM 生成假设性回答作为检索查询（module-024 起带 Redis 缓存）
 
         HyDE (Hypothetical Document Embeddings) 策略：
         用户查询通常简短，而知识库文档是长文本段落。
         让 LLM 先生成一段假设回答，模仿文档的语言风格和篇幅，
         用这个假设回答的向量去检索，能显著提升召回率。
+
+        module-024 缓存：
+        1. 先查 HyDE 缓存（key=rag:hyde:<sha256(query)[:12]>），命中直接复用
+        2. 未命中 → LLM 生成 → 写入缓存（TTL 300s）
+        3. 失败/超时 → 降级返回原始 query（原有行为不变）
+        Redis 不可用时 cache.get/set 内部降级返回 None/False，不阻塞主链路。
 
         Args:
             query: 用户原始查询
@@ -226,6 +323,14 @@ class RAGEngine:
         Returns:
             假设性回答文本；失败或超时时降级返回原始 query
         """
+        hyde_key = _hyde_cache_key(query)
+
+        # 缓存命中直接返回，避免同一 query 重复调用 LLM
+        cached = await cache.get(hyde_key)
+        if cached is not None:
+            logger.info("HyDE 缓存命中: key=%s, query=%s", hyde_key, query[:50])
+            return cached
+
         prompt = _HYDE_PROMPT.format(query=query)
         try:
             client = LLMFactory.get_client()
@@ -234,7 +339,11 @@ class RAGEngine:
                 timeout=10,
             )
             logger.info("HyDE 扩展完成: query=%s, hyde_len=%d", query[:50], len(answer))
-            return answer or query
+            answer = answer or query
+            # 仅在真实生成（非降级值）时写入缓存，避免缓存退化结果
+            if answer != query:
+                await cache.set(hyde_key, answer, ttl=_HYDE_CACHE_TTL)
+            return answer
         except asyncio.TimeoutError:
             logger.warning("HyDE 扩展超时 (10s)，降级使用原始 query: %s", query[:50])
             return query
@@ -252,6 +361,13 @@ class RAGEngine:
         4. 每次结果合并后去重（按 doc id）
         5. 最后过滤 min_score 以下的低分结果
 
+        module-024 延迟优化：
+        - round 0 向量/图检索用 gather(return_exceptions=True)，单路失败降级
+          为另一路（两路都失败返回空，不整链路崩溃）
+        - HyDE 扩展带 Redis 缓存（_hyde_expand 内实现），重复 query 不重复调 LLM
+        - 整链路预算 _RETRIEVE_BUDGET_SECONDS：每轮循环检查，超预算用已收集 docs 提前结束
+        - round 0 已收集 ≥_MIN_DOCS_SKIP_REFLECT 篇文档时跳过反思与后续轮次（提前终止强化）
+
         参数:
             query: 初始查询
             top_k: 每次检索的候选数
@@ -259,12 +375,27 @@ class RAGEngine:
         """
         from agent.reflector import reflector
 
+        # ── 空 query 防护（module-022 遗留，module-027 收敛） ──
+        # 在缓存检查之前提前返回：空 query 不生成缓存 key、不调 HyDE/
+        # 检索/反思（空串的 sha256 key 无意义且纯浪费资源）。
+        if not query or not query.strip():
+            logger.warning("检索 query 为空，返回空结果")
+            return []
+
         # ── Redis 缓存检查 ──
-        cache_key = f"rag:retrieve:{hashlib.sha256(query.encode()).hexdigest()[:12]}"
+        # key 纳入 top_k/min_score：不同参数生成不同 key，避免错误复用缓存
+        cache_key = _retrieve_cache_key(query, top_k, min_score)
         cached = await cache.get(cache_key)
         if cached is not None:
             logger.info("检索缓存命中: key=%s, docs=%d", cache_key, len(cached))
             return cached
+
+        # ── 整链路预算（module-024） ──
+        # deadline 在 HyDE/循环前设定：HyDE 生成、实体提取、多轮检索全部
+        # 计入 30s 总预算。每轮循环开头检查，超预算即用已收集 docs 提前
+        # 结束（不再发起新一轮检索），保证最坏时延有上限。
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _RETRIEVE_BUDGET_SECONDS
 
         all_docs: list[dict] = []
         existing_ids: set[int] = set()
@@ -274,19 +405,38 @@ class RAGEngine:
         hyde_query = await self._hyde_expand(query)
 
         for round_num in range(3):  # 最多 3 轮
+            # 超预算检查：到点不再发起新一轮检索，用已收集 docs 进入生成
+            if loop.time() >= deadline:
+                logger.warning("检索超预算 (%.0fs)，使用已收集 %d 篇文档提前结束",
+                               _RETRIEVE_BUDGET_SECONDS, len(all_docs))
+                break
+
             search_text = hyde_query if round_num == 0 else current_query
 
             # Round 0: 并行向量检索 + 图搜索
             if round_num == 0:
+                # 实体提取失败时 graph_extractor 内部降级返回空列表
                 query_entities = await graph_extractor.extract_from_query(query)
                 vector_task = asyncio.wait_for(
                     hybrid_retriever.retrieve(search_text, top_k=top_k),
                     timeout=15,
                 )
-                graph_task = graph_store.search_related(query_entities, top_k=top_k)
-                vector_docs, graph_docs = await asyncio.gather(
-                    vector_task, graph_task,
+                graph_task = asyncio.wait_for(
+                    graph_store.search_related(query_entities, top_k=top_k),
+                    timeout=15,
                 )
+                vector_docs, graph_docs = await asyncio.gather(
+                    vector_task, graph_task, return_exceptions=True,
+                )
+                # 单路失败降级为另一路（与混合检索降级哲学一致）：
+                # 向量超时/失败 → 仅图结果；图超时/失败 → 仅向量结果；
+                # 两路都失败 → 空列表，不整链路崩溃
+                if isinstance(vector_docs, Exception):
+                    logger.warning("round 0 向量检索失败，降级为仅图结果: %s", vector_docs)
+                    vector_docs = []
+                if isinstance(graph_docs, Exception):
+                    logger.warning("round 0 图检索失败，降级为仅向量结果: %s", graph_docs)
+                    graph_docs = []
                 # 合并：向量结果优先，图结果追加去重
                 docs = list(vector_docs) if vector_docs else []
                 for gd in (graph_docs or []):
@@ -311,6 +461,12 @@ class RAGEngine:
                 if doc_id and doc_id not in existing_ids:
                     all_docs.append(d)
                     existing_ids.add(doc_id)
+
+            # 提前终止强化（module-024）：round 0 已收集 ≥3 篇文档即跳过
+            # 反思与后续轮次。阈值保守，减少一次 LLM 反思调用且不过度牺牲召回。
+            if round_num == 0 and len(all_docs) >= _MIN_DOCS_SKIP_REFLECT:
+                logger.info("round 0 已收集 %d 篇文档，跳过反思与后续轮次", len(all_docs))
+                break
 
             # 前两轮尝试反思改写，最后一轮直接结束
             if round_num < 2:
@@ -533,6 +689,10 @@ class RAGEngine:
 
                 logger.info("文档入库成功: title=%s, parents=%d, children=%d",
                             title, len(parent_objs), len(children))
+
+                # ── 检索缓存失效：文档变更影响所有查询的候选集，全量清空 ──
+                # 缓存是优化层，失效失败降级（delete_by_prefix 内部 catch，返回 False）
+                await cache.delete_by_prefix("rag:retrieve:")
 
                 # ── 知识图谱实体提取（异步，失败不影响入库） ──
                 try:

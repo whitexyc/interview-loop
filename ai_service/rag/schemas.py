@@ -43,3 +43,15 @@ class ChatResponse(BaseModel):
     sources: list[dict] = []
     message: str = ""
     steps: Optional[ChatSteps] = None
+
+
+class MemorySaveRequest(BaseModel):
+    """保存长期记忆请求体（module-023）"""
+    content: str
+    ip: str = "unknown"
+
+
+class MemoryRecallRequest(BaseModel):
+    """检索长期记忆请求体（module-023）"""
+    query: str
+    ip: str = "unknown"

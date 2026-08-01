@@ -16,9 +16,14 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from src.config import settings
 from src.database import init_db, async_session_factory
 from src.ratelimit import check_rate_limit, get_client_ip
+from src.cache import cache
 from rag.engine import rag_engine
-from rag.schemas import SearchRequest, SearchResponse, ChatRequest, ChatResponse
+from rag.schemas import (
+    SearchRequest, SearchResponse, ChatRequest, ChatResponse,
+    MemorySaveRequest, MemoryRecallRequest,
+)
 from rag.models import Document
+from rag.memory import memory_service
 from llm.client import LLMFactory
 
 
@@ -188,21 +193,29 @@ async def search(request: SearchRequest):
 
 @app.post("/ai/rag/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, fastapi_req: Request):
-    """RAG 知识库问答（自动保存会话到 IP 缓存）"""
-    result = await rag_engine.chat(request)
+    """RAG 知识库问答（自动保存会话到 IP 缓存）
+
+    将客户端 IP 传给 rag_engine.chat，用于按 IP 隔离检索长期记忆
+    （module-023；无记忆时零回归）。
+    """
+    client_ip = getattr(fastapi_req.state, "client_ip", "unknown")
+    result = await rag_engine.chat(request, client_ip=client_ip)
     # 保存消息到 IP 会话缓存（仅知识库路径保存）
     if result.message not in ("casual_chat", "realtime_not_implemented") and result.answer:
-        client_ip = getattr(fastapi_req.state, "client_ip", "unknown")
         save_messages_to_session(client_ip, request.query, result.answer, result.sources)
     return result
 
 
 @app.post("/ai/rag/chat/stream")
-async def chat_stream(request: ChatRequest):
+async def chat_stream(request: ChatRequest, fastapi_req: Request):
     """RAG 知识库问答（流式输出）
 
     先完成前置步骤（意图→检索→Rerank→反思），每步结果通过 SSE step 事件推送，
     LLM 生成部分通过 token 事件逐字输出。
+
+    长期记忆（module-025）：流式路径在 Step 5 生成前调用
+    rag_engine._recall_memory 召回跨会话记忆（5s 超时 + 失败降级返回空串），
+    无记忆时 memory 为空串，行为与之前完全一致（零回归）。
 
     SSE 事件：
       event: step   data: {"step":str, "data":dict, "timing_ms":int}
@@ -210,6 +223,9 @@ async def chat_stream(request: ChatRequest):
       event: done   data: {"sources":[...]}
       event: error  data: {"message":str}
     """
+    # client_ip 由限流中间件注入 request.state（module-023 透传），取不到默认 'unknown'
+    client_ip = getattr(fastapi_req.state, "client_ip", "unknown")
+
     async def event_stream():
         import time
         _t = time.monotonic
@@ -300,7 +316,10 @@ async def chat_stream(request: ChatRequest):
             yield f"event: step\ndata: {step_data}\n\n"
 
             # ====== Step 5: 流式生成 ======
-            async for token in reflector.generate_answer_stream(request.query, docs, history=request.history):
+            # module-025: 流式路径接入长期记忆（复用 engine._recall_memory，
+            # 5s 超时 + 失败降级返回空串；无记忆时 memory 为空串，零回归）
+            memory = await rag_engine._recall_memory(request.query, client_ip)
+            async for token in reflector.generate_answer_stream(request.query, docs, history=request.history, memory=memory):
                 yield f"event: token\ndata: {json.dumps(token)}\n\n"
 
             # ====== Step 6: 引用溯源 ======
@@ -324,6 +343,37 @@ async def chat_stream(request: ChatRequest):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
+
+
+# ─── 长期记忆 API（module-023；复用 documents 表，source='memory:<ip>:' 区分） ───
+
+
+@app.post("/ai/memory/save")
+async def memory_save(request: MemorySaveRequest):
+    """保存长期记忆（按 IP 隔离写入 documents，source='memory:<ip>:'）
+
+    分块 → 本地 bge-m3 向量化 → 写 documents（父块 + 子块）。
+    content 为空返回错误；embedding 不可用返回错误码（不崩）。
+    """
+    try:
+        result = await memory_service.save(request.content, request.ip)
+        return {"code": 0, "data": result}
+    except ValueError as e:
+        return {"code": 1, "message": str(e)}
+    except Exception as e:
+        logger.error("记忆保存失败: %s", e, exc_info=True)
+        return {"code": 2, "message": "记忆保存失败"}
+
+
+@app.post("/ai/memory/recall")
+async def memory_recall(request: MemoryRecallRequest):
+    """检索与 query 相关的长期记忆（按 IP 隔离，source 过滤）"""
+    try:
+        memories = await memory_service.recall(request.query, request.ip)
+        return {"code": 0, "data": {"memories": memories}}
+    except Exception as e:
+        logger.error("记忆检索失败: %s", e, exc_info=True)
+        return {"code": 1, "data": {"memories": []}, "message": "记忆检索失败"}
 
 
 @app.post("/ai/rag/documents")
@@ -398,16 +448,19 @@ async def upload_document(
 @app.get("/ai/documents")
 async def list_documents(page: int = 1, page_size: int = 20):
     """查看知识库文档列表（分页，按原始标题聚类去重）"""
-    from sqlalchemy import func, select
+    from sqlalchemy import func, or_, select
 
     async with async_session_factory() as session:
-        # 按原始标题分组取最旧 id 作为代表
+        # 按原始标题分组取最旧 id 作为代表；
+        # 排除记忆文档（source='memory:%'，module-023 复用 documents 表），
+        # 避免记忆行污染知识库管理面板（review #7）
         subq = (
             select(
                 Document.title,
                 func.min(Document.id).label("min_id"),
                 func.count(Document.id).label("chunk_count"),
             )
+            .where(or_(Document.source.is_(None), Document.source.not_like("memory:%")))
             .group_by(Document.title)
             .subquery()
         )
@@ -455,6 +508,10 @@ async def delete_document(doc_id: int):
         for d in to_delete:
             await session.delete(d)
         await session.commit()
+
+    # 检索缓存失效：删除文档后结果可能变化，全量清空
+    # 缓存是优化层，失效失败降级（delete_by_prefix 内部 catch，返回 False）
+    await cache.delete_by_prefix("rag:retrieve:")
 
     logger.info("删除文档: id=%d, title=%s, chunks=%d", doc_id, title, len(to_delete))
     return {"code": 0, "message": f"已删除 {len(to_delete)} 条记录"}
