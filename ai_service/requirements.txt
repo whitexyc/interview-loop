@@ -24,3 +24,5 @@ redis>=5.0.0
 # 注意: Windows 需从 GitHub release 装预编译 wheel:
 #   llama_cpp_python-0.3.34-py3-none-win_amd64.whl (v0.3.34 CPU版)
 llama-cpp-python==0.3.34
+jieba==0.42.1
+

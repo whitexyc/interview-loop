@@ -30,6 +30,7 @@ from src.cache import cache
 from rag.schemas import SearchRequest, SearchResponse, ChatRequest, ChatResponse, ChatSteps
 from rag.models import Document
 from rag.embeddings import embedding_service
+from rag.text_tokenizer import tokenize
 from rag.retriever import hybrid_retriever
 from rag.reranker import reranker
 from rag.chunker import chunker
@@ -523,6 +524,7 @@ class RAGEngine:
                         embedding=emb,
                         parent_id=parent.id,
                         content_hash=hashlib.sha256(child["content"].encode("utf-8")).hexdigest(),
+                        search_tokens=tokenize(child["content"]),
                     )
                     session.add(doc)
 

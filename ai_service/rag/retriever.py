@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.config import settings
 from src.database import async_session_factory
 from rag.embeddings import EmbeddingService, embedding_service as default_embedding_service
+from rag.text_tokenizer import tokenize
 
 logger = logging.getLogger(__name__)
 
@@ -311,31 +312,43 @@ class HybridRetriever:
         return results[:top_k]
 
     async def _fts_search(self, query: str, fetch_k: int, session: AsyncSession) -> list[dict]:
-        """PG 全文检索（BM25 风格）
+        """PG 全文检索（BM25 风格，中文 jieba 预分词）
 
         使用 PostgreSQL 内建的全文搜索：
-        - to_tsvector('simple', content): 把文档内容拆成 lexeme（词元）
-        - plainto_tsquery('simple', query): 把用户查询转成 tsquery
+        - to_tsvector('simple', search_tokens): 把入库时 jieba 分词后的
+          空格连接文本拆成 lexeme（中文词元，module-020）
+        - plainto_tsquery('simple', query): 把分词后的用户查询转成 tsquery
         - @@ 操作符: 匹配词元
         - ts_rank: 计算 TF/IDF 风格的匹配分数
 
-        为什么用 'simple' 配置？
-        因为文档内容是中文 + 英文混合（技术笔记），'simple' 不做词干化，
-        直接按空格和标点分词。对于中文文档，每个汉字被视为独立 lexeme，
-        这并不理想，但 vector 检索弥补了中文语义匹配。
-        如果后续需要更好的中文 FTS，可以切换到 zhparser 扩展。
+        Module-020 复活中文 FTS 的关键：
+          旧逻辑查 content 列，'simple' 配置对连续中文文本按整个字符串作为
+          单个 lexeme（如 'Java线程池核心参数'），多字查询必然空召回
+          （module-019 基线 Hit@5=0）。现在：
+          1. 入库侧已将子块内容 jieba 分词写入 search_tokens（空格连接）
+          2. 查询侧同样 jieba 分词（与入库侧一致），plainto_tsquery 对
+             空格分隔的词元逐词匹配
+          3. WHERE search_tokens IS NOT NULL 过滤未分词/分词失败文档
+             只查 search_tokens 不查 content，避免旧未分词文档干扰
         """
+        # 查询侧分词与入库侧一致（都用 jieba）；分词后为空（空串/纯标点）则无匹配
+        tokenized_query = tokenize(query)
+        if not tokenized_query:
+            logger.debug("FTS 检索: query 分词后为空，返回空列表")
+            return []
         sql = text("""
             SELECT
                 id, title, content, source, page_num, metadata, created_at, parent_id,
-                ts_rank(to_tsvector('simple', content), plainto_tsquery('simple', :query)) AS score
+                ts_rank(to_tsvector('simple', search_tokens),
+                        plainto_tsquery('simple', :query)) AS score
             FROM documents
-            WHERE to_tsvector('simple', content) @@ plainto_tsquery('simple', :query)
+            WHERE to_tsvector('simple', search_tokens) @@ plainto_tsquery('simple', :query)
+              AND search_tokens IS NOT NULL
               AND parent_id IS NOT NULL
             ORDER BY score DESC
             LIMIT :limit
         """)
-        rows = await session.execute(sql, {"query": query, "limit": fetch_k})
+        rows = await session.execute(sql, {"query": tokenized_query, "limit": fetch_k})
         results = []
         for row in rows.mappings():
             d = dict(row)

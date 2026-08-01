@@ -33,6 +33,8 @@ class Document(Base):
     parent_id = Column(Integer, ForeignKey("documents.id"),
                        nullable=True, index=True,
                        comment="父块 ID（NULL=父块/根块，非NULL=子块指向其父块）")
+    search_tokens = Column(Text, nullable=True,
+                           comment="jieba分词后的空格连接文本（中文FTS检索用，仅子块写入）")
     created_at = Column(
         DateTime(timezone=True), server_default=func.now(), comment="创建时间"
     )
