@@ -4,7 +4,7 @@
 - 项目名称: 张三个人网站
 - 项目简介: 融合简历展示与 Agentic RAG 知识库问答的个人网站系统（双语言微服务架构：Java Spring Boot + Python FastAPI + React 前端）
 - 创建时间: 2026-07-29
-- 最后更新: 2026-07-30
+- 最后更新: 2026-08-01
 
 ## 2. 技术栈
 > 详见 `tech-stack.md`，此处仅保留摘要。
@@ -35,6 +35,7 @@
 | module-017 | 父子分块检索 | 0.17.0-module-017 | 2026-07-31 | ✅ |
 | module-018 | Rerank 重排修复（切换 Qwen3-Reranker） | 0.18.0-module-018 | 2026-08-01 | ✅ |
 | module-019 | 评估闭环（Golden 检索集 + Hit@k/MRR + 消融） | 0.19.0-module-019 | 2026-08-01 | ✅ |
+| module-020 | 中文 FTS 复活（jieba 预分词） | 0.20.0-module-020 | 2026-08-01 | ✅ |
 
 ## 4. 架构决策记录（ADR）索引
 | ADR 编号 | 决策标题 | 状态 | 日期 |
@@ -42,9 +43,9 @@
 | — | — | — | — |
 
 ## 5. 当前迭代状态
-- 当前迭代版本: v0.19.0
-- 正在进行的模块: 无（module-019 已验收通过）
-- 下一个待开发模块: module-020（候选：中文FTS复活 / 缓存修复，以 module-019 评估为量化基线）
+- 当前迭代版本: v0.20.0
+- 正在进行的模块: 无（module-020 已完成 ✅，2026-08-01 Tester 验收通过）
+- 下一个待开发模块: 待定（候选：缓存修复 / 长期记忆）
 
 ## 7. 关键技术决策记录
 - 所有 API 返回格式统一为 {code, msg, data, timestamp, request_id}（详见 CLAUDE.md 第5节）
@@ -58,3 +59,5 @@
 - Qwen3-Reranker 调用约束（module-018）：生成式重排模型（Qwen3ForCausalLM），predict 需传 user 角色 chat 消息 `[{"role":"user","content":"<query>\n<doc>"}]` + `add_generation_prompt=True`，不可传 (query, doc) 裸 pair（本地 chat template 会渲染成空串崩溃）
 - 技术债务（module-018 验收记录）：① 测试环境缺 `pytest-asyncio`，`tests/test_engine.py` 2 个 async 用例无法在 pytest 下收集运行（既有问题，非 module-018 回归）；② 外部 embedding API（ModelScope）当前返回 502，端到端检索联调受阻（既有问题，含容错降级）
 - 检索基线（module-019 首次评估，2026-08-01）：FTS 通道中文查询 Hit@5=0（PG 'simple' 分词限制，既有问题，module-020 中文FTS修复的量化基线）；graph_only 通道 Hit@5=0.50 / Recall@5=0.4375 / MRR=0.2361；vector_only 因 embedding 502 无法评估；golden 集 30 题中 23 题有 gold 标注，7 题（简历类 5 + HTTP/2 + Docker）知识库无覆盖标注为空并跳过
+- 中文 FTS 方案（module-020，2026-08-01）：jieba 预分词 → documents.search_tokens 列（TEXT，空格连接）→ `to_tsvector('simple', search_tokens)`；查询侧同用 jieba（plainto_tsquery）；只对子块分词（检索只查子块，父块不写）；GIN 索引 `idx_documents_search_tokens`；旧文档用 `backfill_search_tokens.py` 回填（幂等，可重跑）。实施后 fts_only Hit@5 从 0.0 → 0.4348
+- 环境注意（module-020）：本机 pip 装 sdist 会因 uv 管理 Python 的 setuptools/_distutils_hack 兼容 bug 失败，需 `cmd /c "set SETUPTOOLS_USE_DISTUTILS=stdlib&& pip install <pkg>"`；Windows ProactorEventLoop 下同一 asyncpg 连接池不可跨 `asyncio.run()` 复用（脚本需单 loop 内完成迁移+回填）
