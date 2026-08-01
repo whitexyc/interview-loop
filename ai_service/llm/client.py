@@ -30,6 +30,7 @@ LLM 多供应商适配层 — RAG 链路的推理引擎
      重复创建销毁浪费资源。缓存复用同一个客户端实例。
 """
 
+import json
 import logging
 from abc import ABC, abstractmethod
 from typing import AsyncGenerator, Optional
@@ -80,6 +81,119 @@ class LLMClient(ABC):
     async def chat(self, messages: list[dict]) -> str:
         """多轮对话"""
         ...
+
+    async def chat_with_tools(self, messages: list[dict], tools: list[dict]) -> dict:
+        """多轮对话 + 工具调用（module-028 ReAct 循环用）
+
+        DeepSeek thinking 模式（如 deepseek-v4-flash）要求把上一轮 assistant 消息的
+        reasoning_content 原样回传，否则 400 报错（bind_tools 会丢弃该字段），
+        因此对 ChatOpenAI 系（deepseek/qwen/zhipu/modelscope）改走底层 OpenAI
+        兼容客户端（async_client.create），并返回原始 assistant 消息供循环追加；
+        Claude（ChatAnthropic）无此问题，走 bind_tools。
+
+        本方法在基类提供默认实现（依赖 self._llm），子类中仅有 FallbackClient
+        覆写（它没有 self._llm，需遍历降级链）；其余子类直接继承。
+
+        Args:
+            messages: 对话消息（OpenAI dict 格式）
+            tools: OpenAI function calling 格式的工具 schema 列表
+
+        Returns:
+            {"content": str, "tool_calls": [{"id", "name", "args"}, ...],
+             "message": dict}
+            message 为原始 assistant 消息 dict（含 reasoning_content / tool_calls），
+            供 ReAct 循环原样追加到消息历史、下一轮回传。
+            tool_calls 为空列表表示模型直接输出答案（不调用工具）
+
+        Raises:
+            LLMException: 工具调用失败（降级链内各供应商由调用方捕获切换）
+        """
+        if isinstance(self._llm, ChatOpenAI):
+            return await self._chat_with_tools_openai(messages, tools)
+        return await self._chat_with_tools_bind(messages, tools)
+
+    async def _chat_with_tools_openai(
+        self, messages: list[dict], tools: list[dict],
+    ) -> dict:
+        """ChatOpenAI 系（deepseek/qwen/zhipu）工具调用：底层客户端直连
+
+        保留 reasoning_content（thinking 模式回传要求）与原始 tool_calls
+        （arguments 字符串保持模型原样），返回 message 供循环回传。
+        """
+        try:
+            raw = await self._llm.async_client.create(
+                model=self._llm.model_name,
+                messages=messages,
+                tools=tools,
+                temperature=self._llm.temperature,
+            )
+        except Exception as e:
+            logger.error("LLM 工具调用失败: %s", e)
+            raise LLMException("llm", "工具调用服务暂不可用", cause=e)
+        if not raw.choices or not raw.choices[0].message:
+            raise LLMException("llm", "工具调用返回为空")
+
+        msg = raw.choices[0].message
+        content = msg.content or ""
+        assistant: dict = {"role": "assistant", "content": content}
+        reasoning = getattr(msg, "reasoning_content", None)
+        if reasoning:
+            assistant["reasoning_content"] = reasoning
+        tool_calls = []
+        if msg.tool_calls:
+            for tc in msg.tool_calls:
+                try:
+                    args = json.loads(tc.function.arguments or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    args = {}
+                tool_calls.append({"id": tc.id, "name": tc.function.name, "args": args})
+            assistant["tool_calls"] = [
+                {"id": tc.id, "type": "function",
+                 "function": {"name": tc.function.name,
+                              "arguments": tc.function.arguments or "{}"}}
+                for tc in msg.tool_calls
+            ]
+        return {"content": content, "tool_calls": tool_calls, "message": assistant}
+
+    async def _chat_with_tools_bind(
+        self, messages: list[dict], tools: list[dict],
+    ) -> dict:
+        """Claude 等非 ChatOpenAI 供应商工具调用：LangChain bind_tools"""
+        try:
+            llm = self._llm.bind_tools(tools)
+            response = await llm.ainvoke(messages)
+        except Exception as e:
+            logger.error("LLM 工具调用失败: %s", e)
+            raise LLMException("llm", "工具调用服务暂不可用", cause=e)
+
+        content = response.content or ""
+        if isinstance(content, list):  # Claude 多模态内容块，提取文本段
+            content = "".join(
+                c.get("text", "") for c in content if isinstance(c, dict)
+            )
+        tool_calls = []
+        assistant: dict = {"role": "assistant", "content": content}
+        if response.tool_calls:
+            for tc in response.tool_calls:
+                args = tc.get("args") or {}
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except (json.JSONDecodeError, TypeError):
+                        args = {}
+                tool_calls.append({
+                    "id": tc.get("id", ""),
+                    "name": tc.get("name", ""),
+                    "args": args,
+                })
+            assistant["tool_calls"] = [
+                {"id": tc.get("id", ""), "type": "function",
+                 "function": {"name": tc.get("name", ""),
+                              "arguments": json.dumps(tc.get("args") or {},
+                                                       ensure_ascii=False)}}
+                for tc in response.tool_calls
+            ]
+        return {"content": content, "tool_calls": tool_calls, "message": assistant}
 
     @abstractmethod
     async def generate_stream(self, prompt: str) -> AsyncGenerator[str, None]:
@@ -298,6 +412,21 @@ class FallbackClient(LLMClient):
                 last_error = e
                 logger.warning("降级链 %s chat 失败，尝试下一个: %s", provider, e)
         raise last_error or LLMException("fallback", "降级链所有供应商 chat 均失败")
+
+    async def chat_with_tools(self, messages: list[dict], tools: list[dict]) -> dict:
+        """多轮对话 + 工具调用（遍历降级链，module-028）
+
+        与 chat 同款降级语义：逐供应商尝试，成功即返回，全部失败抛 LLMException。
+        """
+        last_error = None
+        for provider in self._chain:
+            try:
+                client = LLMFactory.get_client(provider, temperature=self._temperature)
+                return await client.chat_with_tools(messages, tools)
+            except Exception as e:
+                last_error = e
+                logger.warning("降级链 %s 工具调用失败，尝试下一个: %s", provider, e)
+        raise last_error or LLMException("fallback", "降级链所有供应商工具调用均失败")
 
     async def generate_stream(self, prompt: str) -> AsyncGenerator[str, None]:
         last_error = None

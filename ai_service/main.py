@@ -345,6 +345,65 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
     )
 
 
+@app.post("/ai/rag/chat/agent")
+async def chat_agent(request: ChatRequest, fastapi_req: Request):
+    """Agent 工具化问答（ReAct 循环，SSE，module-028）
+
+    把固定流水线升级为 Agentic ReAct 循环：LLM 自主决定调用哪些工具、以什么
+    顺序，直到信息足够直接回答，或达到工具总调用次数预算（settings.max_agent_tools）。
+    与现有 /ai/rag/chat、/ai/rag/chat/stream 并存（A/B 对比）。
+
+    SSE 事件：
+      event: tool_call    data: {"name", "args", "tool_count"}
+      event: tool_result  data: {"name", "args", "result", "tool_count"}
+      event: token        data: "推理/回答文本片段"
+      event: done         data: {"answer", "sources", "tool_count", "budget"}
+      event: error        data: {"message"}
+    """
+    client_ip = getattr(fastapi_req.state, "client_ip", "unknown")
+
+    async def event_stream():
+        from agent.react import ReactContext, _build_messages, react_loop
+        try:
+            ctx = ReactContext(request.query, client_ip, request.history)
+            budget = settings.max_agent_tools
+            answer = ""
+            tool_count = 0
+            async for evt in react_loop(ctx, _build_messages(ctx), budget):
+                t = evt["type"]
+                if t == "tool_call":
+                    yield f"event: tool_call\ndata: {json.dumps({'name': evt['name'], 'args': evt['args'], 'tool_count': evt['tool_count']}, ensure_ascii=False)}\n\n"
+                elif t == "tool_result":
+                    yield f"event: tool_result\ndata: {json.dumps({'name': evt['name'], 'args': evt['args'], 'result': evt['result'][:500], 'tool_count': evt['tool_count']}, ensure_ascii=False)}\n\n"
+                elif t == "token":
+                    if evt["content"]:
+                        yield f"event: token\ndata: {json.dumps(evt['content'], ensure_ascii=False)}\n\n"
+                elif t == "done":
+                    answer = evt.get("answer", "")
+                    tool_count = evt.get("tool_count", 0)
+
+            # 引用溯源：基于循环累积的已检索文档
+            sources = []
+            for i, doc in enumerate(ctx.docs[:5]):
+                sources.append({
+                    "id": doc.get("id"),
+                    "title": doc.get("title", ""),
+                    "content": doc.get("content", "")[:300],
+                    "source": doc.get("source", ""),
+                    "ref_index": i + 1,
+                })
+            yield f"event: done\ndata: {json.dumps({'answer': answer, 'sources': sources, 'tool_count': tool_count, 'budget': budget}, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            logger.error("Agent 问答失败: %s", e, exc_info=True)
+            yield f"event: error\ndata: {json.dumps({'message': '服务暂时不可用'})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
+
+
 # ─── 长期记忆 API（module-023；复用 documents 表，source='memory:<ip>:' 区分） ───
 
 
