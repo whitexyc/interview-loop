@@ -493,6 +493,67 @@ async def chat_agent(request: ChatRequest, fastapi_req: Request):
     )
 
 
+@app.post("/ai/rag/chat/agent-lg")
+async def chat_agent_langgraph(request: ChatRequest, fastapi_req: Request):
+    """LangGraph 实验端点（SSE，module-030）
+
+    与 /ai/rag/chat/agent 并存：用 LangGraph StateGraph 编排 ReAct 循环
+    （见 agent/langgraph_react.py），行为与手写版对齐（预算/工具/上下文），
+    不动现有 react.py（零回归）。实验端点，非生产主路径。
+
+    SSE 事件（与 agent 一致）：
+      event: tool_call    data: {"name", "args", "tool_count"}
+      event: tool_result  data: {"name", "args", "result", "tool_count"}
+      event: token        data: "推理/回答文本片段"
+      event: done         data: {"answer", "sources", "tool_count", "budget"}
+      event: error        data: {"message"}
+    """
+    client_ip = getattr(fastapi_req.state, "client_ip", "unknown")
+
+    async def event_stream():
+        from agent.langgraph_react import (
+            ReactContext, _build_messages, langgraph_react_loop,
+        )
+        try:
+            ctx = ReactContext(request.query, client_ip, request.history)
+            budget = settings.max_agent_tools
+            answer = ""
+            tool_count = 0
+            async for evt in langgraph_react_loop(ctx, _build_messages(ctx), budget):
+                t = evt["type"]
+                if t == "tool_call":
+                    yield f"event: tool_call\ndata: {json.dumps({'name': evt['name'], 'args': evt['args'], 'tool_count': evt['tool_count']}, ensure_ascii=False)}\n\n"
+                elif t == "tool_result":
+                    yield f"event: tool_result\ndata: {json.dumps({'name': evt['name'], 'args': evt['args'], 'result': evt['result'][:500], 'tool_count': evt['tool_count']}, ensure_ascii=False)}\n\n"
+                elif t == "token":
+                    if evt["content"]:
+                        yield f"event: token\ndata: {json.dumps(evt['content'], ensure_ascii=False)}\n\n"
+                elif t == "done":
+                    answer = evt.get("answer", "")
+                    tool_count = evt.get("tool_count", 0)
+
+            # 引用溯源：基于循环累积的已检索文档（与 /ai/rag/chat/agent 一致）
+            sources = []
+            for i, doc in enumerate(ctx.docs[:5]):
+                sources.append({
+                    "id": doc.get("id"),
+                    "title": doc.get("title", ""),
+                    "content": doc.get("content", "")[:300],
+                    "source": doc.get("source", ""),
+                    "ref_index": i + 1,
+                })
+            yield f"event: done\ndata: {json.dumps({'answer': answer, 'sources': sources, 'tool_count': tool_count, 'budget': budget}, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            logger.error("LangGraph Agent 问答失败: %s", e, exc_info=True)
+            yield f"event: error\ndata: {json.dumps({'message': '服务暂时不可用'})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
+
+
 # ─── 长期记忆 API（module-023；复用 documents 表，source='memory:<ip>:' 区分） ───
 
 
