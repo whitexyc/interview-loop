@@ -143,6 +143,55 @@ class RedisCache:
             self._client = None      # 释放死连接，下次尝试重连
             return False
 
+    async def get_str(self, key: str) -> Optional[str]:
+        """读取字符串值（如降级链顺序，module-029）
+
+        与 get 的区别：不经过 JSON 反序列化，直接返回原始字符串
+        （decode_responses=True 已把 bytes 解码为 str）。
+
+        Args:
+            key: 缓存键（如 "llm:fallback_chain"）
+
+        Returns:
+            字符串值，或 None（键不存在 / Redis 不可用）
+        """
+        try:
+            client = await self._ensure_client()
+            if client is None or not self._connected:
+                return None
+            return await client.get(key)
+        except Exception as e:
+            logger.warning("Redis 读取失败: %s", e)
+            self._connected = False
+            self._client = None      # 释放死连接，下次尝试重连
+            return None
+
+    async def set_str(self, key: str, value: str, ttl: Optional[int] = None) -> bool:
+        """写入字符串值（如降级链顺序，module-029）
+
+        Args:
+            key: 缓存键
+            value: 待写入的字符串
+            ttl: 过期时间（秒）；None 表示持久（不设过期，跨重启保留）
+
+        Returns:
+            True 如果写入成功，False 如果 Redis 不可用/失败
+        """
+        try:
+            client = await self._ensure_client()
+            if client is None or not self._connected:
+                return False
+            if ttl is None:
+                await client.set(key, value)
+            else:
+                await client.setex(key, ttl, value)
+            return True
+        except Exception as e:
+            logger.warning("Redis 写入失败: %s", e)
+            self._connected = False
+            self._client = None      # 释放死连接，下次尝试重连
+            return False
+
     async def delete_by_prefix(self, prefix: str) -> bool:
         """按前缀失效缓存（SCAN 分批 + DEL，避免 KEYS 阻塞）
 

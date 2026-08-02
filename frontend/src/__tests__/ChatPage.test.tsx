@@ -7,6 +7,7 @@ vi.mock('../services/ragService', () => ({
   chatStream: vi.fn(),
   chat: vi.fn(),
   search: vi.fn(),
+  agentStream: vi.fn(),
 }));
 
 describe('ChatPage', () => {

@@ -24,13 +24,13 @@
  * - 会话切换时先保存当前会话再加载目标会话
  */
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Input, Button, Spin, Alert, Typography, Flex, Tag } from 'antd';
-import { SendOutlined, BulbOutlined, PlusOutlined } from '@ant-design/icons';
+import { Input, Button, Spin, Alert, Typography, Flex, Tag, Switch } from 'antd';
+import { SendOutlined, BulbOutlined, PlusOutlined, RobotOutlined } from '@ant-design/icons';
 import ChatMessage from '../components/ChatMessage';
 import PipelinePanel from '../components/PipelinePanel';
 import CitationModal from '../components/CitationModal';
-import { chatStream } from '../services/ragService';
-import type { SourceItem, PipelineSteps } from '../types/rag';
+import { chatStream, agentStream } from '../services/ragService';
+import type { SourceItem, PipelineSteps, ToolTrace, ToolCallEvent, ToolResultEvent, ChatResponse } from '../types/rag';
 import type { ConversationInfo, MessageDTO } from '../types/conversation';
 import {
   listConversations,
@@ -62,6 +62,10 @@ export default function ChatPage() {
   const [citationVisible, setCitationVisible] = useState(false);
   const [pipelineStep, setPipelineStep] = useState(0);
   const [pipelineSteps, setPipelineSteps] = useState<PipelineSteps | null>(null);
+
+  // ── Agent 模式状态（module-029：SSE 工具轨迹展示） ──
+  const [agentMode, setAgentMode] = useState(false);
+  const [toolTrace, setToolTrace] = useState<ToolTrace[]>([]);
 
   // ── 会话管理状态（M9） ──
   const [conversations, setConversations] = useState<ConversationInfo[]>([]);
@@ -159,6 +163,68 @@ export default function ChatPage() {
   }, [messages]);
 
   /**
+   * 执行一次流式发送（按 agentMode 分支到 agentStream / chatStream）
+   *
+   * Agent 模式（module-029）：走 /ai/rag/chat/agent，SSE 推工具轨迹事件，
+   * 更新 toolTrace 供 PipelinePanel 展示；非 Agent 模式走既有 chatStream，
+   * 行为与之前完全一致。
+   *
+   * @param query - 用户问题
+   * @param history - 对话历史
+   * @returns 最终 ChatResponse（含 answer + sources）
+   */
+  const executeSend = useCallback(async (
+    query: string,
+    history: { role: string; content: string }[],
+  ): Promise<ChatResponse> => {
+    setPipelineStep(agentMode ? 0 : 1);
+    setPipelineSteps(null);
+    setToolTrace([]);
+
+    const appendToken = (token: string) => {
+      setMessages((prev) => {
+        const updated = [...prev];
+        const lastIdx = updated.length - 1;
+        if (lastIdx >= 0 && updated[lastIdx].role === 'assistant') {
+          updated[lastIdx] = { ...updated[lastIdx], content: updated[lastIdx].content + token };
+        }
+        return updated;
+      });
+    };
+
+    if (agentMode) {
+      return agentStream(
+        query,
+        history,
+        (tool: ToolCallEvent) => {
+          setToolTrace((prev) => [...prev, { ...tool, status: 'running' }]);
+        },
+        (tool: ToolResultEvent) => {
+          // 用 tool_count 精确匹配当前调用（每次调用唯一），避免顺序竞态
+          setToolTrace((prev) => prev.map((t) =>
+            t.tool_count === tool.tool_count ? { ...t, result: tool.result, status: 'done' } : t,
+          ));
+        },
+        appendToken,
+      );
+    }
+
+    return chatStream(query, history, (step, stepData) => {
+      setPipelineSteps((prev) => {
+        const updated = { ...(prev || {}) } as PipelineSteps;
+        if (step === 'intent') updated.intent = stepData as PipelineSteps['intent'];
+        if (step === 'retrieval') updated.retrieval = stepData as PipelineSteps['retrieval'];
+        if (step === 'rerank') updated.rerank = stepData as PipelineSteps['rerank'];
+        if (step === 'reflection') updated.reflection = stepData as PipelineSteps['reflection'];
+        return updated;
+      });
+      const stepMap: Record<string, number> = { intent: 1, retrieval: 2, rerank: 3, reflection: 4 };
+      const idx = stepMap[step];
+      if (idx) setPipelineStep(idx);
+    }, appendToken);
+  }, [agentMode]);
+
+  /**
    * 统一发送逻辑（流式版）
    * 发送 → 流式展示 → 完成后自动持久化
    */
@@ -171,32 +237,9 @@ export default function ChatPage() {
     setMessages((prev) => [...prev, { role: 'user', content: text }, { role: 'assistant', content: '' }]);
     setLoading(true);
     setError(null);
-    setPipelineStep(1);
-    setPipelineSteps(null);
 
     try {
-      const data = await chatStream(text, history, (step, stepData) => {
-        setPipelineSteps((prev) => {
-          const updated = { ...(prev || {}) } as PipelineSteps;
-          if (step === 'intent') updated.intent = stepData as PipelineSteps['intent'];
-          if (step === 'retrieval') updated.retrieval = stepData as PipelineSteps['retrieval'];
-          if (step === 'rerank') updated.rerank = stepData as PipelineSteps['rerank'];
-          if (step === 'reflection') updated.reflection = stepData as PipelineSteps['reflection'];
-          return updated;
-        });
-        const stepMap: Record<string, number> = { intent: 1, retrieval: 2, rerank: 3, reflection: 4 };
-        const idx = stepMap[step];
-        if (idx) setPipelineStep(idx);
-      }, (token) => {
-        setMessages((prev) => {
-          const updated = [...prev];
-          const lastIdx = updated.length - 1;
-          if (lastIdx >= 0 && updated[lastIdx].role === 'assistant') {
-            updated[lastIdx] = { ...updated[lastIdx], content: updated[lastIdx].content + token };
-          }
-          return updated;
-        });
-      });
+      const data = await executeSend(text, history);
 
       setMessages((prev) => {
         const updated = [...prev];
@@ -206,15 +249,19 @@ export default function ChatPage() {
         }
         return updated;
       });
-      setPipelineStep(5);
-      setTimeout(() => setPipelineStep(6), 300);
+      if (agentMode) {
+        setPipelineStep(6);
+      } else {
+        setPipelineStep(5);
+        setTimeout(() => setPipelineStep(6), 300);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : '请求失败');
       setPipelineStep(6);
     } finally {
       setLoading(false);
     }
-  }, [loading, activeConversationId]);
+  }, [loading, activeConversationId, agentMode, executeSend]);
 
   /** 流完成后自动保存（fire-and-forget，跳过挂载加载后的首次触发） */
   useEffect(() => {
@@ -255,8 +302,6 @@ export default function ChatPage() {
 
     setLoading(true);
     setError(null);
-    setPipelineStep(1);
-    setPipelineSteps(null);
 
     setMessages((prev) => {
       const cleaned = [...prev];
@@ -270,28 +315,7 @@ export default function ChatPage() {
     });
 
     try {
-      const data = await chatStream(query, history, (step, stepData) => {
-        setPipelineSteps((prev) => {
-          const updated = { ...(prev || {}) } as PipelineSteps;
-          if (step === 'intent') updated.intent = stepData as PipelineSteps['intent'];
-          if (step === 'retrieval') updated.retrieval = stepData as PipelineSteps['retrieval'];
-          if (step === 'rerank') updated.rerank = stepData as PipelineSteps['rerank'];
-          if (step === 'reflection') updated.reflection = stepData as PipelineSteps['reflection'];
-          return updated;
-        });
-        const stepMap: Record<string, number> = { intent: 1, retrieval: 2, rerank: 3, reflection: 4 };
-        const idx = stepMap[step];
-        if (idx) setPipelineStep(idx);
-      }, (token) => {
-        setMessages((prev) => {
-          const updated = [...prev];
-          const lastIdx = updated.length - 1;
-          if (lastIdx >= 0 && updated[lastIdx].role === 'assistant') {
-            updated[lastIdx] = { ...updated[lastIdx], content: updated[lastIdx].content + token };
-          }
-          return updated;
-        });
-      });
+      const data = await executeSend(query, history);
 
       setMessages((prev) => {
         const updated = [...prev];
@@ -301,15 +325,19 @@ export default function ChatPage() {
         }
         return updated;
       });
-      setPipelineStep(5);
-      setTimeout(() => setPipelineStep(6), 300);
+      if (agentMode) {
+        setPipelineStep(6);
+      } else {
+        setPipelineStep(5);
+        setTimeout(() => setPipelineStep(6), 300);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : '请求失败');
       setPipelineStep(6);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [agentMode, executeSend]);
 
   // ── 会话管理操作（M9） ──
 
@@ -336,6 +364,7 @@ export default function ChatPage() {
       setError(null);
       setPipelineStep(0);
       setPipelineSteps(null);
+      setToolTrace([]);
     } catch (err) {
       setError('加载消息失败: ' + (err instanceof Error ? err.message : ''));
     }
@@ -351,6 +380,7 @@ export default function ChatPage() {
       setError(null);
       setPipelineStep(0);
       setPipelineSteps(null);
+      setToolTrace([]);
     } catch (err) {
       setError('创建会话失败: ' + (err instanceof Error ? err.message : ''));
     }
@@ -385,7 +415,36 @@ export default function ChatPage() {
     <Flex style={{ height: 'calc(100vh - 104px)', gap: 16 }}>
       {/* ====== 左栏 ====== */}
       <div style={{ width: 320, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
-        <PipelinePanel currentStep={pipelineStep} steps={pipelineSteps} />
+        <PipelinePanel
+          currentStep={pipelineStep}
+          steps={pipelineSteps}
+          toolTrace={toolTrace}
+          agentMode={agentMode}
+        />
+        {/* Agent 模式开关（module-029：SSE 工具轨迹展示） */}
+        <Flex justify="space-between" align="center" style={{
+          background: '#fff', borderRadius: 12, padding: '8px 14px',
+          border: '1px solid rgba(226,232,240,0.6)',
+          boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
+        }}>
+          <Flex gap={6} align="center">
+            <RobotOutlined style={{ color: agentMode ? '#1e40af' : '#94a3b8', fontSize: 14 }} />
+            <Typography.Text strong style={{ fontSize: 12, color: agentMode ? '#1e40af' : '#64748b' }}>
+              Agent 模式
+            </Typography.Text>
+            <Typography.Text style={{ fontSize: 11, color: '#94a3b8' }}>工具轨迹</Typography.Text>
+          </Flex>
+          <Switch
+            size="small"
+            checked={agentMode}
+            onChange={(v) => {
+              setAgentMode(v);
+              setToolTrace([]);
+              setPipelineStep(0);
+              setPipelineSteps(null);
+            }}
+          />
+        </Flex>
       </div>
 
       {/* ====== 对话列表（M19：左侧边栏） ====== */}

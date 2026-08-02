@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     # 混合检索
     hybrid_search_alpha: float = 0.3  # BM25 权重，向量权重为 1-alpha
 
+    # Agent 工具化（module-028）：ReAct 循环工具总调用次数预算（防空转烧钱）
+    max_agent_tools: int = 4
+
     model_config = {"env_prefix": "PW_", "env_file": ".env"}
 
 

@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Body, File, Form, UploadFile, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
+from pydantic import BaseModel
 
 from src.config import settings
 from src.database import init_db, async_session_factory
@@ -40,6 +41,42 @@ logging.basicConfig(
 logger = logging.getLogger("ai_service")
 
 
+class ChainUpdateRequest(BaseModel):
+    """LLM 降级链调整请求体（module-029 动态调序）
+
+    Attributes:
+        chain: 供应商顺序列表（如 ["zhipu", "deepseek", "qwen"]）
+    """
+    chain: list[str]
+
+
+async def load_fallback_chain_from_redis() -> None:
+    """启动时从 Redis 加载持久化降级链（module-029）
+
+    优先级：Redis 中用户调整过的顺序 > 配置默认（.env PW_FALLBACK_CHAIN）。
+    Redis 不可用 / 无链 / 存储链不合法时静默降级为配置默认（不改任何状态），
+    不阻塞服务启动。
+
+    调用时机：lifespan 中 LLM 客户端预热之前，确保预热即用持久化链。
+    """
+    try:
+        raw = await cache.get_str("llm:fallback_chain")
+    except Exception as e:
+        logger.warning("读取 Redis 降级链失败，使用配置默认: %s", e)
+        return
+    if not raw:
+        return
+    try:
+        chain = LLMFactory.validate_chain(
+            [p.strip() for p in raw.split(",") if p.strip()]
+        )
+    except ValueError as e:
+        logger.warning("Redis 降级链不合法，使用配置默认: %s", e)
+        return
+    LLMFactory.set_fallback_chain(chain)
+    logger.info("从 Redis 加载降级链: %s", " → ".join(chain))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
@@ -53,6 +90,9 @@ async def lifespan(app: FastAPI):
     logger.info("embedding 模型已就绪")
 
     from llm.client import LLMFactory
+    # 先加载 Redis 中持久化的降级链（module-029），无则用配置默认，
+    # 确保后续 LLM 预热/调用都使用最新顺序
+    await load_fallback_chain_from_redis()
     logger.info("预热 LLM 客户端...")
     try:
         LLMFactory.get_client()  # 触发默认 provider（fallback 降级链）
@@ -144,6 +184,55 @@ async def get_config():
         "deepseek_model": settings.deepseek_model,
         "debug": settings.debug,
     }
+
+
+# ─── LLM 降级链动态调序 API（module-029） ───
+
+
+@app.get("/ai/llm/chain")
+async def get_llm_chain():
+    """获取当前 LLM 降级链顺序
+
+    返回运行时链（Redis 持久化的用户配置优先），否则配置默认
+    （.env PW_FALLBACK_CHAIN）。
+
+    返回格式: {"code": 0, "data": {"chain": ["qwen", "zhipu", "deepseek"]}}
+    """
+    return {"code": 0, "data": {"chain": LLMFactory.get_fallback_chain()}}
+
+
+@app.put("/ai/llm/chain")
+async def put_llm_chain(request: ChainUpdateRequest):
+    """调整 LLM 降级链顺序（校验 → 存 Redis → 清缓存即时生效）
+
+    流程：
+      1. 校验链合法（非空、全为支持供应商、无重复）
+      2. 写入 Redis（key: llm:fallback_chain，无 TTL 跨重启持久）
+      3. 更新运行时链 + clear_cache → 下次 get_client("fallback") 按新链重建
+
+    Redis 写入失败时返回 code 2 且不修改运行时链（调序不生效但服务正常）。
+
+    Args:
+        request: {chain: ["zhipu", "deepseek", "qwen"]}
+
+    Returns:
+        code=0: {"code": 0, "data": {"chain": [...]}}
+        code=1: 校验失败（非法供应商/重复/空链）
+        code=2: Redis 持久化失败
+    """
+    try:
+        validated = LLMFactory.validate_chain(request.chain)
+    except ValueError as e:
+        return {"code": 1, "message": str(e)}
+
+    saved = await cache.set_str("llm:fallback_chain", ",".join(validated))
+    if not saved:
+        return {"code": 2, "message": "降级链保存失败（Redis 不可用），顺序未修改"}
+
+    LLMFactory.set_fallback_chain(validated)
+    LLMFactory.clear_cache()
+    logger.info("降级链已更新并持久化: %s", " → ".join(validated))
+    return {"code": 0, "data": {"chain": validated}}
 
 
 # ─── IP 会话管理 API ───
@@ -336,6 +425,126 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
 
         except Exception as e:
             logger.error("流式问答失败: %s", e, exc_info=True)
+            yield f"event: error\ndata: {json.dumps({'message': '服务暂时不可用'})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
+
+
+@app.post("/ai/rag/chat/agent")
+async def chat_agent(request: ChatRequest, fastapi_req: Request):
+    """Agent 工具化问答（ReAct 循环，SSE，module-028）
+
+    把固定流水线升级为 Agentic ReAct 循环：LLM 自主决定调用哪些工具、以什么
+    顺序，直到信息足够直接回答，或达到工具总调用次数预算（settings.max_agent_tools）。
+    与现有 /ai/rag/chat、/ai/rag/chat/stream 并存（A/B 对比）。
+
+    SSE 事件：
+      event: tool_call    data: {"name", "args", "tool_count"}
+      event: tool_result  data: {"name", "args", "result", "tool_count"}
+      event: token        data: "推理/回答文本片段"
+      event: done         data: {"answer", "sources", "tool_count", "budget"}
+      event: error        data: {"message"}
+    """
+    client_ip = getattr(fastapi_req.state, "client_ip", "unknown")
+
+    async def event_stream():
+        from agent.react import ReactContext, _build_messages, react_loop
+        try:
+            ctx = ReactContext(request.query, client_ip, request.history)
+            budget = settings.max_agent_tools
+            answer = ""
+            tool_count = 0
+            async for evt in react_loop(ctx, _build_messages(ctx), budget):
+                t = evt["type"]
+                if t == "tool_call":
+                    yield f"event: tool_call\ndata: {json.dumps({'name': evt['name'], 'args': evt['args'], 'tool_count': evt['tool_count']}, ensure_ascii=False)}\n\n"
+                elif t == "tool_result":
+                    yield f"event: tool_result\ndata: {json.dumps({'name': evt['name'], 'args': evt['args'], 'result': evt['result'][:500], 'tool_count': evt['tool_count']}, ensure_ascii=False)}\n\n"
+                elif t == "token":
+                    if evt["content"]:
+                        yield f"event: token\ndata: {json.dumps(evt['content'], ensure_ascii=False)}\n\n"
+                elif t == "done":
+                    answer = evt.get("answer", "")
+                    tool_count = evt.get("tool_count", 0)
+
+            # 引用溯源：基于循环累积的已检索文档
+            sources = []
+            for i, doc in enumerate(ctx.docs[:5]):
+                sources.append({
+                    "id": doc.get("id"),
+                    "title": doc.get("title", ""),
+                    "content": doc.get("content", "")[:300],
+                    "source": doc.get("source", ""),
+                    "ref_index": i + 1,
+                })
+            yield f"event: done\ndata: {json.dumps({'answer': answer, 'sources': sources, 'tool_count': tool_count, 'budget': budget}, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            logger.error("Agent 问答失败: %s", e, exc_info=True)
+            yield f"event: error\ndata: {json.dumps({'message': '服务暂时不可用'})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
+
+
+@app.post("/ai/rag/chat/agent-lg")
+async def chat_agent_langgraph(request: ChatRequest, fastapi_req: Request):
+    """LangGraph 实验端点（SSE，module-030）
+
+    与 /ai/rag/chat/agent 并存：用 LangGraph StateGraph 编排 ReAct 循环
+    （见 agent/langgraph_react.py），行为与手写版对齐（预算/工具/上下文），
+    不动现有 react.py（零回归）。实验端点，非生产主路径。
+
+    SSE 事件（与 agent 一致）：
+      event: tool_call    data: {"name", "args", "tool_count"}
+      event: tool_result  data: {"name", "args", "result", "tool_count"}
+      event: token        data: "推理/回答文本片段"
+      event: done         data: {"answer", "sources", "tool_count", "budget"}
+      event: error        data: {"message"}
+    """
+    client_ip = getattr(fastapi_req.state, "client_ip", "unknown")
+
+    async def event_stream():
+        from agent.langgraph_react import (
+            ReactContext, _build_messages, langgraph_react_loop,
+        )
+        try:
+            ctx = ReactContext(request.query, client_ip, request.history)
+            budget = settings.max_agent_tools
+            answer = ""
+            tool_count = 0
+            async for evt in langgraph_react_loop(ctx, _build_messages(ctx), budget):
+                t = evt["type"]
+                if t == "tool_call":
+                    yield f"event: tool_call\ndata: {json.dumps({'name': evt['name'], 'args': evt['args'], 'tool_count': evt['tool_count']}, ensure_ascii=False)}\n\n"
+                elif t == "tool_result":
+                    yield f"event: tool_result\ndata: {json.dumps({'name': evt['name'], 'args': evt['args'], 'result': evt['result'][:500], 'tool_count': evt['tool_count']}, ensure_ascii=False)}\n\n"
+                elif t == "token":
+                    if evt["content"]:
+                        yield f"event: token\ndata: {json.dumps(evt['content'], ensure_ascii=False)}\n\n"
+                elif t == "done":
+                    answer = evt.get("answer", "")
+                    tool_count = evt.get("tool_count", 0)
+
+            # 引用溯源：基于循环累积的已检索文档（与 /ai/rag/chat/agent 一致）
+            sources = []
+            for i, doc in enumerate(ctx.docs[:5]):
+                sources.append({
+                    "id": doc.get("id"),
+                    "title": doc.get("title", ""),
+                    "content": doc.get("content", "")[:300],
+                    "source": doc.get("source", ""),
+                    "ref_index": i + 1,
+                })
+            yield f"event: done\ndata: {json.dumps({'answer': answer, 'sources': sources, 'tool_count': tool_count, 'budget': budget}, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            logger.error("LangGraph Agent 问答失败: %s", e, exc_info=True)
             yield f"event: error\ndata: {json.dumps({'message': '服务暂时不可用'})}\n\n"
 
     return StreamingResponse(
