@@ -60,6 +60,51 @@ export interface PipelineSteps {
   reflection?: { sufficient: boolean; query_rewritten: boolean; rewritten_query?: string };
 }
 
+/**
+ * 工具调用事件 — Agent ReAct 循环发起一次工具调用（module-029）
+ * 对应后端 SSE 事件 tool_call 的 data 字段。
+ */
+export interface ToolCallEvent {
+  /** 工具名称（如 search_knowledge） */
+  name: string;
+  /** 工具调用参数 */
+  args: Record<string, unknown>;
+  /** 累计工具调用次数 */
+  tool_count: number;
+}
+
+/**
+ * 工具执行结果事件 — 工具执行完成返回结果（module-029）
+ * 对应后端 SSE 事件 tool_result 的 data 字段（result 已截断前 500 字）。
+ */
+export interface ToolResultEvent {
+  /** 工具名称 */
+  name: string;
+  /** 工具调用参数 */
+  args: Record<string, unknown>;
+  /** 工具执行结果文本 */
+  result: string;
+  /** 累计工具调用次数 */
+  tool_count: number;
+}
+
+/**
+ * 单条工具轨迹 — 前端展示用（tool_call + tool_result 合并，module-029）
+ * status 标记工具是否执行完成，用于 PipelinePanel 卡片渲染。
+ */
+export interface ToolTrace {
+  /** 工具名称 */
+  name: string;
+  /** 工具调用参数 */
+  args: Record<string, unknown>;
+  /** 工具执行结果（tool_result 到达后才有） */
+  result?: string;
+  /** 累计工具调用次数（唯一标识一次调用） */
+  tool_count: number;
+  /** running=执行中，done=已完成 */
+  status: 'running' | 'done';
+}
+
 /** 搜索请求 — 独立召回（不生成回答） */
 export interface SearchRequest {
   /** 搜索关键词 */

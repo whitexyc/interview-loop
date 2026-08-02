@@ -22,7 +22,15 @@
  * - 超时：http 实例 timeout=60000ms，超时抛 Error
  */
 import axios from 'axios';
-import type { ChatResponse, SearchResult, SearchResponse, DocumentUpload, DocumentListResponse } from '../types/rag';
+import type {
+  ChatResponse,
+  SearchResult,
+  SearchResponse,
+  DocumentUpload,
+  DocumentListResponse,
+  ToolCallEvent,
+  ToolResultEvent,
+} from '../types/rag';
 import type { ApiResponse } from '../types/api';
 
 /**
@@ -140,6 +148,144 @@ export async function chatStream(
     sources,
     message: 'ok',
   } as ChatResponse;
+}
+
+/**
+ * 发送聊天消息 — Agent 工具化流式版（SSE，module-029）
+ *
+ * 对应后端 POST /ai/rag/chat/agent（module-028）。Agent 端点不推 step 事件，
+ * 而是推送工具轨迹事件：LLM 自主决定调用工具，每步 tool_call → tool_result，
+ * 推理/回答文本走 token 事件，最后 done 事件带最终 answer + sources。
+ *
+ * SSE 事件：
+ *   event: tool_call    data: {name, args, tool_count}
+ *   event: tool_result  data: {name, args, result, tool_count}
+ *   event: token        data: "文本片段"
+ *   event: done         data: {answer, sources, tool_count, budget}
+ *   event: error        data: {message}
+ *
+ * @param query - 用户问题
+ * @param history - 对话历史
+ * @param onToolCall - 工具调用事件回调（触发即展示"正在调用"卡片）
+ * @param onToolResult - 工具执行结果回调（更新卡片结果）
+ * @param onToken - token 回调（逐字追加到气泡）
+ * @returns 最终 ChatResponse（含完整 answer 和 sources）
+ */
+export async function agentStream(
+  query: string,
+  history: { role: string; content: string }[],
+  onToolCall: (tool: ToolCallEvent) => void,
+  onToolResult: (tool: ToolResultEvent) => void,
+  onToken: (text: string) => void,
+): Promise<ChatResponse> {
+  const resp = await fetch('/ai/rag/chat/agent', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, history }),
+  });
+
+  if (!resp.ok || !resp.body) {
+    throw new Error('流式请求失败');
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let answer = '';
+  let sources: { id: number; title: string; content: string; source: string; ref_index: number }[] = [];
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      const raw = line.slice(6).trim();
+
+      try {
+        const parsed = JSON.parse(raw);
+
+        // token events are plain strings
+        if (typeof parsed === 'string') {
+          answer += parsed;
+          onToken(parsed);
+          continue;
+        }
+
+        // tool_call / tool_result: 均有 name + tool_count；有 result 字段即 tool_result
+        if (parsed.name && typeof parsed.tool_count === 'number') {
+          if (typeof parsed.result === 'string') {
+            onToolResult(parsed as ToolResultEvent);
+          } else {
+            onToolCall(parsed as ToolCallEvent);
+          }
+          continue;
+        }
+
+        // done event: 最终 answer + sources
+        if (parsed.sources || typeof parsed.answer === 'string') {
+          if (typeof parsed.answer === 'string') answer = parsed.answer;
+          if (Array.isArray(parsed.sources)) sources = parsed.sources;
+          continue;
+        }
+
+        // error event
+        if (parsed.message) {
+          throw new Error(parsed.message);
+        }
+      } catch (err) {
+        // 仅吞掉 JSON 解析失败（非 JSON 数据行，跳过不影响对话）；
+        // error 事件抛出的 Error 需继续传播给调用方展示
+        if (!(err instanceof SyntaxError)) {
+          throw err;
+        }
+      }
+    }
+  }
+
+  return {
+    answer,
+    sources,
+    message: 'ok',
+  } as ChatResponse;
+}
+
+/**
+ * 获取当前 LLM 降级链顺序（module-029）
+ *
+ * 对应后端 GET /ai/llm/chain。返回运行时链（Redis 持久化优先），否则配置默认。
+ *
+ * @returns 供应商顺序数组（如 ["deepseek", "qwen", "zhipu"]）
+ * @throws Error - 后端返回 code != 0 时
+ */
+export async function getLLMChain(): Promise<string[]> {
+  const response = await http.get<ApiResponse<{ chain: string[] }>>('/llm/chain');
+  const body = response.data;
+  if (body.code !== 0) throw new Error(body.msg || '获取供应商顺序失败');
+  return body.data?.chain ?? [];
+}
+
+/**
+ * 调整 LLM 降级链顺序（module-029）
+ *
+ * 对应后端 PUT /ai/llm/chain。后端校验合法后持久化到 Redis 并即时生效
+ * （clear_cache 重建 FallbackClient，无需重启服务）。
+ *
+ * @param chain - 新的供应商顺序（需全为支持供应商且不重复）
+ * @returns 保存后的供应商顺序（后端规范化结果）
+ * @throws Error - 校验失败或 Redis 持久化失败
+ */
+export async function updateLLMChain(chain: string[]): Promise<string[]> {
+  const response = await http.put<ApiResponse<{ chain: string[] }>>('/llm/chain', { chain });
+  const body = response.data;
+  if (body.code !== 0) {
+    throw new Error(body.msg || (body as { message?: string }).message || '保存供应商顺序失败');
+  }
+  return body.data?.chain ?? chain;
 }
 
 /**

@@ -14,10 +14,10 @@ import { Typography, Flex, Input, Button, Spin, Empty } from 'antd';
 import { SearchOutlined } from '@ant-design/icons';
 import {
   BulbOutlined, SortAscendingOutlined, SyncOutlined, EditOutlined,
-  CheckCircleFilled, LoadingOutlined,
+  CheckCircleFilled, LoadingOutlined, ToolOutlined,
 } from '@ant-design/icons';
 import { search } from '../services/ragService';
-import type { PipelineSteps, SearchResult } from '../types/rag';
+import type { PipelineSteps, SearchResult, ToolTrace } from '../types/rag';
 
 const { Text } = Typography;
 
@@ -35,9 +35,13 @@ const STEPS: StepDef[] = [
 interface Props {
   currentStep: number;
   steps?: PipelineSteps | null;
+  /** 工具轨迹（Agent 模式，module-029） */
+  toolTrace?: ToolTrace[];
+  /** Agent 模式：仅展示工具轨迹卡片，不展示固定管线步骤 */
+  agentMode?: boolean;
 }
 
-export default function PipelinePanel({ currentStep, steps }: Props) {
+export default function PipelinePanel({ currentStep, steps, toolTrace, agentMode }: Props) {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
@@ -204,6 +208,42 @@ export default function PipelinePanel({ currentStep, steps }: Props) {
     return null;
   };
 
+  /**
+   * 工具轨迹卡片列表（module-029）
+   * 每张卡片展示：工具名 + 参数 + 结果摘要；执行中蓝色 / 已完成绿色。
+   */
+  const renderToolTrace = () => {
+    const trace = toolTrace ?? [];
+    if (trace.length === 0) {
+      return <Text style={{ fontSize: 11, color: '#94a3b8' }}>等待工具调用...</Text>;
+    }
+    return (
+      <Flex vertical gap={6}>
+        {trace.map((t, i) => (
+          <div key={i} style={{ padding: '6px 8px', borderRadius: 6, background: '#f8fafc', border: '1px solid #e2e8f0' }}>
+            <Flex justify="space-between" align="center">
+              <Text strong style={{ fontSize: 12, color: '#0f172a' }}>{t.name}</Text>
+              <Text style={{ fontSize: 10, color: t.status === 'done' ? '#16a34a' : '#1e40af' }}>
+                {t.status === 'done' ? '已完成' : '执行中'}
+              </Text>
+            </Flex>
+            <Text style={{ fontSize: 11, display: 'block', color: '#64748b', marginTop: 2 }}>
+              参数: {JSON.stringify(t.args)}
+            </Text>
+            {t.result !== undefined && (
+              <Text
+                style={{ fontSize: 11, display: 'block', color: '#475569', marginTop: 2 }}
+                ellipsis={{ tooltip: t.result }}
+              >
+                结果: {t.result.length > 120 ? `${t.result.slice(0, 120)}...` : t.result}
+              </Text>
+            )}
+          </div>
+        ))}
+      </Flex>
+    );
+  };
+
   return (
     <div style={{
       background: '#fff', borderRadius: 12, padding: 16,
@@ -211,18 +251,33 @@ export default function PipelinePanel({ currentStep, steps }: Props) {
       boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
     }}>
       <Typography.Title level={5} style={{ marginBottom: 12, color: '#0f172a', fontSize: 15 }}>
-        Agentic 执行流程
+        {agentMode ? 'Agent 工具轨迹' : 'Agentic 执行流程'}
       </Typography.Title>
 
-      <div style={{ position: 'relative' }}>
-        {/* 连接竖线 */}
-        <div style={{
-          position: 'absolute', left: 13, top: 10, bottom: 10, width: 2,
-          background: '#e2e8f0', zIndex: 0,
-        }} />
+      {agentMode ? (
+        <div>{renderToolTrace()}</div>
+      ) : (
+        <div style={{ position: 'relative' }}>
+          {/* 连接竖线 */}
+          <div style={{
+            position: 'absolute', left: 13, top: 10, bottom: 10, width: 2,
+            background: '#e2e8f0', zIndex: 0,
+          }} />
 
-        {STEPS.map((s, i) => renderStep(s, i))}
-      </div>
+          {STEPS.map((s, i) => renderStep(s, i))}
+        </div>
+      )}
+
+      {/* 非 Agent 模式：如后端也推了工具事件，在管线下方附加展示 */}
+      {!agentMode && toolTrace && toolTrace.length > 0 && (
+        <div style={{ marginTop: 12, borderTop: '1px solid #e2e8f0', paddingTop: 10 }}>
+          <Flex gap={6} align="center" style={{ marginBottom: 8 }}>
+            <ToolOutlined style={{ color: '#64748b', fontSize: 12 }} />
+            <Text strong style={{ fontSize: 12, color: '#0f172a' }}>工具轨迹</Text>
+          </Flex>
+          {renderToolTrace()}
+        </div>
+      )}
 
       <style>{`
         @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.6; } }

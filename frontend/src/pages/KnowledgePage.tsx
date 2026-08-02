@@ -5,6 +5,7 @@ import type { ColumnsType } from 'antd/es/table';
 import { listDocuments, deleteDocument, uploadDocument } from '../services/ragService';
 import type { DocumentInfo } from '../types/rag';
 import PasswordGuard from '../components/PasswordGuard';
+import LLMChainPanel from '../components/LLMChainPanel';
 
 const { Title, Text } = Typography;
 const { Dragger } = Upload;
@@ -162,6 +163,11 @@ export default function KnowledgePage() {
             </Button>
           </PasswordGuard>
         </Flex>
+      </div>
+
+      {/* LLM 供应商顺序设置（module-029：降级链动态调序） */}
+      <div style={{ marginBottom: 20 }}>
+        <LLMChainPanel />
       </div>
 
       <Table

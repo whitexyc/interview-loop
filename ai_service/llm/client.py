@@ -459,6 +459,64 @@ class LLMFactory:
 
     _instances: dict[tuple[str, float], LLMClient] = {}
 
+    # 运行时降级链（module-029）：由 GET/PUT /ai/llm/chain 或启动时从 Redis
+    # 加载；None 表示未覆盖，get_fallback_chain 回退到配置默认。
+    _fallback_chain: Optional[list[str]] = None
+
+    # 降级链白名单：链上的每一项必须是可实例化的单供应商（不允许嵌套 fallback）
+    SUPPORTED_PROVIDERS = {"claude", "deepseek", "qwen", "zhipu", "modelscope"}
+
+    @classmethod
+    def validate_chain(cls, chain: list) -> list[str]:
+        """校验降级链合法性：非空、全为支持供应商、无重复
+
+        Args:
+            chain: 待校验的供应商列表
+
+        Returns:
+            规范化后的供应商列表（去除空白、统一小写）
+
+        Raises:
+            ValueError: 链为空 / 含未知供应商 / 供应商重复 / 元素非字符串
+        """
+        if not isinstance(chain, list) or not chain:
+            raise ValueError("降级链不能为空")
+        cleaned: list[str] = []
+        for p in chain:
+            if not isinstance(p, str):
+                raise ValueError(f"非法供应商类型: {p!r}")
+            p = p.strip().lower()
+            if p not in cls.SUPPORTED_PROVIDERS:
+                raise ValueError(f"不支持的供应商: {p}")
+            if p in cleaned:
+                raise ValueError(f"供应商重复: {p}")
+            cleaned.append(p)
+        return cleaned
+
+    @classmethod
+    def set_fallback_chain(cls, chain: list[str]) -> None:
+        """设置运行时降级链（跨请求生效，无需重启服务）
+
+        注意：调用方需自行先 clear_cache() 使已缓存的 FallbackClient 失效，
+        否则已存在的实例仍持有旧链。
+
+        Args:
+            chain: 校验通过的供应商列表
+        """
+        cls._fallback_chain = list(chain)
+        logger.info("运行时降级链已设置: %s", " → ".join(chain))
+
+    @classmethod
+    def get_fallback_chain(cls) -> list[str]:
+        """获取当前降级链（运行时覆盖优先，否则配置默认）
+
+        Returns:
+            供应商列表（如 ["qwen", "zhipu", "deepseek"]）
+        """
+        if cls._fallback_chain:
+            return list(cls._fallback_chain)
+        return [p.strip() for p in settings.fallback_chain.split(",") if p.strip()]
+
     @classmethod
     def get_client(cls, provider: Optional[str] = None,
                    temperature: Optional[float] = None) -> LLMClient:
@@ -471,6 +529,9 @@ class LLMFactory:
         传 0.1 等低温度用于反思等结构化 JSON 任务（module-026）。
         实例按 (provider, temperature) 缓存，不同温度各建独立实例，
         不影响其他调用方使用的默认温度实例。
+
+        fallback（module-029）：链来源为运行时链（Redis 持久化）优先，
+        否则配置默认；clear_cache 后按新链重建。
 
         Args:
             provider: 供应商（claude/deepseek/qwen/zhipu/modelscope/fallback）
@@ -497,7 +558,7 @@ class LLMFactory:
             elif provider == "zhipu":
                 cls._instances[key] = ZhipuClient(temperature=temp)
             elif provider == "fallback":
-                chain = [p.strip() for p in settings.fallback_chain.split(",") if p.strip()]
+                chain = cls.get_fallback_chain()
                 if not chain:
                     raise ValueError("PW_FALLBACK_CHAIN 为空，无法创建降级客户端")
                 cls._instances[key] = FallbackClient(chain, temperature=temp)
@@ -509,7 +570,7 @@ class LLMFactory:
     def clear_cache(cls):
         """清理客户端缓存
 
-        在切换供应商时调用（比如用户在管理后台换了 API 配置）。
-        目前没有运行时切换的场景，但保留这个接口供后续使用。
+        在切换供应商或调整降级链时调用（module-029 调序后重建 FallbackClient）。
+        清理后下次 get_client 按最新链/配置重建全部实例。
         """
         cls._instances.clear()
