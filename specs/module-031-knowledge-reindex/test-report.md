@@ -31,12 +31,14 @@ $ python -m pytest tests/test_chunker.py -q
 
 ```
 $ python -m pytest tests/ -q
-193 passed, 2 failed  （module-031 后）
+195 passed, 0 failed  （module-031 后 + async 债务修复）
 ```
 - 基线口径：module-030 后全量 181 passed / 2 既有 async 债务失败（module-031 改动前实测）
 - module-031 新增 12 个测试（test_chunker 8 + test_graph_store 4）全部通过 → 181 + 12 = **193 passed**
-- 2 项既有 async 技术债务失败（`tests/test_engine.py` 缺 pytest-asyncio，module-018 起备案，
-  非本模块回归，与基线完全相同，零新增失败）
+- **async 技术债务修复（2026-08-05）**：`tests/test_engine.py` 2 个用例由 `async def` 改为
+  同步 `def` + 函数内 `asyncio.run()`（与套件其余用例同款模式，不依赖 pytest-asyncio）→
+  **193 + 2 = 195 passed，0 failed**，全量回归完全绿
+  （此前 module-018 起备案的 2 项 async 债务失败已消除）
 
 ## 3. 数据验证（重建后真实库查询）
 
