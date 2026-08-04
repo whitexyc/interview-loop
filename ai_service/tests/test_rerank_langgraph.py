@@ -217,6 +217,26 @@ class TestRerankerPredict:
         result = self._rerank([{"id": 7}, {"id": 8, "content": "有内容"}])
         assert len(result) == 2  # 缺 content 不抛异常
 
+    def test_long_content_truncated_to_max_pair_chars(self):
+        """超长文档内容截断到 _MAX_PAIR_CHARS，避免 CrossEncoder 处理满长上下文
+
+        回归：知识库父块可达数万字符，未截断时 fp32 CPU 下单次 rerank 实测
+        ~200s（卡死链路）；截断后约 3.4s。
+        """
+        from rag.reranker import _MAX_PAIR_CHARS
+
+        long_content = "长" * 5000  # 远超 _MAX_PAIR_CHARS
+        _FakeCrossEncoder.instances.clear()
+        with _fake_model_dir() as model_dir:
+            with mock.patch("rag.reranker.CrossEncoder", _FakeCrossEncoder):
+                rr = CrossEncoderReranker(model_name=model_dir)
+                asyncio.run(rr.rerank("q", [{"id": 1, "content": long_content}], top_k=1))
+
+        inst = _FakeCrossEncoder.instances[-1]
+        assert len(inst.pairs) == 1
+        assert len(inst.pairs[0][1]) == _MAX_PAIR_CHARS
+        assert inst.pairs[0][1] == "长" * _MAX_PAIR_CHARS
+
 
 # ==================== LangGraph 版 ReAct 单测（module-030 部分 2） ====================
 

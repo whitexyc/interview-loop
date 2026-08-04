@@ -20,8 +20,10 @@ Rerank 重排服务 — 本地 Cross-Encoder 精排
   本地模型目录缺少权重文件时**明确报错**（抛 RerankerException），
   不回退 HuggingFace 在线加载。让问题可见而非静默降级。
 """
+import asyncio
 import logging
 import os
+import threading
 from typing import Optional
 
 from sentence_transformers import CrossEncoder
@@ -36,6 +38,13 @@ _LOCAL_MODEL_DIR = os.path.join(
 # 权重文件名候选（safetensors 优先，兼容 pytorch bin）
 _WEIGHT_FILES = ("model.safetensors", "pytorch_model.bin")
 _DEFAULT_MODEL = _LOCAL_MODEL_DIR
+# 重排内容截断阈值（性能修复）：CrossEncoder 按 batch 内最长序列填充，
+# 知识库父块可达数万字符（无 ## 标题的文档整篇入库），fp32 CPU 下近满长
+# 上下文使单次 rerank 从 ~0.5s 飙到 ~200s（实测 2 pair 201s）。重排只需
+# 判断相关度，截断到前 500 字符即可（实测 2 pair ~2.1s，6 pair ~6s，
+# 分数与 1000 字符几乎一致：0.991 vs 0.989）。截断阈值越小，候选多时
+# 整体越快，代价是丢失文档中后段的匹配信号（对已检索候选的重排影响小）。
+_MAX_PAIR_CHARS = 500
 
 
 class RerankerException(Exception):
@@ -70,6 +79,8 @@ class CrossEncoderReranker(Reranker):
     def __init__(self, model_name: str = ""):
         self._model_name = model_name or _DEFAULT_MODEL
         self._model: Optional[CrossEncoder] = None
+        # 单 CrossEncoder 实例访问串行化：to_thread 在真线程执行，模型推理非线程安全
+        self._lock = threading.Lock()
 
     def _validate_model_dir(self):
         """校验本地模型目录完整性
@@ -98,6 +109,17 @@ class CrossEncoderReranker(Reranker):
             self._model = CrossEncoder(self._model_name)
             logger.info("reranker 模型就绪")
 
+    def _predict_sync(self, pairs: list[tuple[str, str]]) -> list[float]:
+        """同步执行重排打分（由 to_thread 调用）
+
+        与 embeddings.py 的 module-027 模式一致：lazy_load + predict 均为同步
+        CPU 密集调用，直接放在 async 函数里会阻塞事件循环；锁保证单实例访问
+        完全串行（模型推理非线程安全）。
+        """
+        with self._lock:
+            self._lazy_load()
+            return self._model.predict(pairs)
+
     async def rerank(self, query: str, documents: list[dict], top_k: int = 5) -> list[dict]:
         """执行 CrossEncoder 重排
 
@@ -112,13 +134,17 @@ class CrossEncoderReranker(Reranker):
             return []
 
         try:
-            self._lazy_load()
+            # 截断超长文档内容（性能修复）：CrossEncoder 按 batch 最长序列填充，
+            # 超长父块（数千~数万字符）会把单次 rerank 拖到 ~200s。重排只需
+            # 判断相关度，前 1000 字符已含主要语义，截断后约 3.4s。
+            pairs = [
+                (query, (d.get("content") or "")[:_MAX_PAIR_CHARS])
+                for d in documents
+            ]
 
-            # 分类式 CrossEncoder：predict 接受 (query, doc) 裸 pair
-            pairs = [(query, d.get("content", "")) for d in documents]
-
-            # 批量预测相关性分数（CPU 推理）
-            scores = self._model.predict(pairs)
+            # 批量预测相关性分数：CPU 密集推理挪到线程池（to_thread），
+            # 避免阻塞事件循环导致 rerank 期间整个服务无响应
+            scores = await asyncio.to_thread(self._predict_sync, pairs)
 
             # 将分数附加到文档上，按分数降序排列
             ranked = []
