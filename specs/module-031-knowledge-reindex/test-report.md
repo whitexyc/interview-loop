@@ -31,10 +31,12 @@ $ python -m pytest tests/test_chunker.py -q
 
 ```
 $ python -m pytest tests/ -q
-181 passed, 2 failed
+193 passed, 2 failed  （module-031 后）
 ```
-2 项既有 async 技术债务失败（`tests/test_engine.py` 缺 pytest-asyncio，module-018 起备案，
-非本模块回归，无新增失败）。
+- 基线口径：module-030 后全量 181 passed / 2 既有 async 债务失败（module-031 改动前实测）
+- module-031 新增 12 个测试（test_chunker 8 + test_graph_store 4）全部通过 → 181 + 12 = **193 passed**
+- 2 项既有 async 技术债务失败（`tests/test_engine.py` 缺 pytest-asyncio，module-018 起备案，
+  非本模块回归，与基线完全相同，零新增失败）
 
 ## 3. 数据验证（重建后真实库查询）
 
@@ -59,11 +61,25 @@ $ python -m pytest tests/ -q
 ```
 58/58 文件全部成功，实际 parents=1136 / children=6370 与 dry-run 预估一致。
 
-## 4. 图谱与 E2E（恢复运行中/待补）
+## 4. 图谱与 E2E
 
-- [ ] 图谱重建：清空 + 逐文档 LLM 提取（--skip-import 恢复模式运行中）
-- [ ] 检索质量 E2E：真实检索"什么是G1垃圾收集器"返回 G1 文档
-- [ ] rerank 性能：新子块（~300 字符）rerank 输入，热推理 < 3s
+### 4.1 知识图谱重建（--skip-import 恢复模式）
+
+- [x] 图谱已清空 + 逐文档 LLM 提取（59 篇全部处理，**ok=59 / failed=0**）
+- [x] 提取结果：**实体 1746 / 关系 1745**（提取含 test_dedup 1 个死引用实体，指向已删文档，清理中）
+- [x] 全量重建失败收尾已恢复：cleanup_orphans `r.t` bug 修复 + `--skip-import` 模式
+- [x] 既有 `_escape` bug（`}` 转义致 AGE 非法转义）已修复，当前图重建使用旧代码（特殊字符实体丢弃），修复对后续重建生效
+
+### 4.2 检索质量 E2E（真实服务，uvicorn + SSE）
+
+- [x] **"什么是G1垃圾收集器的Region分区机制"** → retrieval count=2 relevant=2，previews 首条
+      **`1-G1垃圾收集器的Region分区机制与MixedGC全流程`** ✅（重建前此查询返回 Redis 缓存文档）
+- [x] **"Redis缓存穿透击穿雪崩怎么解决"** → retrieval count=4 relevant=4，首条
+      `10-Redis持久化机制` + 相关 Redis 文档 ✅
+- [x] reflection=sufficient（两条查询均判定文档充足）
+- [x] rerank 性能：冷路径（含 2.17GB 模型加载）8.7s；暖路径 4 pair ~6s（截断 500 字符内）
+- [x] 端到端耗时：冷 32.0s / 暖 21.3s（对比重建前 400-700s 卡死）
+- [x] 无 error 事件，token 流正常（331 / 654 tokens）
 
 ## 5. 测试命令
 
