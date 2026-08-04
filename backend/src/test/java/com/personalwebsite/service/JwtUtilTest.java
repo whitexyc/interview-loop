@@ -45,6 +45,24 @@ class JwtUtilTest {
             long diffMs = claims.getExpiration().getTime() - claims.getIssuedAt().getTime();
             assertEquals(7L * 24 * 3600 * 1000, diffMs, 5000);
         }
+
+        @Test
+        @DisplayName("64 字节生产密钥签发的 token 算法为 HS256（jjwt 自动选算法 bug 回归）")
+        void shouldSignHS256WithLongSecret() {
+            // 生产 .env PW_JWT_SECRET 为 64 字节（512 bits）；jjwt 0.12 的 signWith(key)
+            // 对 ≥512bit 密钥会自动选 HS512，而 Python parse_jwt 仅接受 HS256 →
+            // 真实 token 被拒、登录身份不解析（Tester 真实 E2E 发现，跨栈契约失败）。
+            // 显式 signWith(key, Jwts.SIG.HS256) 后 header.alg 必须为 HS256。
+            String longSecret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"; // 64 字节
+            JwtUtil util64 = new JwtUtil(longSecret, 7);
+            String token = util64.generateToken(1L, "eve");
+
+            String header = new String(
+                    java.util.Base64.getUrlDecoder().decode(token.split("\\.")[0]),
+                    java.nio.charset.StandardCharsets.UTF_8);
+            assertTrue(header.contains("\"alg\":\"HS256\""),
+                    "token header 应为 HS256，实际: " + header);
+        }
     }
 
     @Nested

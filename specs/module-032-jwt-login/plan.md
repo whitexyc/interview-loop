@@ -170,9 +170,10 @@ JWT:
 
 后端接口（Java 8080，前端经 /api 代理）:
   - POST /api/auth/register {username, password}
-      → 成功 {code:0, data:{user_id}} | 失败 {code:1, message:"用户名已存在"}
+      → 成功 {code:0, data:{user_id}} | 失败 {code:1, msg:"用户名已存在"}（HTTP 400）
   - POST /api/auth/login {username, password}
-      → 成功 {code:0, data:{token, username, user_id}} | 失败 {code:1, message:"用户名或密码错误"}
+      → 成功 {code:0, data:{token, username, user_id}} | 失败 {code:1, msg:"用户名或密码错误"}（HTTP 400）
+  注：失败字段为 CommonResult 既有 `msg`（非 message），HTTP 400；前端 AuthContext 兼容 message/msg 两形态。
 
 前端→AI 服务: 所有 /ai 请求带 Authorization: Bearer <token>（有 token 时）
 

@@ -57,12 +57,15 @@ public class JwtUtil {
     public String generateToken(Long userId, String username) {
         Date now = new Date();
         Date expiration = new Date(now.getTime() + expireDays * 24L * 3600 * 1000);
+        // 显式指定 HS256：jjwt 0.12 的 signWith(key) 会按密钥长度自动选算法，
+        // 64 字节 secret（512 bits）会自动签 HS512，而 Python 端 parse_jwt 仅接受
+        // HS256（契约 §3.5）→ 真实 token 被拒、登录身份不解析（Tester 真实 E2E 发现）。
         return Jwts.builder()
                 .subject(String.valueOf(userId))
                 .claim("username", username)
                 .issuedAt(now)
                 .expiration(expiration)
-                .signWith(key)
+                .signWith(key, Jwts.SIG.HS256)
                 .compact();
     }
 
