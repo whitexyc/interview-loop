@@ -42,5 +42,10 @@
 | module-031 | Reviewer | 审查发现 cleanup_orphans `r.t` bug（SQLAlchemy 2.0.19 Row 具名属性陷阱）→ 修复 + --skip-import 恢复模式；review-report.md |
 | module-031 | Tester | 单测 8/8 + graph_store 12/12；全量回归 **195 passed / 0 failed**（含 async 债务修复）；库内统计达标；图谱 1423 实体；E2E G1/Redis 检索质量恢复；test-report.md |
 
+### 2026-08-05（module-032 JWT 登录体系）
+| 模块 | 角色 | 摘要 |
+|------|------|------|
+| module-032 | Planner | 记忆架构讨论（三层：长期/短期/会话，参考 llm-push/19-Agent记忆管理.md）→ 用户定 3 模块方案（032 JWT登录 / 033 长期记忆 / 034 短期+会话）；plan.md + acceptance-criteria.md（跨栈契约：JWT HS256 + 共享 secret + 匿名降级 IP）；三记忆文件更新 |
+
 ### 2026-08-02 收尾
 - Planner（主会话）：记忆库同步（file-index/activity-log 补齐）、backlog 记录（重排分数校准、记忆库维护）
