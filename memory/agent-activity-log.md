@@ -40,7 +40,7 @@
 | module-031 | Planner | 分块规则讨论 → 用户拍板 Option C（## + ### + 父块 4000 上限 + 子块 300）；plan.md / acceptance-criteria.md |
 | module-031 | Developer | chunker Option C 实现 + tests 8/8；reindex_knowledge_base.py（幂等/--dry-run/--no-graph/--skip-import）；全量重建 58 文件 → 1136 父 / 6370 子，父块 >4000 = 0 |
 | module-031 | Reviewer | 审查发现 cleanup_orphans `r.t` bug（SQLAlchemy 2.0.19 Row 具名属性陷阱）→ 修复 + --skip-import 恢复模式；review-report.md |
-| module-031 | Tester | 单测 8/8；全量回归 181 passed / 2 既有 async 债务；库内统计达标；test-report.md（图谱/E2E 待恢复运行） |
+| module-031 | Tester | 单测 8/8 + graph_store 12/12；全量回归 **195 passed / 0 failed**（含 async 债务修复）；库内统计达标；图谱 1423 实体；E2E G1/Redis 检索质量恢复；test-report.md |
 
 ### 2026-08-02 收尾
 - Planner（主会话）：记忆库同步（file-index/activity-log 补齐）、backlog 记录（重排分数校准、记忆库维护）
