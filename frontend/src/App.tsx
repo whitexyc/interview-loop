@@ -1,11 +1,13 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { ConfigProvider, theme } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
+import { AuthProvider } from './auth/AuthContext';
 import AppLayout from './components/AppLayout';
 import ResumePage from './pages/ResumePage';
 import ChatPage from './pages/ChatPage';
 import EditResumePage from './pages/EditResumePage';
 import KnowledgePage from './pages/KnowledgePage';
+import LoginPage from './pages/LoginPage';
 
 const customTheme = {
   token: {
@@ -34,42 +36,45 @@ const customTheme = {
 export default function App() {
   return (
     <ConfigProvider locale={zhCN} theme={customTheme}>
-      <BrowserRouter>
-        <Routes>
-          <Route
-            path="/"
-            element={
-              <AppLayout>
-                <ResumePage />
-              </AppLayout>
-            }
-          />
-          <Route
-            path="/chat"
-            element={
-              <AppLayout maxWidth="100%">
-                <ChatPage />
-              </AppLayout>
-            }
-          />
-          <Route
-            path="/edit-resume"
-            element={
-              <AppLayout>
-                <EditResumePage />
-              </AppLayout>
-            }
-          />
-          <Route
-            path="/knowledge"
-            element={
-              <AppLayout>
-                <KnowledgePage />
-              </AppLayout>
-            }
-          />
-        </Routes>
-      </BrowserRouter>
+      <AuthProvider>
+        <BrowserRouter>
+          <Routes>
+            <Route
+              path="/"
+              element={
+                <AppLayout>
+                  <ResumePage />
+                </AppLayout>
+              }
+            />
+            <Route
+              path="/chat"
+              element={
+                <AppLayout maxWidth="100%">
+                  <ChatPage />
+                </AppLayout>
+              }
+            />
+            <Route
+              path="/edit-resume"
+              element={
+                <AppLayout>
+                  <EditResumePage />
+                </AppLayout>
+              }
+            />
+            <Route
+              path="/knowledge"
+              element={
+                <AppLayout>
+                  <KnowledgePage />
+                </AppLayout>
+              }
+            />
+            <Route path="/login" element={<LoginPage />} />
+          </Routes>
+        </BrowserRouter>
+      </AuthProvider>
     </ConfigProvider>
   );
 }

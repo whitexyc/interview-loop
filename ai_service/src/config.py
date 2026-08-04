@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     embedding_base_url: str = ""
     embedding_model: str = "OllmOne/bge-m3-GGUF"
 
+    # JWT 登录（module-032）：HS256 共享密钥，与 Java 后端一致
+    # 环境变量：PW_JWT_SECRET（.env 本地配置，不进仓库）
+    jwt_secret: str = ""
+
     # 混合检索
     hybrid_search_alpha: float = 0.3  # BM25 权重，向量权重为 1-alpha
 

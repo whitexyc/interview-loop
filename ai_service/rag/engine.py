@@ -157,7 +157,7 @@ class RAGEngine:
             logger.error("检索失败: %s", e, exc_info=True)
             return SearchResponse(results=[], message="检索服务暂不可用")
 
-    async def chat(self, request: ChatRequest, client_ip: str = "unknown") -> ChatResponse:
+    async def chat(self, request: ChatRequest, identity: str = "unknown") -> ChatResponse:
         """RAG 问答：意图路由 → 检索+反思循环（最多 3 轮）→ 生成
 
         手写循环替代 LangGraph（更直观的流程控制）：
@@ -168,13 +168,13 @@ class RAGEngine:
            - 充分或达到上限则结束
         3. 用收集到的所有文档生成答案 + 引用溯源
 
-        长期记忆（module-023）：意图识别后调用 memory.recall(query, client_ip)，
+        长期记忆（module-023）：意图识别后调用 memory.recall(query, identity)，
         命中记忆以"历史记忆: ..."拼入生成 prompt；无记忆/召回失败时不注入，
         行为与之前完全一致（零回归）。
 
         Args:
             request: 聊天请求
-            client_ip: 用户 IP 标识（用于按 IP 隔离检索长期记忆）
+            identity: 请求身份标识（user_id 优先，否则 client_ip；用于按身份隔离检索长期记忆）
         """
         logger.info("RAG chat: query=%s, history=%d", request.query, len(request.history))
 
@@ -190,7 +190,7 @@ class RAGEngine:
                     sources=[], message="realtime_not_implemented")
 
             # ========== 1.5 长期记忆召回（module-023；闲聊/知识库路径，失败降级为空） ==========
-            memory_text = await self._recall_memory(request.query, client_ip)
+            memory_text = await self._recall_memory(request.query, identity)
 
             # 闲聊路径
             if intent == "casual_chat":
@@ -274,26 +274,27 @@ class RAGEngine:
                 message="internal_error" if not settings.debug else f"error: {e}",
             )
 
-    async def _recall_memory(self, query: str, client_ip: str, top_k: int = 3) -> str:
+    async def _recall_memory(self, query: str, identity: str, top_k: int = 3) -> str:
         """召回相关长期记忆并格式化为生成 prompt 片段
 
-        module-023：chat 生成前调用 memory_service.recall(query, ip)。
+        module-023：chat 生成前调用 memory_service.recall(query, identity)。
+        module-032：identity = user_id 优先，否则 client_ip，按身份隔离检索记忆。
         失败/超时/无记忆时返回空串，生成 prompt 不包含记忆段，
         与无记忆时行为完全一致（零回归）。
 
         Args:
             query: 用户当前问题
-            client_ip: 用户 IP 标识（用于按 IP 隔离检索记忆）
+            identity: 请求身份标识（user_id 优先，否则 client_ip）
             top_k: 最多召回记忆条数
 
         Returns:
             "历史记忆:\n- ..." 格式字符串；无记忆/失败返回 ""
         """
-        if not client_ip:
+        if not identity:
             return ""
         try:
             memories = await asyncio.wait_for(
-                memory_service.recall(query, client_ip, top_k=top_k),
+                memory_service.recall(query, identity, top_k=top_k),
                 timeout=5,
             )
         except Exception as e:

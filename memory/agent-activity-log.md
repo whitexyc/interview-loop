@@ -46,6 +46,9 @@
 | 模块 | 角色 | 摘要 |
 |------|------|------|
 | module-032 | Planner | 记忆架构讨论（三层：长期/短期/会话，参考 llm-push/19-Agent记忆管理.md）→ 用户定 3 模块方案（032 JWT登录 / 033 长期记忆 / 034 短期+会话）；plan.md + acceptance-criteria.md（跨栈契约：JWT HS256 + 共享 secret + 匿名降级 IP）；三记忆文件更新 |
+| module-032 | Developer(backend) | Workflow 并行派发：users 表 V032 + UserEntity/Repository + JwtUtil(HS256) + AuthService(BCrypt) + AuthController(register/login/me) + AuthInterceptor + application.yml/pom；mvn 37/0（新 17）；changelog-backend.md |
+| module-032 | Developer(frontend) | LoginPage + AuthContext(localStorage) + api/client.ts(统一附 Bearer) + AppLayout 登录入口 + 3 service 复用；vitest 17 新过 + build ✓；changelog-frontend.md |
+| module-032 | Developer(python) | src/identity.py(parse_jwt/resolve_identity) + 中间件注入 user_id + memory source→memory:\<identity\>: + engine 身份化；pytest 215/0（新 20）；changelog-python.md |
 
 ### 2026-08-02 收尾
 - Planner（主会话）：记忆库同步（file-index/activity-log 补齐）、backlog 记录（重排分数校准、记忆库维护）

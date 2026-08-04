@@ -1,7 +1,8 @@
 import { useNavigate, useLocation } from 'react-router-dom';
 import { Layout, Typography, Menu, Button, Tooltip } from 'antd';
-import { EditOutlined } from '@ant-design/icons';
+import { EditOutlined, LoginOutlined, UserOutlined } from '@ant-design/icons';
 import type { ReactNode } from 'react';
+import { useAuth } from '../auth/AuthContext';
 
 const { Header, Content } = Layout;
 
@@ -19,6 +20,7 @@ interface AppLayoutProps {
 export default function AppLayout({ children, maxWidth }: AppLayoutProps) {
   const navigate = useNavigate();
   const location = useLocation();
+  const { user, logout } = useAuth();
 
   return (
     <Layout style={{ minHeight: '100vh', background: '#f0f5f9' }}>
@@ -85,22 +87,40 @@ export default function AppLayout({ children, maxWidth }: AppLayoutProps) {
             justifyContent: 'center',
           }}
         />
-        {/* Edit button */}
-        <Tooltip title="编辑简历（密码保护）">
-          <Button
-            type="text"
-            icon={<EditOutlined />}
-            onClick={() => navigate('/edit-resume')}
-            style={{
-              position: 'absolute',
-              right: 24,
-              color: '#64748b',
-              fontSize: 16,
-              width: 44,
-              height: 44,
-            }}
-          />
-        </Tooltip>
+        {/* 登录态入口 + Edit button（未登录不强制，登录后显示用户名·退出） */}
+        <div
+          style={{
+            position: 'absolute',
+            right: 24,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+          }}
+        >
+          {user ? (
+            <>
+              <Typography.Text strong style={{ color: '#0f172a', whiteSpace: 'nowrap' }}>
+                <UserOutlined style={{ marginRight: 4 }} />
+                {user.username}
+              </Typography.Text>
+              <Button type="text" onClick={logout}>
+                退出
+              </Button>
+            </>
+          ) : (
+            <Button type="text" icon={<LoginOutlined />} onClick={() => navigate('/login')}>
+              登录
+            </Button>
+          )}
+          <Tooltip title="编辑简历（密码保护）">
+            <Button
+              type="text"
+              icon={<EditOutlined />}
+              onClick={() => navigate('/edit-resume')}
+              style={{ color: '#64748b', fontSize: 16, width: 44, height: 44 }}
+            />
+          </Tooltip>
+        </div>
       </Header>
       <Content
         style={{

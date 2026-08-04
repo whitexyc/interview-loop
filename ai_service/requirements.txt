@@ -3,6 +3,8 @@ uvicorn[standard]==0.29.0
 sqlalchemy[asyncio]==2.0.30
 asyncpg==0.29.0
 pydantic-settings==2.2.1
+# JWT 登录（module-032）：HS256 解析，与 Java 后端共享密钥
+pyjwt>=2.8.0
 langchain==0.2.1
 langchain-openai==0.1.7
 langchain-anthropic==0.1.8

@@ -1,11 +1,6 @@
-import axios from 'axios';
+import { apiHttp as http } from '../api/client';
 import type { ApiResponse } from '../types/api';
 import type { ResumeDTO } from '../types/resume';
-
-const http = axios.create({
-  baseURL: '/api',
-  timeout: 10000,
-});
 
 /**
  * 获取简历数据

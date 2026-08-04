@@ -19,6 +19,12 @@ spring:
       port: ${REDIS_PORT:6379}
       password: ${REDIS_PASSWORD:123456}
 
+# JWT 认证配置（module-032）
+jwt:
+  # 共享密钥（HS256 需 ≥32 字节）；生产/本地用环境变量 APP_JWT_SECRET 覆盖，缺失时服务启动失败（fail-fast）
+  secret: ${APP_JWT_SECRET}
+  expire-days: 7
+
 # AI Python 服务地址
 ai-service:
   base-url: ${AI_SERVICE_URL:http://localhost:8000}
