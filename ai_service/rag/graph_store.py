@@ -50,11 +50,15 @@ def _escape(val: str) -> str:
     """转义 Cypher 字符串字面量中的特殊字符
 
     替换规则：
-      ' → \\'  （单引号）
-      } → \\}  （大括号，用于 Cypher 属性语法）
-      \\  → \\\\\\  （反斜杠）
+      \\  → \\\\   （反斜杠）
+      ' → \\'    （单引号）
+
+    注意：不能转义 `}`——_escape 的输出总是插入 Cypher 字符串字面量 `'...'`
+    内部，`\}` 在 openCypher（AGE 1.6）中是非法转义序列，会导致含 `}` 的
+    实体/关系写入失败（实测 InvalidEscapeSequenceError，实体名如 `#{}`、`${}`）。
+    属性字典的 `{...}` 花括号来自查询模板本身，无需转义值内的 `}`。
     """
-    return val.replace("\\", "\\\\").replace("'", "\\'").replace("}", "\\}")
+    return val.replace("\\", "\\\\").replace("'", "\\'")
 
 
 class GraphStore:
