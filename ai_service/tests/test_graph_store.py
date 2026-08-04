@@ -14,7 +14,7 @@
 import asyncio
 from unittest import mock
 
-from rag.graph_store import GraphStore
+from rag.graph_store import GraphStore, _escape
 
 
 class TestNormalizeGraphScores:
@@ -120,3 +120,23 @@ class TestSearchRelated:
                 return await store.search_related(["不存在的实体"], top_k=5)
 
         assert asyncio.run(run()) == []
+
+
+class TestEscape:
+    """_escape Cypher 字符串字面量转义（module-031 修复）"""
+
+    def test_brace_not_escaped(self):
+        # } 不再转义：`\}` 在 openCypher（AGE 1.6）是非法转义序列，
+        # 会导致含 `}` 的实体/关系写入失败（InvalidEscapeSequenceError）
+        assert _escape("abc}def") == "abc}def"
+        assert _escape("#{}") == "#{}"
+        assert _escape("${}") == "${}"
+
+    def test_single_quote_escaped(self):
+        assert _escape("it's") == r"it\'s"
+
+    def test_backslash_escaped(self):
+        assert _escape("a\\b") == "a\\\\b"
+
+    def test_mixed_special_chars(self):
+        assert _escape("it's a\\b}") == r"it\'s a\\b}"

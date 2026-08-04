@@ -33,5 +33,14 @@
 | 08-02 | module-029 | 全角色 | 前端增强（工具轨迹 + 降级链动态调序） |
 | 08-02 | module-030 | 全角色 | 重排优化（bge）+ LangGraph 实验端点 |
 
+### 2026-08-04（module-030 修复 + module-031 知识库重建）
+| 模块 | 角色 | 摘要 |
+|------|------|------|
+| module-030 修复 | Developer | 实机诊断：库里 45 篇全为旧版"整篇 1 父+1 子"大块（平均 2.1 万字符）→ rerank 200-641s + 同步阻塞事件循环冻结服务；reranker 截断 500 字符 + to_thread 修复；降级链恢复 deepseek 优先（提交 78fc9a0） |
+| module-031 | Planner | 分块规则讨论 → 用户拍板 Option C（## + ### + 父块 4000 上限 + 子块 300）；plan.md / acceptance-criteria.md |
+| module-031 | Developer | chunker Option C 实现 + tests 8/8；reindex_knowledge_base.py（幂等/--dry-run/--no-graph/--skip-import）；全量重建 58 文件 → 1136 父 / 6370 子，父块 >4000 = 0 |
+| module-031 | Reviewer | 审查发现 cleanup_orphans `r.t` bug（SQLAlchemy 2.0.19 Row 具名属性陷阱）→ 修复 + --skip-import 恢复模式；review-report.md |
+| module-031 | Tester | 单测 8/8；全量回归 181 passed / 2 既有 async 债务；库内统计达标；test-report.md（图谱/E2E 待恢复运行） |
+
 ### 2026-08-02 收尾
 - Planner（主会话）：记忆库同步（file-index/activity-log 补齐）、backlog 记录（重排分数校准、记忆库维护）

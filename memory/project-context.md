@@ -46,6 +46,7 @@
 | module-028 | Agent 工具化（ToolRegistry + ReAct 循环） | 0.28.0-module-028 | 2026-08-02 | ✅ 完成（测试通过 2026-08-02） |
 | module-029 | 前端增强（SSE 工具轨迹展示 + 降级链动态调序） | 0.29.0-module-029 | 2026-08-02 | ✅ 完成（测试通过 2026-08-02） |
 | module-030 | 重排性能优化 + LangGraph 实验端点 | 0.30.0-module-030 | 2026-08-02 | ✅ 完成（测试通过 2026-08-02） |
+| module-031 | 知识库重建（父子分块 reindex + chunker Option C） | 0.31.0-module-031 | 2026-08-04 | 🔄 进行中（文档重建完成，图谱重建/E2E 待收尾） |
 
 ## 4. 架构决策记录（ADR）索引
 | ADR 编号 | 决策标题 | 状态 | 日期 |
@@ -53,9 +54,9 @@
 | adr-001 | Qwen3-Reranker 需 chat template 适配（不能裸 pair） | 已采纳（superseded by module-030） | 2026-08-01 |
 
 ## 5. 当前迭代状态
-- 当前迭代版本: v0.30.0
-- 正在进行的模块: 待定（module-030 已完成；候选：评估复盘 / 简历更新 / 归档）
-- 下一个待开发模块: 待定（候选：评估复盘 / 简历更新 / 归档）
+- 当前迭代版本: v0.31.0
+- 正在进行的模块: module-031 知识库重建（文档重建完成 1136 父/6370 子；图谱重建/E2E 收尾中）
+- 下一个待开发模块: 待定（候选：评估复盘 / 简历更新 / 归档 / 分块质量 golden 复核）
 
 ## 7. 关键技术决策记录
 - 所有 API 返回格式统一为 {code, msg, data, timestamp, request_id}（详见 CLAUDE.md 第5节）
@@ -97,3 +98,5 @@
 - 重排性能优化（module-030，2026-08-02）：① **重排模型 Qwen3-Reranker-0.6B → bge-reranker-v2-m3**——Qwen3（生成式）CPU 每对 ~6s（top-20 需 120s）阻塞真实链路；bge 是分类式标准 CrossEncoder，`predict` 传 (query, doc) 裸 pair 即可，删除 Qwen3 的 chat message + `add_generation_prompt=True` 适配代码；`_LOCAL_MODEL_DIR` → `models/bge-reranker-v2-m3`（权重已下载 2.17GB）；缺权重校验（module-018 设计）保留（缺失目录/权重抛 RerankerException，不回退 HF）；`rerank(query, documents, top_k=5)` 签名不变；rag_metadata_tables.sql / create_metadata_tables.py 的 rag_config.reranker_model → `BAAI/bge-reranker-v2-m3`。实测 5 pair 热推理 **1.273s**（Qwen3 需 30s，12 倍提升）；分数接近 1.0（sigmoid 饱和，实测 0.95-0.97）排序仍正确，区分度低是已知特性不阻塞，校准留待后续。② **LangGraph 版 ReAct 实验端点（并存）**——新增 `agent/langgraph_react.py`（StateGraph 编排：llm_call → 条件路由有 tool_call → execute_tools / 无 → finalize；execute_tools → 工具数<budget 回 llm_call / 否则 fallback 兜底；预算=0 直接 LLM chat；节点把 token/tool_call/tool_result/done 事件追加 state["events"]，ainvoke 结束按序产出）；复用现有 ReactContext/_build_messages/_assistant_message/ToolRegistry（不重复实现）；`main.py` 新增 POST /ai/rag/chat/agent-lg（SSE，事件与 /ai/rag/chat/agent 一致）；**不动 react.py 手写循环（零回归）**。实测真实调用：HTTP 200，事件 tool_call×4/tool_result×4/token×2/done，工具数 4 ≤ budget 4（预算耗尽走 reflector 兜底生成真实答案），sources 5，0 error。单测 17 个见 `ai_service/tests/test_rerank_langgraph.py`；全量回归 **180 passed / 2 既有 async 技术债务失败**（无新增失败）。**环境观察（非本模块）**：服务 lifespan 未预热 reranker，首次重排请求含一次性 2.17GB 模型加载（~5.6s），冷启动后热推理 <3s，如需可后续预热。
 - module-030 审查结论（2026-08-02，Reviewer）：**审查通过**。完整阅读全部变更文件 + 独立复现：① 新单测 17/17 passed；② 全量回归 180 passed / 2 既有 async 技术债务失败（test_engine.py 缺 pytest-asyncio，module-018 起记录，与 Developer 自测一致，无新增）；③ py_compile 5 文件 OK；④ react.py 不在 git diff（零回归确认），main.py diff 纯新增端点；⑤ grep 无 add_generation_prompt/processing_kwargs 活动残留；⑥ LangGraph 编排逐点核对与手写 react.py 行为一致（预算截断/条件路由/兜底/reasoning_content 回传/工具失败空串/预算=0）。无阻塞问题，5 项低级别建议记录于 review-report.md（新增代码量超预估、plan graph.py 调整待 Planner 确认、project-context Qwen3 决策记录待 supersede 标注、lifespan 未预热 reranker、测试 import 耗时）。报告：`specs/module-030-rerank-langgraph/review-report.md`。**模块状态 ✅ 审查通过，待 Tester 验收**
 - module-030 测试结论（2026-08-02，Tester）：**验收通过（33/33）**。① 新增单测 17/17 passed（53.28s，test_rerank_langgraph.py：bge 模型路径/裸 pair/缺权重报错/排序降序 top_k/空文档/缺 content 不崩 + LangGraph 预算/截断/条件路由/工具失败/预算=0/docs 累积/reasoning 回传/事件序 + SSE 端点）；② 全量回归 **180 passed / 2 既有 async 技术债务失败**（test_engine.py 缺 pytest-asyncio，module-018 起备案，本模块 0 行 diff，0 新增失败，163+17=180 口径一致）；③ py_compile 5 文件 OK；④ **真实 bge-reranker**：冷启动（含 2.17GB 一次性加载）8.00s，热推理 5 pair **2.05s < 3s**；排序相关 [1,5,3] 排前、不相关 [4,2] 排后，scores [0.9998,0.9815,0.4236,0.0012,0.0006]（饱和但排序正确）；缺权重/缺目录均真实抛 RerankerException；⑤ **真实 LangGraph 端点**（uvicorn + curl）：POST /ai/rag/chat/agent-lg 200，事件 tool_call×4/tool_result×4/token×2/done×1，**tool_count=4 ≤ budget=4**，真实 LLM 回答引用真实文档，sources 5，0 error；⑥ **现有 /ai/rag/chat/agent 无回归**：真实调用 200 正常回答（tool_count=4 ≤ budget=4，0 error），git diff 确认 react.py/tool_registry.py/llm/client.py 未改动；⑦ 验收 33/33 通过（2 项代码长度附注 non-blocking，同 Reviewer 建议 #1）。**环境观察（非本模块）**：服务 lifespan 未预热 reranker，首次重排请求含一次性 2.17GB 模型加载（~8s），冷启动后热推理 <3s。报告：`specs/module-030-rerank-langgraph/test-report.md`。**模块标记 ✅ 完成**
+- module-030 修复 + 分块根因诊断（2026-08-04，直接协作）：实机诊断发现**知识库 45 篇文档 100% 是旧版导入代码写入的"整篇 1 父 + 1 子"大块**（子块平均 2.1 万字符，最长 71,253），当前父子分块从未真正执行过 → 嵌入 8192 token 截断（检索质量崩塌，如"G1 GC" 返回 Redis 文档）+ rerank 对超长块推理（200-641s）+ `predict()` 同步阻塞事件循环冻结服务。① 修复 `reranker.py`：`_MAX_PAIR_CHARS=500` 截断 + `predict` 移到 `asyncio.to_thread` + `threading.Lock`（对齐 embeddings.py module-027 模式），rerank 200-641s → 2-9s，不再冻结（提交 78fc9a0，[fix] module-030）；② 降级链经 `/ai/llm/chain` 恢复 `deepseek → qwen → zhipu`（实测 deepseek 1.1s / qwen 8.9s / zhipu 8.3s）。**数据过期是检索质量问题的根因**，见 module-031。
+- 知识库重建 module-031（2026-08-04）：① **chunker 分块规则 Option C（用户拍板）**——默认 `headers_to_split_on=[("##","section"),("###","subsection")]`（父块粒度=最小标题单元，标题路径"板块6 > 题目2"）+ `max_parent_chars=4000`（超限父块按段落二次切分为 ≤4000 子父块）+ fallback 加固（无标题 → 整篇作父块 + 子块分割 + 受上限约束）；子块保持 300/50。实测 58 源文件：父块 1136 / 子块 6370，**>4000 父块 = 0**（旧 ## 规则 57 个 >8000）、89% " > "父块。② **全量重建 `reindex_knowledge_base.py`**（幂等按 title 先删后建 / --dry-run / --no-graph / --skip-import 崩溃恢复；复用 chunker + embedding_service + graph_extractor；入库字段镜像 add_document）：58 文件全部成功 → 父块 1136 / 子块 6370（用时 28 分钟）。③ 已知坑：SQLAlchemy 2.0.19+ `Row.t` 具名属性返回 Row 而非值（弃用警告），需用 `r[0]` 索引（cleanup_orphans 首次运行崩溃已修）；overview.md 两目录冲突自动改名 overview-llm-push。④ 图谱重建（清空 + 逐文档 LLM 提取）与检索 E2E 待收尾。模块文档：`specs/module-031-knowledge-reindex/`。
