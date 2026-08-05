@@ -47,6 +47,7 @@
 | module-029 | 前端增强（SSE 工具轨迹展示 + 降级链动态调序） | 0.29.0-module-029 | 2026-08-02 | ✅ 完成（测试通过 2026-08-02） |
 | module-030 | 重排性能优化 + LangGraph 实验端点 | 0.30.0-module-030 | 2026-08-02 | ✅ 完成（测试通过 2026-08-02） |
 | module-031 | 知识库重建（父子分块 reindex + chunker Option C） | 0.31.0-module-031 | 2026-08-05 | ✅ 完成（文档 1136 父/6370 子 + 图谱 1423 实体重建 + E2E 检索质量恢复） |
+| module-032 | JWT 登录体系（后端 auth + 前端登录页 + AI 身份解析） | 0.32.0-module-032 | 2026-08-05 | ✅ 完成（40/40 验收；Tester 真实 E2E 发现 HS512 缺陷 → 修复显式 HS256 → 复验通过） |
 
 ## 4. 架构决策记录（ADR）索引
 | ADR 编号 | 决策标题 | 状态 | 日期 |
@@ -54,9 +55,9 @@
 | adr-001 | Qwen3-Reranker 需 chat template 适配（不能裸 pair） | 已采纳（superseded by module-030） | 2026-08-01 |
 
 ## 5. 当前迭代状态
-- 当前迭代版本: v0.31.0
-- 正在进行的模块: 待定（module-031 知识库重建已完成：文档 1136 父/6370 子 + 图谱 1423 实体 + E2E 检索质量恢复）
-- 下一个待开发模块: 待定（候选：评估复盘 / 简历更新 / 归档 / 分块质量 golden 复核 / 图谱 _escape 修复后重跑提取）
+- 当前迭代版本: v0.32.0
+- 正在进行的模块: 待定（module-032 JWT 登录已完成）
+- 下一个待开发模块: **module-033 长期记忆自动写入** / module-034 短期记忆+会话记忆（用户拍板 3 模块方案）
 
 ## 7. 关键技术决策记录
 - 所有 API 返回格式统一为 {code, msg, data, timestamp, request_id}（详见 CLAUDE.md 第5节）
@@ -100,3 +101,4 @@
 - module-030 测试结论（2026-08-02，Tester）：**验收通过（33/33）**。① 新增单测 17/17 passed（53.28s，test_rerank_langgraph.py：bge 模型路径/裸 pair/缺权重报错/排序降序 top_k/空文档/缺 content 不崩 + LangGraph 预算/截断/条件路由/工具失败/预算=0/docs 累积/reasoning 回传/事件序 + SSE 端点）；② 全量回归 **180 passed / 2 既有 async 技术债务失败**（test_engine.py 缺 pytest-asyncio，module-018 起备案，本模块 0 行 diff，0 新增失败，163+17=180 口径一致）；③ py_compile 5 文件 OK；④ **真实 bge-reranker**：冷启动（含 2.17GB 一次性加载）8.00s，热推理 5 pair **2.05s < 3s**；排序相关 [1,5,3] 排前、不相关 [4,2] 排后，scores [0.9998,0.9815,0.4236,0.0012,0.0006]（饱和但排序正确）；缺权重/缺目录均真实抛 RerankerException；⑤ **真实 LangGraph 端点**（uvicorn + curl）：POST /ai/rag/chat/agent-lg 200，事件 tool_call×4/tool_result×4/token×2/done×1，**tool_count=4 ≤ budget=4**，真实 LLM 回答引用真实文档，sources 5，0 error；⑥ **现有 /ai/rag/chat/agent 无回归**：真实调用 200 正常回答（tool_count=4 ≤ budget=4，0 error），git diff 确认 react.py/tool_registry.py/llm/client.py 未改动；⑦ 验收 33/33 通过（2 项代码长度附注 non-blocking，同 Reviewer 建议 #1）。**环境观察（非本模块）**：服务 lifespan 未预热 reranker，首次重排请求含一次性 2.17GB 模型加载（~8s），冷启动后热推理 <3s。报告：`specs/module-030-rerank-langgraph/test-report.md`。**模块标记 ✅ 完成**
 - module-030 修复 + 分块根因诊断（2026-08-04，直接协作）：实机诊断发现**知识库 45 篇文档 100% 是旧版导入代码写入的"整篇 1 父 + 1 子"大块**（子块平均 2.1 万字符，最长 71,253），当前父子分块从未真正执行过 → 嵌入 8192 token 截断（检索质量崩塌，如"G1 GC" 返回 Redis 文档）+ rerank 对超长块推理（200-641s）+ `predict()` 同步阻塞事件循环冻结服务。① 修复 `reranker.py`：`_MAX_PAIR_CHARS=500` 截断 + `predict` 移到 `asyncio.to_thread` + `threading.Lock`（对齐 embeddings.py module-027 模式），rerank 200-641s → 2-9s，不再冻结（提交 78fc9a0，[fix] module-030）；② 降级链经 `/ai/llm/chain` 恢复 `deepseek → qwen → zhipu`（实测 deepseek 1.1s / qwen 8.9s / zhipu 8.3s）。**数据过期是检索质量问题的根因**，见 module-031。
 - 知识库重建 module-031（2026-08-04）：① **chunker 分块规则 Option C（用户拍板）**——默认 `headers_to_split_on=[("##","section"),("###","subsection")]`（父块粒度=最小标题单元，标题路径"板块6 > 题目2"）+ `max_parent_chars=4000`（超限父块按段落二次切分为 ≤4000 子父块）+ fallback 加固（无标题 → 整篇作父块 + 子块分割 + 受上限约束）；子块保持 300/50。实测 58 源文件：父块 1136 / 子块 6370，**>4000 父块 = 0**（旧 ## 规则 57 个 >8000）、89% " > "父块。② **全量重建 `reindex_knowledge_base.py`**（幂等按 title 先删后建 / --dry-run / --no-graph / --skip-import 崩溃恢复；复用 chunker + embedding_service + graph_extractor；入库字段镜像 add_document）：58 文件全部成功 → 父块 1136 / 子块 6370（用时 28 分钟）。③ 已知坑：SQLAlchemy 2.0.19+ `Row.t` 具名属性返回 Row 而非值（弃用警告），需用 `r[0]` 索引（cleanup_orphans 首次运行崩溃已修）；overview.md 两目录冲突自动改名 overview-llm-push。④ 图谱重建（清空 + 逐文档 LLM 提取）：ok=59 failed=0，实体 1423 / 边 2139，test_dedup 死引用实体已清。⑤ E2E：G1 查询 → G1 文档（重建前返回 Redis 文档）、Redis 查询 → Redis 文档，冷 32s / 暖 21.3s。**⑥ async 技术债务修复（2026-08-05）**：`tests/test_engine.py` 2 个 async 用例（module-018 起备案失败）改为同步 `def` + 函数内 `asyncio.run()`（套件同款模式），全量回归 **195 passed / 0 failed**，债务清零。模块文档：`specs/module-031-knowledge-reindex/`。
+- JWT 登录体系 module-032（2026-08-05）：① 三栈完整 JWT 登录——Java（users 表 V032 + AuthController/Service + JwtUtil + BCrypt + AuthInterceptor）、React（LoginPage + AuthContext + api/client.ts 统一附 Bearer）、Python（src/identity.py parse_jwt/resolve_identity + 中间件注入 user_id + 记忆 source 改 `memory:<identity>:`）。② 匿名降级：无/非法 token → user_id="" → client_ip（零回归）。③ **关键缺陷 + 修复**：Tester 真实 E2E 发现 Java `signWith(key)` 对 64 字节 secret 自动签 **HS512**，Python 仅验 HS256 → token 被拒、记忆不按 user_id 隔离（B 召回 A 记忆）；修复为显式 `signWith(key, Jwts.SIG.HS256)` + 64 字节回归测试 → 复验通过（token alg=HS256、A 记忆 memory:3:、B 召回 0）。**教训：三栈契约核对必须含真实双服务 JWT 握手，单测密钥长度会掩盖算法选择问题**。④ 契约：失败响应用 CommonResult `msg`（非 message，前端兼容两形态）+ HTTP 400；共享密钥 APP_JWT_SECRET=PW_JWT_SECRET 按值对齐（.env 不进仓库）。模块文档：`specs/module-032-jwt-login/`。相关：[[workflow-dispatch-all-at-once]]。

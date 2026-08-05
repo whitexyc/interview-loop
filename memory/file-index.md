@@ -79,5 +79,7 @@
 | module-028 | specs/module-028-agent-tools/ | ✅ Agent 工具化 |
 | module-029 | specs/module-029-frontend-enhance/ | ✅ 前端增强 |
 | module-030 | specs/module-030-rerank-langgraph/ | ✅ 重排+LangGraph |
+| module-031 | specs/module-031-knowledge-reindex/ | ✅ 知识库重建 + chunker Option C |
+| module-032 | specs/module-032-jwt-login/ | ✅ JWT 登录体系（HS256 显式签名修复后 40/40） |
 
 > 每个模块目录含 plan.md / acceptance-criteria.md / changelog.md / review-report.md / test-report.md。

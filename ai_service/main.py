@@ -18,6 +18,7 @@ from src.config import settings
 from src.database import init_db, async_session_factory
 from src.ratelimit import check_rate_limit, get_client_ip
 from src.cache import cache
+from src.identity import parse_jwt, resolve_identity
 from rag.engine import rag_engine
 from rag.schemas import (
     SearchRequest, SearchResponse, ChatRequest, ChatResponse,
@@ -81,6 +82,14 @@ async def load_fallback_chain_from_redis() -> None:
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     logger.info("AI 服务启动中...")
+
+    # module-032: JWT 共享密钥必须配置（与 Java 端一致，走 .env，不进仓库）。
+    # 缺失时明确报错启动失败，不静默运行无认证状态（plan §3.4）。
+    if not settings.jwt_secret:
+        raise RuntimeError(
+            "JWT_SECRET 未配置：请在 .env 设置 PW_JWT_SECRET（与 Java application.yml 同值）"
+        )
+
     await init_db()
 
     # 预热 embedding 模型 + LLM 客户端，避免首次请求卡顿
@@ -134,7 +143,8 @@ async def rate_limit_middleware(request: Request, call_next):
     """基于 IP 的请求频率限制
 
     在请求进入路由之前检查限流，超出阈值返回 429。
-    同时提取客户端 IP 注入 request.state 供后续使用。
+    同时提取客户端 IP 注入 request.state.client_ip；
+    并解析 JWT 注入 request.state.user_id（无/非法/过期 token 为 ""，module-032）。
     """
     # 健康检查不限制
     if request.url.path == "/ai/health":
@@ -144,6 +154,10 @@ async def rate_limit_middleware(request: Request, call_next):
     forwarded = request.headers.get("X-Forwarded-For")
     client_ip = get_client_ip(forwarded, request.client.host if request.client else None)
     request.state.client_ip = client_ip
+
+    # module-032: JWT 身份解析（Authorization: Bearer <token> → user_id）
+    # 成功注入 request.state.user_id；无/非法/过期 token → ""（降级 client_ip，零回归）
+    request.state.user_id = parse_jwt(request.headers.get("Authorization"))
 
     # 限流检查
     allowed, retry_after = check_rate_limit(client_ip)
@@ -284,11 +298,12 @@ async def search(request: SearchRequest):
 async def chat(request: ChatRequest, fastapi_req: Request):
     """RAG 知识库问答（自动保存会话到 IP 缓存）
 
-    将客户端 IP 传给 rag_engine.chat，用于按 IP 隔离检索长期记忆
-    （module-023；无记忆时零回归）。
+    将请求身份（user_id 优先，否则 client_ip）传给 rag_engine.chat，
+    用于按身份隔离检索长期记忆（module-032；匿名降级 client_ip，零回归）。
     """
     client_ip = getattr(fastapi_req.state, "client_ip", "unknown")
-    result = await rag_engine.chat(request, client_ip=client_ip)
+    identity = resolve_identity(fastapi_req)
+    result = await rag_engine.chat(request, identity=identity)
     # 保存消息到 IP 会话缓存（仅知识库路径保存）
     if result.message not in ("casual_chat", "realtime_not_implemented") and result.answer:
         save_messages_to_session(client_ip, request.query, result.answer, result.sources)
@@ -312,8 +327,8 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
       event: done   data: {"sources":[...]}
       event: error  data: {"message":str}
     """
-    # client_ip 由限流中间件注入 request.state（module-023 透传），取不到默认 'unknown'
-    client_ip = getattr(fastapi_req.state, "client_ip", "unknown")
+    # 身份由限流中间件注入 request.state（module-032：user_id 优先，否则 client_ip）
+    identity = resolve_identity(fastapi_req)
 
     async def event_stream():
         import time
@@ -407,7 +422,8 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
             # ====== Step 5: 流式生成 ======
             # module-025: 流式路径接入长期记忆（复用 engine._recall_memory，
             # 5s 超时 + 失败降级返回空串；无记忆时 memory 为空串，零回归）
-            memory = await rag_engine._recall_memory(request.query, client_ip)
+            # module-032: 记忆按身份隔离（user_id 优先，否则 client_ip）
+            memory = await rag_engine._recall_memory(request.query, identity)
             async for token in reflector.generate_answer_stream(request.query, docs, history=request.history, memory=memory):
                 yield f"event: token\ndata: {json.dumps(token)}\n\n"
 
@@ -449,12 +465,12 @@ async def chat_agent(request: ChatRequest, fastapi_req: Request):
       event: done         data: {"answer", "sources", "tool_count", "budget"}
       event: error        data: {"message"}
     """
-    client_ip = getattr(fastapi_req.state, "client_ip", "unknown")
+    identity = resolve_identity(fastapi_req)
 
     async def event_stream():
         from agent.react import ReactContext, _build_messages, react_loop
         try:
-            ctx = ReactContext(request.query, client_ip, request.history)
+            ctx = ReactContext(request.query, identity, request.history)
             budget = settings.max_agent_tools
             answer = ""
             tool_count = 0
@@ -508,14 +524,14 @@ async def chat_agent_langgraph(request: ChatRequest, fastapi_req: Request):
       event: done         data: {"answer", "sources", "tool_count", "budget"}
       event: error        data: {"message"}
     """
-    client_ip = getattr(fastapi_req.state, "client_ip", "unknown")
+    identity = resolve_identity(fastapi_req)
 
     async def event_stream():
         from agent.langgraph_react import (
             ReactContext, _build_messages, langgraph_react_loop,
         )
         try:
-            ctx = ReactContext(request.query, client_ip, request.history)
+            ctx = ReactContext(request.query, identity, request.history)
             budget = settings.max_agent_tools
             answer = ""
             tool_count = 0
@@ -554,18 +570,23 @@ async def chat_agent_langgraph(request: ChatRequest, fastapi_req: Request):
     )
 
 
-# ─── 长期记忆 API（module-023；复用 documents 表，source='memory:<ip>:' 区分） ───
+# ─── 长期记忆 API（module-023；复用 documents 表，source='memory:<identity>:' 区分，module-032 身份化） ───
 
 
 @app.post("/ai/memory/save")
-async def memory_save(request: MemorySaveRequest):
-    """保存长期记忆（按 IP 隔离写入 documents，source='memory:<ip>:'）
+async def memory_save(request: MemorySaveRequest, fastapi_req: Request):
+    """保存长期记忆（按身份隔离写入 documents，source='memory:<identity>:'）
 
+    identity = user_id（JWT.sub）优先，否则 client_ip（匿名降级，零回归）；
+    client_ip 取不到时兼容旧调用方 body ip（module-023）。
     分块 → 本地 bge-m3 向量化 → 写 documents（父块 + 子块）。
     content 为空返回错误；embedding 不可用返回错误码（不崩）。
     """
     try:
-        result = await memory_service.save(request.content, request.ip)
+        identity = resolve_identity(fastapi_req)
+        if identity == "unknown" and request.ip:
+            identity = request.ip
+        result = await memory_service.save(request.content, identity)
         return {"code": 0, "data": result}
     except ValueError as e:
         return {"code": 1, "message": str(e)}
@@ -575,10 +596,16 @@ async def memory_save(request: MemorySaveRequest):
 
 
 @app.post("/ai/memory/recall")
-async def memory_recall(request: MemoryRecallRequest):
-    """检索与 query 相关的长期记忆（按 IP 隔离，source 过滤）"""
+async def memory_recall(request: MemoryRecallRequest, fastapi_req: Request):
+    """检索与 query 相关的长期记忆（按身份隔离，source 过滤）
+
+    identity = user_id（JWT.sub）优先，否则 client_ip（匿名降级，零回归）。
+    """
     try:
-        memories = await memory_service.recall(request.query, request.ip)
+        identity = resolve_identity(fastapi_req)
+        if identity == "unknown" and request.ip:
+            identity = request.ip
+        memories = await memory_service.recall(request.query, identity)
         return {"code": 0, "data": {"memories": memories}}
     except Exception as e:
         logger.error("记忆检索失败: %s", e, exc_info=True)

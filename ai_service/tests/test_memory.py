@@ -470,7 +470,7 @@ class TestEngineRealtimeSkipsMemory:
             with mock.patch("rag.engine.router_agent.classify",
                             new=mock.AsyncMock(return_value={"intent": "realtime"})):
                 with mock.patch("rag.engine.memory_service.recall", new=mock.AsyncMock()) as recall:
-                    result = await rag_engine.chat(ChatRequest(query="现在几点"), client_ip="1.2.3.4")
+                    result = await rag_engine.chat(ChatRequest(query="现在几点"), identity="1.2.3.4")
             recall.assert_not_called()  # realtime 不触发记忆召回（避免 5s 无谓延迟）
             assert "开发中" in result.answer
         asyncio.run(run())
@@ -488,7 +488,7 @@ class TestEngineRealtimeSkipsMemory:
                         fake = mock.MagicMock()
                         fake.chat = mock.AsyncMock(return_value="好的")
                         gc.return_value = fake
-                        result = await rag_engine.chat(ChatRequest(query="你好"), client_ip="1.2.3.4")
+                        result = await rag_engine.chat(ChatRequest(query="你好"), identity="1.2.3.4")
             assert result.message == "casual_chat"
             sys_prompt = fake.chat.call_args.args[0][0]["content"]
             assert "用户偏好简洁回答" in sys_prompt  # 记忆仍注入闲聊 system prompt

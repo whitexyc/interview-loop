@@ -21,7 +21,7 @@
  * - 业务错误：uploadDocument 手动检查 code 字段
  * - 超时：http 实例 timeout=60000ms，超时抛 Error
  */
-import axios from 'axios';
+import { aiHttp as http, authHeader } from '../api/client';
 import type {
   ChatResponse,
   SearchResult,
@@ -34,18 +34,14 @@ import type {
 import type { ApiResponse } from '../types/api';
 
 /**
- * Axios 实例 — 所有 RAG 请求共用
+ * 统一 AI 请求实例（module-032 起走 api/client.ts 统一封装）
  *
  * baseURL: '/ai' → Vite 代理转发到 http://localhost:8000/ai
  * timeout: 60000ms（60 秒，RAG 全链路含多次 LLM 调用，可能耗时 20-40 秒）
  *
- * 为什么拆分出独立实例？
- * 与 resumeService 的实例隔离，便于单独配置超时时间和拦截器。
+ * 由 createHttp('/ai', 60000) 创建，登录后请求自动附加
+ * Authorization: Bearer <token>，供 AI 服务解析 user_id 实现记忆隔离。
  */
-const http = axios.create({
-  baseURL: '/ai',
-  timeout: 60000,
-});
 
 /**
  * 发送聊天消息 — RAG 问答全链路（非流式）
@@ -81,7 +77,7 @@ export async function chatStream(
 ): Promise<ChatResponse> {
   const resp = await fetch('/ai/rag/chat/stream', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeader() },
     body: JSON.stringify({ query, history }),
   });
 
@@ -180,7 +176,7 @@ export async function agentStream(
 ): Promise<ChatResponse> {
   const resp = await fetch('/ai/rag/chat/agent', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeader() },
     body: JSON.stringify({ query, history }),
   });
 

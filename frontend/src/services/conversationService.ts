@@ -2,14 +2,9 @@
  * 会话管理 API 服务
  * <p>M9: 通过 Java 后端 (/api) 做会话和消息 CRUD</p>
  */
-import axios from 'axios';
+import { apiHttp as http } from '../api/client';
 import type { ApiResponse } from '../types/api';
 import type { ConversationInfo, MessageDTO } from '../types/conversation';
-
-const http = axios.create({
-  baseURL: '/api',
-  timeout: 10000,
-});
 
 /** 列出所有会话 */
 export async function listConversations(): Promise<ConversationInfo[]> {

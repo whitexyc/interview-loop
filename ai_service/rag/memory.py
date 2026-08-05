@@ -1,21 +1,26 @@
 """
-长期记忆服务 — 跨会话记忆沉淀（module-023）
+长期记忆服务 — 跨会话记忆沉淀（module-023 / module-032 身份化）
 ===== ===== ===== ===== ===== ===== ===== ===== ===== ===== ===== =====
 
 系统无长期记忆（只有 Redis 短期缓存 + 内存 IP 会话，重启丢失）。
-本模块提供跨会话记忆：复用 documents 表（source='memory:<ip>:' 区分），
+本模块提供跨会话记忆：复用 documents 表（source='memory:<identity>:' 区分），
 无新表，复用分块（chunker）/向量化（本地 bge-m3）/检索（hybrid_retriever）全链路。
 
-- save(content, ip): 分块 → 向量化 → 写 documents（父块无向量 + 子块含向量）
-- recall(query, ip): hybrid_retriever 限定 source 过滤，只查本 IP 记忆，返回 Top-K
+- save(content, identity): 分块 → 向量化 → 写 documents（父块无向量 + 子块含向量）
+- recall(query, identity): hybrid_retriever 限定 source 过滤，只查该身份的
+  记忆，返回 Top-K
+
+身份（module-032）：
+- identity = user_id（JWT.sub）优先，否则 client_ip（匿名降级，零回归）
+- 用户登录后记忆按 user_id 隔离（跨设备/跨会话）；匿名访客仍按 client_ip 隔离
 
 隔离设计：
-- 记忆检索 source_pattern='memory:<ip>:%'，只查该 IP 的记忆文档；
-  source 以尾冒号分隔 IP 与内容（'memory:<ip>:'），避免前缀重叠 IP
+- 记忆检索 source_pattern='memory:<identity>:%'，只查该身份的记忆文档；
+  source 以尾冒号分隔身份与内容（'memory:<identity>:'），避免前缀重叠
   （如 1.1.1.1 与 1.1.1.10）经 LIKE 交叉泄漏记忆
-- ip 必须通过 IPv4 格式校验（_normalize_ip，空/非法降级 'unknown'），
-  且 pattern 构造处对 LIKE 元字符转义（_escape_like），双保险杜绝
-  通配符注入（如 ip="%" 构造 'memory:%:%' 匹配全部记忆）绕过按 IP 隔离
+- identity 必须通过规范化校验（_normalize_identity，空/含 LIKE 元字符降级
+  'unknown'），且 pattern 构造处对 LIKE 元字符转义（_escape_like），双保险
+  杜绝通配符注入（如 identity="%" 构造 'memory:%:%' 匹配全部记忆）绕过隔离
 - 普通知识库检索默认排除 'memory:%' 前缀（见 retriever._source_condition），
   保证记忆不污染知识库检索结果
 """
@@ -35,44 +40,46 @@ from rag.text_tokenizer import tokenize
 
 logger = logging.getLogger(__name__)
 
-# 记忆 source 前缀：source='memory:<ip>:' 区分记忆与知识库文档（尾冒号为 IP 与内容的分隔符）
+# 记忆 source 前缀：source='memory:<identity>:' 区分记忆与知识库文档
+#（尾冒号为身份与内容的分隔符；identity = user_id 优先，否则 client_ip）
 MEMORY_SOURCE_PREFIX = "memory:"
-DEFAULT_IP = "unknown"
-# IPv4 格式校验（review #1）：仅数字与点组成，天然不含 LIKE 元字符，
-# 校验通过即可保证 ip 无法向 source_pattern 注入通配符绕过按 IP 隔离
-_IPV4_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
+DEFAULT_IDENTITY = "unknown"
+# identity 中禁止出现的 LIKE 元字符（review #1 双保险：拒绝 + 转义）。
+# user_id 由 JWT 下发（服务端签发，可信）；client_ip 由中间件从 X-Forwarded-For
+# 提取。两者均可含任意字符串，故统一按 LIKE 元字符校验 + 转义，杜绝注入。
+_LIKE_META_RE = re.compile(r"[%_\\]")
 
 
-def _normalize_ip(ip: str) -> str:
-    """规范化并校验 IP 标识（review #1 安全加固）
+def _normalize_identity(identity: str) -> str:
+    """规范化并校验身份标识（user_id 或 client_ip）（review #1 安全加固）
 
     - 空白 → 'unknown'
-    - 非 IPv4（含 LIKE 通配符 '%'/'_'、反斜杠等）→ 'unknown'（防御性降级，
-      任何客户端可控 ip 都无法借 source_pattern 匹配到其他 IP 的记忆）
-    - 合法 IPv4 → 原样返回
+    - 含 LIKE 通配符 '%'/'_'、反斜杠等 → 'unknown'（防御性降级，
+      任何客户端可控 identity 都无法借 source_pattern 匹配到其他用户的记忆）
+    - 其余（合法 IPv4 或 JWT 下发的 user_id）→ 原样返回
 
     Args:
-        ip: 客户端传入的 IP 标识
+        identity: 身份标识（user_id 优先，否则 client_ip）
 
     Returns:
-        规范化后的 IP（仅数字与点或 'unknown'）
+        规范化后的 identity 或 'unknown'
     """
-    ip = (ip or "").strip()
-    if not ip:
-        return DEFAULT_IP
-    if _IPV4_RE.match(ip) is None:
-        return DEFAULT_IP
-    return ip
+    identity = (identity or "").strip()
+    if not identity:
+        return DEFAULT_IDENTITY
+    if _LIKE_META_RE.search(identity):
+        return DEFAULT_IDENTITY
+    return identity
 
 
 def _escape_like(s: str) -> str:
     """转义 SQL LIKE 模式元字符（\\、%、_）（review #1 双保险）
 
-    在 _normalize_ip 校验之外再做一层转义，即使未来校验规则被放宽，
-    注入到 LIKE pattern 的 ip 也不会被当作通配符。
+    在 _normalize_identity 校验之外再做一层转义，即使未来校验规则被放宽，
+    注入到 LIKE pattern 的 identity 也不会被当作通配符。
 
     Args:
-        s: 已规范化的 IP（仅数字与点）
+        s: 已规范化的身份标识（user_id 或 client_ip）
 
     Returns:
         转义后可用于 LIKE pattern 的字符串
@@ -84,11 +91,11 @@ class MemoryService:
     """长期记忆服务（跨会话记忆沉淀）
 
     职责：
-    - save: 保存一条记忆到 documents（source='memory:<ip>:'）
-    - recall: 检索与本 IP 相关的历史记忆（source 过滤，按 IP 隔离）
+    - save: 保存一条记忆到 documents（source='memory:<identity>:'）
+    - recall: 检索与身份相关的历史记忆（source 过滤，按身份隔离）
     """
 
-    async def save(self, content: str, ip: str = DEFAULT_IP) -> dict:
+    async def save(self, content: str, identity: str = DEFAULT_IDENTITY) -> dict:
         """保存一条长期记忆
 
         流程：分块（复用 chunker）→ 写父块 → 子块向量化 + 写子块（细节拆分到
@@ -97,7 +104,7 @@ class MemoryService:
 
         Args:
             content: 记忆内容（不能为空）
-            ip: 用户 IP 标识（空/空白则默认 'unknown'）
+            identity: 身份标识（user_id 优先，否则 client_ip；空/空白则默认 'unknown'）
 
         Returns:
             {"id": int, "title": str, "status": "saved"}
@@ -108,15 +115,16 @@ class MemoryService:
         """
         if not content or not content.strip():
             raise ValueError("记忆内容不能为空")
-        # 规范化 + 校验 IP：空/非 IPv4（含 LIKE 通配符）一律降级为 'unknown'，
-        # 防止通配符注入绕过按 IP 隔离（review #1）
-        ip = _normalize_ip(ip)
-        # source 带尾冒号分隔符：'memory:<ip>:'，配合 recall 的 'memory:<ip>:%
-        # LIKE 匹配，避免前缀重叠 IP（如 192.168.1.1 与 192.168.1.10）交叉泄漏记忆
-        source = f"{MEMORY_SOURCE_PREFIX}{ip}:"
+        # 规范化 + 校验身份：空/含 LIKE 通配符一律降级为 'unknown'，
+        # 防止通配符注入绕过按身份隔离（review #1）
+        identity = _normalize_identity(identity)
+        # source 带尾冒号分隔符：'memory:<identity>:'，配合 recall 的
+        # 'memory:<identity>:%' LIKE 匹配，避免前缀重叠身份（如 192.168.1.1
+        # 与 192.168.1.10）交叉泄漏记忆
+        source = f"{MEMORY_SOURCE_PREFIX}{identity}:"
         # 当日参数传 date 对象而非 ISO 字符串：字符串经 asyncpg 绑定为 VARCHAR，
         # PG 无 date=varchar 运算符 → 真实 save 崩溃（tester 阻塞 #1 回归）
-        title = await self._next_title(date.today(), ip)
+        title = await self._next_title(date.today(), identity)
 
         # 分块：短内容无 ## 标题 → parents 为空 → 兜底单父块
         chunk_result = chunker.chunk(content, source=source)
@@ -150,7 +158,7 @@ class MemoryService:
             session: 数据库会话（事务由调用方 save 持有）
             parents: 父块列表，每项 {"title": str, "content": str}
             title: 记忆标题（父块无标题时兜底）
-            source: 记忆 source 标识（'memory:<ip>:'）
+            source: 记忆 source 标识（'memory:<identity>:'）
 
         Returns:
             已 flush 的父块 Document 列表（含 id，供子块引用）
@@ -181,7 +189,7 @@ class MemoryService:
             children: 子块列表，每项 {"title", "content", "parent_index"}
             parent_objs: 已 flush 的父块对象列表（子块引用其 id）
             title: 记忆标题（子块无标题时兜底）
-            source: 记忆 source 标识（'memory:<ip>:'）
+            source: 记忆 source 标识（'memory:<identity>:'）
         """
         child_texts = [c["content"] for c in children]
         embeddings = await embedding_service.embed_documents(child_texts)
@@ -202,16 +210,16 @@ class MemoryService:
             ))
 
     async def recall(
-        self, query: str, ip: str = DEFAULT_IP, top_k: int = 5,
+        self, query: str, identity: str = DEFAULT_IDENTITY, top_k: int = 5,
     ) -> list[dict]:
-        """检索与 query 相关的长期记忆（按 IP 隔离）
+        """检索与 query 相关的长期记忆（按身份隔离）
 
-        复用 hybrid_retriever（source_pattern 限定 'memory:<ip>:%'），
+        复用 hybrid_retriever（source_pattern 限定 'memory:<identity>:%'），
         检索命中的子块再映射回父块，返回完整记忆内容（同父块去重取最高分）。
 
         Args:
             query: 检索查询
-            ip: 用户 IP 标识（空/空白则默认 'unknown'）
+            identity: 身份标识（user_id 优先，否则 client_ip；空/空白则默认 'unknown'）
             top_k: 返回最大记忆条数
 
         Returns:
@@ -220,23 +228,23 @@ class MemoryService:
         """
         if not query or not query.strip():
             return []
-        # 规范化 + 校验 IP，并对 LIKE 元字符转义（双保险，review #1）：
-        # 客户端传 ip="%" 或 "_" 时不会构造出 'memory:%:%' 匹配全部记忆
-        safe_ip = _escape_like(_normalize_ip(ip))
+        # 规范化 + 校验身份，并对 LIKE 元字符转义（双保险，review #1）：
+        # 客户端传 identity="%" 或 "_" 时不会构造出 'memory:%:%' 匹配全部记忆
+        safe_identity = _escape_like(_normalize_identity(identity))
         try:
             docs = await hybrid_retriever.retrieve(
-                query, top_k=top_k, source_pattern=f"{MEMORY_SOURCE_PREFIX}{safe_ip}:%",
+                query, top_k=top_k, source_pattern=f"{MEMORY_SOURCE_PREFIX}{safe_identity}:%",
             )
         except Exception as e:
             logger.warning("记忆检索失败，返回空记忆: %s", e)
             return []
         return await self._expand_to_parents(docs)
 
-    async def _next_title(self, day: date, ip: str) -> str:
-        """生成标题 '记忆-<日期>-<序号>'（序号=本 IP 当日已存记忆父块数+1）
+    async def _next_title(self, day: date, identity: str) -> str:
+        """生成标题 '记忆-<日期>-<序号>'（序号=本身份当日已存记忆父块数+1）
 
-        只统计父块（parent_id IS NULL），并按「本 IP + 当日」过滤：
-        - source LIKE 'memory:<ip>:%'（IP 规范化 + 转义，review #1）
+        只统计父块（parent_id IS NULL），并按「本身份 + 当日」过滤：
+        - source LIKE 'memory:<identity>:%'（身份规范化 + 转义，review #1）
         - created_at 落在当日（避免序号跨日期累计，review #4）
         不依赖标题格式：记忆内容含 markdown 标题时父块标题为标题文本
         （非 '记忆-<日期>-NN'），若按标题统计会漏计导致序号重复/跳号。
@@ -245,11 +253,11 @@ class MemoryService:
             day: 日期（datetime.date 对象，SQLAlchemy 绑定为 DATE；不可传
                 ISO 字符串，否则 asyncpg 绑定为 VARCHAR，PG 无 date=varchar
                 运算符导致真实查询崩溃 — tester 阻塞 #1）
-            ip: 已规范化的用户 IP（空/非法已由调用方降级为 'unknown'）
+            identity: 已规范化的身份标识（空/非法已由调用方降级为 'unknown'）
         """
         prefix = f"记忆-{day}-"
-        safe_ip = _escape_like(ip)
-        pattern = f"{MEMORY_SOURCE_PREFIX}{safe_ip}:%"
+        safe_identity = _escape_like(identity)
+        pattern = f"{MEMORY_SOURCE_PREFIX}{safe_identity}:%"
         async with async_session_factory() as session:
             count = (
                 await session.execute(
