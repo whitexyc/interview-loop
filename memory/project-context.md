@@ -4,7 +4,7 @@
 - 项目名称: personal-interview-website
 - 项目简介: 融合简历展示与 Agentic RAG 知识库问答的个人网站系统（双语言微服务架构：Java Spring Boot + Python FastAPI + React 前端）
 - 创建时间: 2026-07-29
-- 最后更新: 2026-08-02
+- 最后更新: 2026-08-06
 
 ## 2. 技术栈
 > 详见 `tech-stack.md`，此处仅保留摘要。
@@ -48,6 +48,7 @@
 | module-030 | 重排性能优化 + LangGraph 实验端点 | 0.30.0-module-030 | 2026-08-02 | ✅ 完成（测试通过 2026-08-02） |
 | module-031 | 知识库重建（父子分块 reindex + chunker Option C） | 0.31.0-module-031 | 2026-08-05 | ✅ 完成（文档 1136 父/6370 子 + 图谱 1423 实体重建 + E2E 检索质量恢复） |
 | module-032 | JWT 登录体系（后端 auth + 前端登录页 + AI 身份解析） | 0.32.0-module-032 | 2026-08-05 | ✅ 完成（40/40 验收；Tester 真实 E2E 发现 HS512 缺陷 → 修复显式 HS256 → 复验通过） |
+| module-033 | 长期记忆自动写入（对话结束异步提取 + 语义去重 + 动态K） | 0.33.0-module-033 | 2026-08-06 | ✅ 完成（Tester 验收 40/40；全量 254/0 + 半真实 E2E；去重阈值校准观察等 4 项非阻塞留 module-034） |
 
 ## 4. 架构决策记录（ADR）索引
 | ADR 编号 | 决策标题 | 状态 | 日期 |
@@ -55,9 +56,9 @@
 | adr-001 | Qwen3-Reranker 需 chat template 适配（不能裸 pair） | 已采纳（superseded by module-030） | 2026-08-01 |
 
 ## 5. 当前迭代状态
-- 当前迭代版本: v0.32.0
-- 正在进行的模块: 待定（module-032 JWT 登录已完成）
-- 下一个待开发模块: **module-033 长期记忆自动写入** / module-034 短期记忆+会话记忆（用户拍板 3 模块方案）
+- 当前迭代版本: v0.33.0-module-033
+- 正在进行的模块: **module-033 长期记忆自动写入**（✅ 完成，Tester 验收通过 2026-08-06，40/40）
+- 下一个待开发模块: module-034 短期记忆+会话记忆（用户拍板 3 模块方案）
 
 ## 7. 关键技术决策记录
 - 所有 API 返回格式统一为 {code, msg, data, timestamp, request_id}（详见 CLAUDE.md 第5节）
@@ -102,3 +103,5 @@
 - module-030 修复 + 分块根因诊断（2026-08-04，直接协作）：实机诊断发现**知识库 45 篇文档 100% 是旧版导入代码写入的"整篇 1 父 + 1 子"大块**（子块平均 2.1 万字符，最长 71,253），当前父子分块从未真正执行过 → 嵌入 8192 token 截断（检索质量崩塌，如"G1 GC" 返回 Redis 文档）+ rerank 对超长块推理（200-641s）+ `predict()` 同步阻塞事件循环冻结服务。① 修复 `reranker.py`：`_MAX_PAIR_CHARS=500` 截断 + `predict` 移到 `asyncio.to_thread` + `threading.Lock`（对齐 embeddings.py module-027 模式），rerank 200-641s → 2-9s，不再冻结（提交 78fc9a0，[fix] module-030）；② 降级链经 `/ai/llm/chain` 恢复 `deepseek → qwen → zhipu`（实测 deepseek 1.1s / qwen 8.9s / zhipu 8.3s）。**数据过期是检索质量问题的根因**，见 module-031。
 - 知识库重建 module-031（2026-08-04）：① **chunker 分块规则 Option C（用户拍板）**——默认 `headers_to_split_on=[("##","section"),("###","subsection")]`（父块粒度=最小标题单元，标题路径"板块6 > 题目2"）+ `max_parent_chars=4000`（超限父块按段落二次切分为 ≤4000 子父块）+ fallback 加固（无标题 → 整篇作父块 + 子块分割 + 受上限约束）；子块保持 300/50。实测 58 源文件：父块 1136 / 子块 6370，**>4000 父块 = 0**（旧 ## 规则 57 个 >8000）、89% " > "父块。② **全量重建 `reindex_knowledge_base.py`**（幂等按 title 先删后建 / --dry-run / --no-graph / --skip-import 崩溃恢复；复用 chunker + embedding_service + graph_extractor；入库字段镜像 add_document）：58 文件全部成功 → 父块 1136 / 子块 6370（用时 28 分钟）。③ 已知坑：SQLAlchemy 2.0.19+ `Row.t` 具名属性返回 Row 而非值（弃用警告），需用 `r[0]` 索引（cleanup_orphans 首次运行崩溃已修）；overview.md 两目录冲突自动改名 overview-llm-push。④ 图谱重建（清空 + 逐文档 LLM 提取）：ok=59 failed=0，实体 1423 / 边 2139，test_dedup 死引用实体已清。⑤ E2E：G1 查询 → G1 文档（重建前返回 Redis 文档）、Redis 查询 → Redis 文档，冷 32s / 暖 21.3s。**⑥ async 技术债务修复（2026-08-05）**：`tests/test_engine.py` 2 个 async 用例（module-018 起备案失败）改为同步 `def` + 函数内 `asyncio.run()`（套件同款模式），全量回归 **195 passed / 0 failed**，债务清零。模块文档：`specs/module-031-knowledge-reindex/`。
 - JWT 登录体系 module-032（2026-08-05）：① 三栈完整 JWT 登录——Java（users 表 V032 + AuthController/Service + JwtUtil + BCrypt + AuthInterceptor）、React（LoginPage + AuthContext + api/client.ts 统一附 Bearer）、Python（src/identity.py parse_jwt/resolve_identity + 中间件注入 user_id + 记忆 source 改 `memory:<identity>:`）。② 匿名降级：无/非法 token → user_id="" → client_ip（零回归）。③ **关键缺陷 + 修复**：Tester 真实 E2E 发现 Java `signWith(key)` 对 64 字节 secret 自动签 **HS512**，Python 仅验 HS256 → token 被拒、记忆不按 user_id 隔离（B 召回 A 记忆）；修复为显式 `signWith(key, Jwts.SIG.HS256)` + 64 字节回归测试 → 复验通过（token alg=HS256、A 记忆 memory:3:、B 召回 0）。**教训：三栈契约核对必须含真实双服务 JWT 握手，单测密钥长度会掩盖算法选择问题**。④ 契约：失败响应用 CommonResult `msg`（非 message，前端兼容两形态）+ HTTP 400；共享密钥 APP_JWT_SECRET=PW_JWT_SECRET 按值对齐（.env 不进仓库）。模块文档：`specs/module-032-jwt-login/`。相关：[[workflow-dispatch-all-at-once]]。
+- 长期记忆自动写入 module-033（2026-08-06）：① 对话结束异步提取——新增 `memory_extractor.py` `extract_facts(query, answer, history)`（LLM 一次调用 → 结构化 JSON {"facts":[{content, importance}]} → importance≥0.6 过滤 → 失败/超时/空 answer 降级 []，10s 超时）；只在 knowledge 路径触发，闲聊/实时跳过。② 语义去重——`save(dedup=True)`（默认）写入前 `_find_duplicate` 查本身份现有记忆子块嵌入（source LIKE `memory:<identity>:%` + 转义双保险），新事实嵌入 L2 归一化（点积=cosine）最高 >0.95 → `_merge_duplicate` 更新旧父块（追加合并，条数不涨，status="updated"）；去重检索/嵌入/更新异常一律降级为正常新增。③ 动态 K 召回——`recall` 先取 top_k=5 候选，按候选平均 hybrid_score 动态调 K（>0.85→5 / 0.75-0.85→3 / <0.75→1 宁缺毋滥），空候选返回空；每条结果新增 created_at（'YYYY-MM-DD'）。④ 格式化注入——`format_memory_line` 生成 `[长期记忆 - 日期]：内容`（无 created_at 省略日期），engine._recall_memory 拼 `历史记忆:\n...` 注入生成 prompt。⑤ 自动写入接入——engine.chat / chat_stream 在 knowledge 路径生成答案后 `asyncio.create_task` fire-and-forget 触发 `_persist_memory`（不 await 不阻塞响应；`_schedule_persist` / `schedule_stream_persist` 均带空 answer 守卫；casual/realtime 分支提前 return）。⑥ 配置 5 项阈值入 config.py（importance 0.6 / dedup 0.95 / 动态K 0.85/0.75 / max 5）。实现/单测见 `ai_service/tests/test_memory_extractor.py`（39 用例）。
+- module-033 测试结论（2026-08-06，Tester）：**验收通过（40/40，4 项附条件非阻塞）**。① 全量回归 **254 passed / 0 failed**（215 基线 + 39 新增，3 个既有 Redis setex 弃用 warning 与模块无关）；② 新增单测 **39/39**（test_memory_extractor.py：提取/importance 过滤/失败降级/JSON 结构/去重（>0.95 更新、不同新增、失败降级）/动态K 三档+空候选/格式化注入/触发链路 chat+chat_stream）；③ 身份回归 20/20、memory+identity+stream 54/54、py_compile 5 文件 OK；④ **半真实 E2E**（真实 PG + 真实本地 bge-m3 + 真实 DeepSeek HTTP 200）：`_persist_memory` 自动写入链路真实跑通（extract_facts 返回事实 → save 落库 → recall 召回 → 格式化注入），匿名 client_ip 两身份（9.9.9.9 / 8.8.8.8）隔离 PASS（含自动写入路径）；⑤ **Reviewer 关注项复核**：#1 动态K 真实 min-max 相对分 avg 恒<0.75 → 恒 K=1（K=5/3 档实际不可达，确认语义偏差）、#2 去重合并无脏数据/崩溃（不重建子块向量是已知取舍）、#3 chat 路径 `_recall_memory` top_k=3 截断 K=5 档（无逻辑错误）；⑥ **去重阈值校准观察**：真实 bge-m3 同义改写 cosine≈0.88 < 0.95 不触发去重（完全一致文本 1.0 触发），LLM 提取措辞不稳定 → 「二次同义对话→不膨胀」在措辞变化时不成立；机制正确属阈值校准问题，建议 module-034 下调阈值（约 0.85）或改绝对相似度口径；⑦ 时区观察：`created_at` 为 PG UTC（显示 08-05），标题用本地日期（08-06），同天差 8 小时（环境既有，非模块缺陷）。报告：`specs/module-033-long-term-memory/test-report.md`。**模块标记 ✅ 完成**

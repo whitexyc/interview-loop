@@ -18,7 +18,7 @@
 - 同步用例内 asyncio.run 执行，不依赖 pytest-asyncio（规避既有环境问题）
 """
 import asyncio
-from datetime import date
+from datetime import date, datetime
 from unittest import mock
 
 from rag.memory import memory_service, _escape_like
@@ -173,7 +173,9 @@ class TestRecall:
 
     def test_recall_passes_source_pattern_and_expands_to_parent(self):
         child = {"id": 2, "content": "子块", "parent_id": 1, "hybrid_score": 0.8}
-        parent = mock.MagicMock(id=1, content="完整记忆：上次结论是 X", title="记忆-2026-08-01-01")
+        parent = mock.MagicMock(id=1, content="完整记忆：上次结论是 X",
+                                title="记忆-2026-08-01-01",
+                                created_at=datetime(2026, 8, 1))
 
         async def run():
             with mock.patch("rag.memory.hybrid_retriever") as ret:
@@ -188,6 +190,7 @@ class TestRecall:
                 "content": "完整记忆：上次结论是 X",
                 "score": 0.8,
                 "title": "记忆-2026-08-01-01",
+                "created_at": "2026-08-01",
             }]
         asyncio.run(run())
 
@@ -273,7 +276,8 @@ class TestRecall:
         asyncio.run(run())
 
     def test_recall_dedup_same_parent_take_highest_score(self):
-        parent = mock.MagicMock(id=1, content="完整记忆内容", title="记忆-2026-08-01-01")
+        parent = mock.MagicMock(id=1, content="完整记忆内容", title="记忆-2026-08-01-01",
+                                created_at=datetime(2026, 8, 1))
         child_low = {"id": 2, "content": "子块1", "parent_id": 1, "hybrid_score": 0.5}
         child_high = {"id": 3, "content": "子块2", "parent_id": 1, "hybrid_score": 0.9}
 

@@ -121,7 +121,9 @@ def _hit_stream(gen_capture, memory_text="", recall_calls=None, classify_intent=
                                 status = resp.status_code
         if recall_calls is not None:
             recall_calls.extend(recall.call_args_list)
-    _run(run())
+    # module-033：mock 后台记忆自动写入（fire-and-forget 任务），避免真实 LLM 提取
+    with mock.patch("rag.engine.rag_engine._persist_memory", new=mock.AsyncMock()):
+        _run(run())
     return events, status
 
 

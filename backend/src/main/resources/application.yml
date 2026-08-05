@@ -1,5 +1,5 @@
 server:
-  port: 8080
+  port: 8081
 
 spring:
   application:
@@ -21,7 +21,8 @@ spring:
 
 # JWT 认证配置（module-032）
 jwt:
-  # 共享密钥（HS256 需 ≥32 字节）；生产/本地用环境变量 APP_JWT_SECRET 覆盖，缺失时服务启动失败（fail-fast）
+  # 共享密钥（HS256 需 ≥32 字节）；必须用环境变量 APP_JWT_SECRET 提供，无默认值（缺失时 Spring 占位符解析失败 = 启动 fail-fast）。
+  # 禁止硬编码默认密钥：env 缺失时回退到公开密钥可伪造任意用户 token、击穿认证与记忆隔离（module-033 Review #1 阻塞）。
   secret: ${APP_JWT_SECRET}
   expire-days: 7
 

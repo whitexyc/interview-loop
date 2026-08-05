@@ -9,9 +9,9 @@
 |----------|------|------|----------|----------|----------|------|
 | tech-stack.md | 项目初始化 | 配置 | 技术栈配置文档 | 2026-07-29 | 2026-07-29 | ✅ |
 | CLAUDE.md | 项目初始化 | 规范 | Vibe Coding 闭环工作流核心规范 | 2026-07-29 | 2026-07-29 | ✅ |
-| memory/project-context.md | 项目初始化 | 记忆 | 项目上下文记忆库（状态/待办/ADR索引） | 2026-07-29 | 2026-08-02 | ✅ |
-| memory/agent-activity-log.md | 项目初始化 | 记忆 | Agent 活动日志索引 | 2026-07-29 | 2026-08-02 | ✅ |
-| memory/file-index.md | 项目初始化 | 记忆 | 项目文件索引（本文） | 2026-07-29 | 2026-08-02 | ✅ |
+| memory/project-context.md | 项目初始化 | 记忆 | 项目上下文记忆库（状态/待办/ADR索引） | 2026-07-29 | 2026-08-06 | ✅ |
+| memory/agent-activity-log.md | 项目初始化 | 记忆 | Agent 活动日志索引 | 2026-07-29 | 2026-08-06 | ✅ |
+| memory/file-index.md | 项目初始化 | 记忆 | 项目文件索引（本文） | 2026-07-29 | 2026-08-06 | ✅ |
 | docker-compose.yml | module-001 | 配置 | PostgreSQL(pgvector) + Redis 容器编排 | 2026-07-29 | 2026-07-29 | ✅ |
 | backend/pom.xml | module-001 | 配置 | Spring Boot 3.2 依赖配置 | 2026-07-29 | 2026-07-29 | ✅ |
 | backend/src/main/java/.../common/CommonResult.java | module-001 | 代码 | 统一API返回格式 | 2026-07-29 | 2026-07-29 | ✅ |
@@ -33,7 +33,8 @@
 | ai_service/rag/graph_store.py | module-016 | 代码 | Graph RAG 图操作（AGE，真实分数） | ✅ |
 | ai_service/rag/graph_extractor.py | module-016 | 代码 | 图实体/关系提取 | ✅ |
 | ai_service/rag/chunker.py | module-017 | 代码 | 父子两级分块 | ✅ |
-| ai_service/rag/memory.py | module-023 | 代码 | 长期记忆（save/recall，IP 隔离） | ✅ |
+| ai_service/rag/memory.py | module-023/033 | 代码 | 长期记忆（save 语义去重 + recall 动态K + 格式化注入，IP/user_id 隔离） | ✅ |
+| ai_service/rag/memory_extractor.py | module-033 | 代码 | 长期记忆事实提取器（extract_facts LLM 提取，importance 过滤 + 失败降级） | ✅ |
 | ai_service/rag/text_tokenizer.py | module-020 | 代码 | jieba 分词工具 | ✅ |
 | ai_service/agent/router.py | module-005 | 代码 | 意图路由（LLM-as-Classifier） | ✅ |
 | ai_service/agent/reflector.py | module-026 | 代码 | 反思/生成（低温度 0.1 + 降级链） | ✅ |
@@ -81,5 +82,6 @@
 | module-030 | specs/module-030-rerank-langgraph/ | ✅ 重排+LangGraph |
 | module-031 | specs/module-031-knowledge-reindex/ | ✅ 知识库重建 + chunker Option C |
 | module-032 | specs/module-032-jwt-login/ | ✅ JWT 登录体系（HS256 显式签名修复后 40/40） |
+| module-033 | specs/module-033-long-term-memory/ | ✅ 长期记忆自动写入（Tester 验收 40/40，2026-08-06） |
 
 > 每个模块目录含 plan.md / acceptance-criteria.md / changelog.md / review-report.md / test-report.md。
