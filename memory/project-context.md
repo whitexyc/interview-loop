@@ -55,9 +55,9 @@
 | adr-001 | Qwen3-Reranker 需 chat template 适配（不能裸 pair） | 已采纳（superseded by module-030） | 2026-08-01 |
 
 ## 5. 当前迭代状态
-- 当前迭代版本: v0.32.0
-- 正在进行的模块: 待定（module-032 JWT 登录已完成）
-- 下一个待开发模块: **module-033 长期记忆自动写入** / module-034 短期记忆+会话记忆（用户拍板 3 模块方案）
+- 当前迭代版本: v0.33.0
+- 正在进行的模块: **module-033 长期记忆自动写入**（规划完成，待 DEVELOP 派发）
+- 下一个待开发模块: module-034 短期记忆+会话记忆（用户拍板 3 模块方案）
 
 ## 7. 关键技术决策记录
 - 所有 API 返回格式统一为 {code, msg, data, timestamp, request_id}（详见 CLAUDE.md 第5节）

@@ -42,8 +42,7 @@
 | module-031 | Reviewer | 审查发现 cleanup_orphans `r.t` bug（SQLAlchemy 2.0.19 Row 具名属性陷阱）→ 修复 + --skip-import 恢复模式；review-report.md |
 | module-031 | Tester | 单测 8/8 + graph_store 12/12；全量回归 **195 passed / 0 failed**（含 async 债务修复）；库内统计达标；图谱 1423 实体；E2E G1/Redis 检索质量恢复；test-report.md |
 
-### 2026-08-05（module-032 JWT 登录体系）
-| 模块 | 角色 | 摘要 |
+### 2026-08-05（module-032 JWT 登录体系）| 模块 | 角色 | 摘要 |
 |------|------|------|
 | module-032 | Planner | 记忆架构讨论（三层：长期/短期/会话，参考 llm-push/19-Agent记忆管理.md）→ 用户定 3 模块方案（032 JWT登录 / 033 长期记忆 / 034 短期+会话）；plan.md + acceptance-criteria.md（跨栈契约：JWT HS256 + 共享 secret + 匿名降级 IP）；三记忆文件更新 |
 | module-032 | Developer(backend) | Workflow 并行派发：users 表 V032 + UserEntity/Repository + JwtUtil(HS256) + AuthService(BCrypt) + AuthController(register/login/me) + AuthInterceptor + application.yml/pom；mvn 37/0（新 17）；changelog-backend.md |
@@ -52,6 +51,11 @@
 | module-032 | Reviewer | 三栈全量审查：跨栈契约专项核对（HS256 payload / APP_JWT_SECRET=PW_JWT_SECRET 按值对齐 / CommonResult.msg vs message / memory:\<identity\>: / 匿名降级 IP）；安全审查（BCrypt、secret 不进仓库、LIKE 注入双保险、日志无敏感）；独立复现 mvn 37/0 ✓ + vitest 17 ✓ + pytest identity/memory 49 ✓ + frontend build ✓；结论：⚠️ 有条件通过（契约/安全无阻塞；建议项见 review-report.md）|
 | module-032 | Tester | 三栈回归全过（mvn 37/0、pytest 215/0、vitest 31+3 基线）+ 真实 E2E：**发现核心跨栈缺陷**——Java `signWith(key)` 对 64 字节 secret 自动签 HS512，Python 仅验 HS256 → token 被拒、记忆不按 user_id 隔离（B 召回 A 记忆）。结论 ❌ 不通过，验收 32/40 |
 | module-032 | Developer(team-lead 修复) | 修复 JwtUtil 显式 `signWith(key, Jwts.SIG.HS256)` + 64 字节密钥回归测试（shouldSignHS256WithLongSecret）；mvn 38/0。重跑真实 E2E：token alg=HS256、A 记忆 memory:3:、B 召回 0（隔离成功）、匿名降级零回归 → **复验通过 40/40**。E2E 测试数据已清理 |
+
+### 2026-08-05（module-033 长期记忆自动写入）
+| 模块 | 角色 | 摘要 |
+|------|------|------|
+| module-033 | Planner | 长期记忆自动写入方案（对话结束异步 LLM 提取 + 语义去重>0.95 + 动态K召回 + 格式化注入 + fire-and-forget）；plan.md + acceptance-criteria.md（38 项）；三记忆文件更新 |
 | module-032 | Tester | **真实 E2E 验收发现核心缺陷：不通过**。① 三栈回归全过：mvn 37/0、pytest 215/0、vitest 31 pass + 3 既有 ChatPage 基线失败（git log 确认 ChatPage.test.tsx 未被 module-032 触碰）；② 真实双服务 E2E（Java:8080 APP_JWT_SECRET 与 PW_JWT_SECRET 同值 + AI:8000 hermes venv uvicorn + 真实 PG）：注册/登录/me/重复用户名/匿名降级全过；③ **缺陷**：Java JwtUtil 对 64 字节 secret 经 jjwt 0.12.6 自动签 **HS512**（token header 解码实证），Python parse_jwt 仅接受 HS256 → pyjwt `InvalidAlgorithmError` 拒绝 → 带 token 保存记忆 source=memory:127.0.0.1:（应为 memory:1:）、B 登录召回 A 的记忆（跨用户隔离失败）；④ 根因：单测密钥 40 字节恰好 HS256 掩盖问题，生产 64 字节才触发；Reviewer 复现仅跑单测未做真实握手；⑤ 修复方向：Java 显式 `signWith(key, Jwts.SIG.HS256)` 或对齐 Python；⑥ 验收 40 项：32 通过 / 8 失败（1.3 两项 + 1.4 一项 + 2.1 算法契约 + 4.3 两项 E2E + 5.3 文档同步 2 项留收尾）；test-report.md 已产出。**环境坑**：PowerShell `Get-Content` 注入 ETS 属性致登录 500（脚本问题非模块缺陷）|
 
 ### 2026-08-02 收尾
