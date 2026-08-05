@@ -5,6 +5,7 @@ FastAPI + pgvector + LangChain 多供应商 LLM
 import logging
 import json
 import time
+import asyncio
 from collections import defaultdict
 from typing import Optional
 
@@ -181,6 +182,25 @@ def save_messages_to_session(client_ip: str, user_msg: str, assistant_msg: str, 
     # 裁剪超出部分
     if len(records) > MAX_MESSAGES_PER_IP:
         IP_SESSION_MESSAGES[client_ip] = records[-MAX_MESSAGES_PER_IP:]
+
+
+def schedule_stream_persist(intent: str, query: str, answer: str,
+                            identity: str, history: list) -> None:
+    """chat_stream 生成结束后异步触发长期记忆自动写入（module-033，fire-and-forget）
+
+    仅 intent=knowledge 且 answer 非空时触发（闲聊/实时不提取，省成本避免存垃圾）。
+    asyncio.create_task 只调度不 await，写入后台进行不阻塞 SSE 响应；后台任务
+    异常全部在 rag_engine._persist_memory 内降级捕获，绝不抛回响应（零回归）。
+
+    Args:
+        intent: 意图识别结果（knowledge / casual_chat / realtime）
+        query: 用户问题
+        answer: 生成的完整答案文本（非空才提取）
+        identity: 请求身份（user_id 优先，否则 client_ip）
+        history: 最近对话历史
+    """
+    if intent == "knowledge" and answer and answer.strip():
+        asyncio.create_task(rag_engine._persist_memory(query, answer, identity, history))
 
 
 @app.get("/ai/health")
@@ -385,10 +405,14 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
             if not docs:
                 from llm.client import LLMFactory
                 client = LLMFactory.get_client()
+                answer_parts = []
                 async for token in client.generate_stream(
                     f"用户问：{request.query}\n\n知识库暂无相关信息。"
                 ):
+                    answer_parts.append(token)
                     yield f"event: token\ndata: {json.dumps(token)}\n\n"
+                # module-033：knowledge 路径生成结束后异步触发长期记忆自动写入
+                schedule_stream_persist(intent, request.query, "".join(answer_parts), identity, request.history)
                 yield "event: done\ndata: {}\n\n"
                 return
 
@@ -424,7 +448,9 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
             # 5s 超时 + 失败降级返回空串；无记忆时 memory 为空串，零回归）
             # module-032: 记忆按身份隔离（user_id 优先，否则 client_ip）
             memory = await rag_engine._recall_memory(request.query, identity)
+            answer_parts = []
             async for token in reflector.generate_answer_stream(request.query, docs, history=request.history, memory=memory):
+                answer_parts.append(token)
                 yield f"event: token\ndata: {json.dumps(token)}\n\n"
 
             # ====== Step 6: 引用溯源 ======
@@ -437,6 +463,9 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
                     "source": doc.get("source", ""),
                     "ref_index": i + 1,
                 })
+            # module-033：knowledge 路径流式生成结束后异步触发长期记忆自动写入
+            #（fire-and-forget；casual_chat 已提前返回、realtime 由 intent 检查跳过）
+            schedule_stream_persist(intent, request.query, "".join(answer_parts), identity, request.history)
             yield f"event: done\ndata: {json.dumps({'sources': sources})}\n\n"
 
         except Exception as e:

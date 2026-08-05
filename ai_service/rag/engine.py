@@ -38,7 +38,8 @@ from agent.router import router_agent
 from agent.reflector import reflector
 from rag.graph_store import graph_store
 from rag.graph_extractor import graph_extractor
-from rag.memory import memory_service
+from rag.memory import memory_service, format_memory_line
+from rag.memory_extractor import extract_facts
 
 logger = logging.getLogger(__name__)
 
@@ -247,12 +248,16 @@ class RAGEngine:
                 if memory_text:
                     prompt = f"{memory_text}\n\n{prompt}"
                 answer = await client.generate(prompt)
+                self._schedule_persist(request, answer, identity)
                 return ChatResponse(answer=answer, sources=[], message="ok")
 
             # ========== 4. 生成答案 + 引用溯源 ==========
             answer = await reflector.generate_answer(
                 request.query, docs, history=request.history, memory=memory_text,
             )
+            # module-033：knowledge 路径生成答案后异步触发长期记忆自动写入
+            #（fire-and-forget，不阻塞响应；casual_chat/realtime 已在分支提前返回）
+            self._schedule_persist(request, answer, identity)
 
             sources = []
             for i, doc in enumerate(docs[:5]):
@@ -279,6 +284,9 @@ class RAGEngine:
 
         module-023：chat 生成前调用 memory_service.recall(query, identity)。
         module-032：identity = user_id 优先，否则 client_ip，按身份隔离检索记忆。
+        module-033：动态 K 召回（recall 内部按候选相似度调整条数），格式化注入
+        '[长期记忆 - YYYY-MM-DD]：内容'（无 created_at 省略日期），帮助模型区分
+        记忆与当前对话。
         失败/超时/无记忆时返回空串，生成 prompt 不包含记忆段，
         与无记忆时行为完全一致（零回归）。
 
@@ -288,7 +296,7 @@ class RAGEngine:
             top_k: 最多召回记忆条数
 
         Returns:
-            "历史记忆:\n- ..." 格式字符串；无记忆/失败返回 ""
+            "历史记忆:\n[长期记忆 - 日期]：内容..." 格式字符串；无记忆/失败返回 ""
         """
         if not identity:
             return ""
@@ -302,7 +310,59 @@ class RAGEngine:
             return ""
         if not memories:
             return ""
-        return "历史记忆:\n" + "\n".join(f"- {m['content']}" for m in memories)
+        return "历史记忆:\n" + "\n".join(format_memory_line(m) for m in memories)
+
+    def _schedule_persist(self, request: ChatRequest, answer: str, identity: str) -> None:
+        """knowledge 路径生成答案后异步触发长期记忆写入（fire-and-forget）
+
+        intent=knowledge 且 answer 非空才触发；casual_chat / realtime 已在
+        前置分支提前返回，不会走到本方法（闲聊/实时不提取）。asyncio.create_task
+        只调度不 await，写入后台进行不阻塞响应；后台任务异常全部在
+        _persist_memory 内降级捕获，绝不抛回响应（零回归）。
+
+        Args:
+            request: 聊天请求（含 query / history）
+            answer: 生成的答案文本
+            identity: 请求身份（user_id 优先，否则 client_ip）
+        """
+        if identity and answer and answer.strip():
+            asyncio.create_task(
+                self._persist_memory(request.query, answer, identity, request.history)
+            )
+
+    async def _persist_memory(self, query: str, answer: str, identity: str,
+                              history: list[dict] | None = None) -> None:
+        """对话结束后异步提取并写入长期记忆（module-033，失败降级）
+
+        内部流程：extract_facts(query, answer, history) → 逐条
+        memory_service.save(content, identity, dedup=True)（语义去重，重复更新）。
+        提取失败/超时返回空 facts → 不写任何记忆；单条 save 失败仅日志降级，
+        不影响其余事实与对话响应。
+
+        Args:
+            query: 用户问题
+            answer: 助手回答（非空才提取）
+            identity: 请求身份（user_id 优先，否则 client_ip）
+            history: 最近对话历史（可选）
+        """
+        if not answer or not answer.strip():
+            return  # 空答案不提取（防御：调用方已按 answer 非空触发）
+        try:
+            facts = await extract_facts(query, answer, history or [])
+        except Exception as e:
+            logger.warning("长期记忆提取失败，跳过写入: %s", e)
+            return
+        if not facts:
+            return
+        saved = 0
+        for fact in facts:
+            try:
+                await memory_service.save(fact["content"], identity, dedup=True)
+                saved += 1
+            except Exception as e:
+                logger.warning("长期记忆写入失败（降级）: %s", e)
+        logger.info("长期记忆自动写入完成: identity=%s, facts=%d, saved=%d",
+                    identity, len(facts), saved)
 
     async def _hyde_expand(self, query: str) -> str:
         """使用 LLM 生成假设性回答作为检索查询（module-024 起带 Redis 缓存）

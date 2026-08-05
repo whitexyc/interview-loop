@@ -60,6 +60,13 @@ class Settings(BaseSettings):
     # Agent 工具化（module-028）：ReAct 循环工具总调用次数预算（防空转烧钱）
     max_agent_tools: int = 4
 
+    # 长期记忆（module-033）：提取 / 去重 / 动态K 阈值（参考 llm-push/19-Agent记忆管理）
+    memory_importance_threshold: float = 0.6    # 提取事实 importance < 0.6 丢弃
+    memory_dedup_threshold: float = 0.95        # 语义去重：与本身份现有记忆 cosine > 0.95 视为重复
+    memory_recall_high_threshold: float = 0.85  # 候选平均相似度 > 0.85 → 召回 5 条
+    memory_recall_mid_threshold: float = 0.75   # 0.75-0.85 → 召回 3 条；<0.75 → 1 条（宁缺毋滥）
+    memory_max_recall: int = 5                  # 动态 K 上限
+
     model_config = {"env_prefix": "PW_", "env_file": ".env"}
 
 
