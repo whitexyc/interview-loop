@@ -755,4 +755,5 @@ async def delete_document(doc_id: int):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    # 端口 8001：项目服务统一 +1（前端 3001 / Java 8081 / AI 8001），与 vite 代理 /ai→8001 对齐
+    uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=True)
