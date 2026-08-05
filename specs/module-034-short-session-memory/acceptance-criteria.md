@@ -157,7 +157,7 @@ python -m pytest tests/ -q
   - [x] ✅ **通过**
   - [ ] ❌ **不通过**
   - [ ] ⚠️ **有条件通过**
-- 备注: 全量回归 278 passed / 0 failed（254 基线 + 24 新增）；新增单测 53（session 11 + memory short 13 等）；真实 E2E 通过（登录对话→短期摘要写入→召回、会话持久化恢复、匿名 client_ip 隔离）。Reviewer 阻塞 #1（/ai/rag/chat 双重调度会话持久化→重复落库）已由 team-lead 修复（main.py 删除冗余调度），Tester 复验 2 行/轮无重复。非阻塞建议（短期物理清理/request.history 偏好/方法超 50 行/TTL 时区差）记 backlog。
+- 备注: 全量回归 278 passed / 0 failed（254 基线 + 24 新增）；新增单测 24（test_session_memory 11 + test_memory short 13）；服务层真实 E2E 20/20（会话保存/恢复/隔离、短期 save→recall、三层隔离、TTL 过滤）+ 真实 HTTP 端点 E2E 通过（登录对话→短期摘要写入→召回、会话持久化恢复 2 行/轮、匿名 client_ip 隔离）。Reviewer 阻塞 #1（/ai/rag/chat 双重调度会话持久化→重复落库）Tester 修复前复现 30/30 轮重复（TOCTOU，content_hash 无唯一约束），team-lead 修复（main.py 删除冗余调度，保留 engine.chat 内部自包含）后复验 0/30 + 真实端点 2 行/轮无重复，**已闭环**。非阻塞建议（短期物理清理/request.history 偏好/save_session_messages 63 行超限/TTL 本地日期 vs PG UTC 时区差）记 backlog。
 
 ---
 

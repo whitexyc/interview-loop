@@ -138,11 +138,12 @@
 
 ## 5. 环境性失败归因
 
-> 无失败用例，无需归因。E2E 依赖的服务（Java 8081 / AI 8001）由 Tester 启动，结束已停止，环境恢复原状。
-
 | 现象 | 判断标准 | 归类 | 处理方式 |
 |------|----------|------|----------|
-| — | — | — | — |
+| 首次 HTTP E2E 出现每轮会话重复 4 行（预期 2 行） | 清掉多余进程后单实例复验 2 行/轮无重复 | 环境性干扰（假象） | 工作区存在 **4 个并发 uvicorn 进程**（不同 venv/host 的历史残留，`git status` 快照显示 module-034 提交后遗留）干扰结果；清掉后用 Start-Process 单实例复验，2 行/轮无重复。**注意**：这不是 Reviewer #1 的代码问题——代码层双重调度已由 team-lead 修复（main.py 删除冗余调用），真实复现脚本在**修复前**双调度下 30/30 轮重复（见 §6.1），修复后 0/30 |
+| 后台 uvicorn 经 PowerShell 管道启动后进程退出（exit 255） | 改用 Start-Process 分离式启动稳定 | 环境性 | PowerShell 后台任务包装会随 shell 终止子进程；改用 `Start-Process -WindowStyle Hidden` 分离式启动 |
+| 3 个既有 Redis setex 弃用 warning | module-033 起备案 | 环境性（既有） | 非本模块 |
+| 纯知识问答 extract_facts 返回 0 条 | 偏好型 query 正常提取 2 条 | 设计行为 | 提取 prompt 明确"与用户无关的通用知识不值得记"，纯知识问答 0 条是正确降级，非缺陷 |
 
 ---
 
@@ -158,6 +159,19 @@ cd backend && java -jar target/*.jar            # Java 8081
 cd ai_service && uvicorn main:app --port 8001   # AI 8001（真实 PG/Redis/bge-m3/DeepSeek）
 # 冒烟 HTTP 调用（httpx 脚本，见 test-report §6.6）
 ```
+
+### 6.1 Reviewer #1 双重调度竞态复现与修复确认（Tester 复验）
+
+> 背景：Reviewer #1（应修）指出 `/ai/rag/chat` 每轮 knowledge 对话 `_schedule_session_persist` 被调用两次——`engine.chat` 内部（no-docs/docs 两个 return 点）+ `main.py` chat 端点各一次。`content_hash` 仅 `index=True` 无唯一约束，幂等是应用层 SELECT-then-INSERT，两任务并发存在 TOCTOU 竞态。
+
+| 验证阶段 | 方式 | 结果 |
+|----------|------|------|
+| 修复前复现 | 真实 PG 模拟生产双调度（同一轮 2 个 `asyncio.create_task` fire-and-forget，与 engine.chat + main.py 时序一致），30 轮 | **30/30 轮全部产生重复会话轮次**（每轮 4 行：user+assistant × 2，content_hash 相同 2 对；两任务都在对方 commit 前读到空 existing_hashes → 双双插入） |
+| team-lead 修复 | main.py chat 端点删除冗余 `_schedule_session_persist`，保留 engine.chat 内部自包含调度（提交前工作区变更） | 代码核对：/ai/rag/chat 每轮仅 1 次调度 |
+| 修复后确认 | 同一脚本改单调度（模拟修复后生产流），30 轮 | **0/30 重复**，每轮恰好 2 行 |
+| 真实端点复验 | 单实例 uvicorn 8001，POST /ai/rag/chat 两轮知识对话后查库 | **2 轮 = 4 行**（每轮 user+assistant 各 1），无重复轮次；日志 `会话持久化: identity=8.8.4.x, new=2` 每轮恰好 1 次 |
+
+> 结论：Reviewer #1 确认为**真实回归**（修复前 30/30 复现），team-lead 修复后 Tester 复验 0/30 + 真实端点 2 行/轮无重复，**已闭环**。
 
 ### 冒烟结果
 
