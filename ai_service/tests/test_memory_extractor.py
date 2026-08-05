@@ -436,7 +436,9 @@ class TestFormatting:
                                 {"content": "偏好简短回答", "created_at": "2026-08-05"},
                                 {"content": "旧事实", "created_at": None},
                             ])):
-                text = await rag_engine._recall_memory("回答风格", "42", top_k=3)
+                with mock.patch("rag.engine.memory_service.recall_short",
+                                new=mock.AsyncMock(return_value=[])):
+                    text = await rag_engine._recall_memory("回答风格", "42", top_k=3)
             assert text == ("历史记忆:\n[长期记忆 - 2026-08-05]：偏好简短回答\n"
                             "[长期记忆]：旧事实")
         asyncio.run(run())
@@ -455,7 +457,8 @@ class TestPersistMemory:
         async def run():
             with mock.patch("rag.engine.extract_facts", new=mock.AsyncMock(return_value=facts)):
                 with mock.patch("rag.engine.memory_service.save", new=mock.AsyncMock()) as save:
-                    await rag_engine._persist_memory("问题", "答案", "42", [])
+                    with mock.patch("rag.engine.memory_service.save_short", new=mock.AsyncMock()) as save_short:
+                        await rag_engine._persist_memory("问题", "答案", "42", [])
             assert save.call_count == 2
             args0, kwargs0 = save.call_args_list[0]
             assert args0[0] == "事实A"
@@ -463,6 +466,9 @@ class TestPersistMemory:
             assert kwargs0.get("dedup") is True  # 逐条语义去重
             args1, _ = save.call_args_list[1]
             assert args1[0] == "事实B"
+            # module-034：同一批事实沉淀短期记忆（TTL 7 天），同样逐条去重
+            assert save_short.call_count == 2
+            assert save_short.call_args_list[0][0][0] == "事实A"
         asyncio.run(run())
 
     def test_empty_answer_skips_extract(self):
@@ -489,8 +495,9 @@ class TestPersistMemory:
                             new=mock.AsyncMock(return_value=[{"content": "A", "importance": 0.9}])):
                 with mock.patch("rag.engine.memory_service.save",
                                 new=mock.AsyncMock(side_effect=RuntimeError("db down"))):
-                    # 单条 save 失败仅日志降级，不抛错
-                    await rag_engine._persist_memory("问题", "答案", "42", [])
+                    with mock.patch("rag.engine.memory_service.save_short", new=mock.AsyncMock()):
+                        # 单条 save 失败仅日志降级，不抛错（短期 save_short 仍继续）
+                        await rag_engine._persist_memory("问题", "答案", "42", [])
         asyncio.run(run())
 
 
@@ -507,26 +514,29 @@ class TestChatPersistTrigger:
             with mock.patch("rag.engine.router_agent.classify",
                             new=mock.AsyncMock(return_value={"intent": "knowledge"})):
                 with mock.patch("rag.engine.memory_service.recall", new=mock.AsyncMock(return_value=[])):
-                    with mock.patch("rag.engine.hybrid_retriever.retrieve",
-                                    new=mock.AsyncMock(return_value=[])):
-                        with mock.patch("rag.engine.reranker.rerank",
-                                        new=mock.AsyncMock(side_effect=lambda q, docs, top_k=5: docs)):
-                            with mock.patch("rag.engine.reflector.check_sufficiency",
-                                            new=mock.AsyncMock(return_value={"sufficient": True})):
-                                with mock.patch("rag.engine.LLMFactory.get_client") as gc:
-                                    fake = mock.MagicMock()
-                                    fake.generate = mock.AsyncMock(return_value="这是答案")
-                                    gc.return_value = fake
-                                    with mock.patch.object(
-                                        rag_engine, "_persist_memory",
-                                        new=mock.AsyncMock(
-                                            side_effect=lambda *a, **k: persist_calls.append(a)),
-                                    ):
-                                        result = await rag_engine.chat(
-                                            ChatRequest(query="问题",
-                                                        history=[{"role": "user", "content": "hi"}]),
-                                            identity="42")
-                                        await asyncio.sleep(0)  # 让后台任务跑完
+                    with mock.patch("rag.engine.memory_service.recall_short", new=mock.AsyncMock(return_value=[])):
+                        with mock.patch("rag.engine.hybrid_retriever.retrieve",
+                                        new=mock.AsyncMock(return_value=[])):
+                            with mock.patch("rag.engine.reranker.rerank",
+                                            new=mock.AsyncMock(side_effect=lambda q, docs, top_k=5: docs)):
+                                with mock.patch("rag.engine.reflector.check_sufficiency",
+                                                new=mock.AsyncMock(return_value={"sufficient": True})):
+                                    with mock.patch("rag.engine.LLMFactory.get_client") as gc:
+                                        fake = mock.MagicMock()
+                                        fake.generate = mock.AsyncMock(return_value="这是答案")
+                                        gc.return_value = fake
+                                        with mock.patch.object(
+                                            rag_engine, "_persist_memory",
+                                            new=mock.AsyncMock(
+                                                side_effect=lambda *a, **k: persist_calls.append(a)),
+                                        ):
+                                            with mock.patch.object(rag_engine, "_schedule_session_persist",
+                                                                   new=mock.MagicMock()):
+                                                result = await rag_engine.chat(
+                                                    ChatRequest(query="问题",
+                                                                history=[{"role": "user", "content": "hi"}]),
+                                                    identity="42")
+                                                await asyncio.sleep(0)  # 让后台任务跑完
             assert result.answer == "这是答案"
             assert len(persist_calls) == 1
             args = persist_calls[0]
@@ -631,25 +641,30 @@ def _hit_stream_persist(classify_intent="knowledge", xff="9.9.9.9"):
                                                 return_value={"sufficient": True, "reason": ""})):
                                 with mock.patch("agent.reflector.reflector.generate_answer_stream",
                                                 new=gen.make_gen()):
-                                    with mock.patch.object(
-                                        rag_engine, "_persist_memory",
-                                        new=mock.AsyncMock(
-                                            side_effect=lambda *a, **k: persist_calls.append(a)),
-                                    ):
-                                        transport = httpx.ASGITransport(
-                                            app=main.app, raise_app_exceptions=True)
-                                        async with httpx.AsyncClient(
-                                                transport=transport,
-                                                base_url="http://test") as client:
-                                            resp = await client.post(
-                                                "/ai/rag/chat/stream",
-                                                headers={"X-Forwarded-For": xff},
-                                                json={"query": "回答风格",
-                                                      "history": [{"role": "user",
-                                                                   "content": "之前聊过"}]},
-                                            )
-                                            events = _parse_sse(resp.content)
-                                        await asyncio.sleep(0)  # 让后台任务跑完
+                                    with mock.patch("rag.engine.rag_engine._resolve_session_history",
+                                                    new=mock.AsyncMock(
+                                                        side_effect=lambda identity, h: h)):
+                                        with mock.patch("rag.engine.rag_engine._schedule_session_persist",
+                                                        new=mock.MagicMock()):
+                                            with mock.patch.object(
+                                                rag_engine, "_persist_memory",
+                                                new=mock.AsyncMock(
+                                                    side_effect=lambda *a, **k: persist_calls.append(a)),
+                                            ):
+                                                transport = httpx.ASGITransport(
+                                                    app=main.app, raise_app_exceptions=True)
+                                                async with httpx.AsyncClient(
+                                                        transport=transport,
+                                                        base_url="http://test") as client:
+                                                    resp = await client.post(
+                                                        "/ai/rag/chat/stream",
+                                                        headers={"X-Forwarded-For": xff},
+                                                        json={"query": "回答风格",
+                                                              "history": [{"role": "user",
+                                                                           "content": "之前聊过"}]},
+                                                    )
+                                                    events = _parse_sse(resp.content)
+                                                await asyncio.sleep(0)  # 让后台任务跑完
         return events
 
     events = asyncio.run(run())

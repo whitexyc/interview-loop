@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     memory_recall_mid_threshold: float = 0.75   # 0.75-0.85 → 召回 3 条；<0.75 → 1 条（宁缺毋滥）
     memory_max_recall: int = 5                  # 动态 K 上限
 
+    # 短期记忆 + 会话记忆（module-034）
+    memory_short_ttl_days: int = 7              # 短期记忆 TTL（天）：recall_short 召回时按 created_at 过滤过期
+    memory_session_max_messages: int = 50       # 每 identity 会话持久化消息上限（超限滚动删除最旧）
+    memory_session_history_limit: int = 20      # 会话恢复注入生成的最近消息数
+
     model_config = {"env_prefix": "PW_", "env_file": ".env"}
 
 

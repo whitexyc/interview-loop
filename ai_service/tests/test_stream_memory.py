@@ -108,17 +108,22 @@ def _hit_stream(gen_capture, memory_text="", recall_calls=None, classify_intent=
                                             return_value={"sufficient": True, "reason": ""})):
                             with mock.patch("agent.reflector.reflector.generate_answer_stream",
                                             new=gen_capture.make_gen()):
-                                transport = httpx.ASGITransport(
-                                    app=main.app, raise_app_exceptions=True)
-                                async with httpx.AsyncClient(
-                                        transport=transport, base_url="http://test") as client:
-                                    resp = await client.post(
-                                        "/ai/rag/chat/stream",
-                                        headers={"X-Forwarded-For": xff} if xff else {},
-                                        json={"query": "回答风格", "history": []},
-                                    )
-                                events.extend(_parse_sse(resp.content))
-                                status = resp.status_code
+                                with mock.patch("rag.engine.rag_engine._resolve_session_history",
+                                                new=mock.AsyncMock(
+                                                    side_effect=lambda identity, h: h)):
+                                    with mock.patch("rag.engine.rag_engine._schedule_session_persist",
+                                                    new=mock.MagicMock()):
+                                        transport = httpx.ASGITransport(
+                                            app=main.app, raise_app_exceptions=True)
+                                        async with httpx.AsyncClient(
+                                                transport=transport, base_url="http://test") as client:
+                                            resp = await client.post(
+                                                "/ai/rag/chat/stream",
+                                                headers={"X-Forwarded-For": xff} if xff else {},
+                                                json={"query": "回答风格", "history": []},
+                                            )
+                                        events.extend(_parse_sse(resp.content))
+                                        status = resp.status_code
         if recall_calls is not None:
             recall_calls.extend(recall.call_args_list)
     # module-033：mock 后台记忆自动写入（fire-and-forget 任务），避免真实 LLM 提取

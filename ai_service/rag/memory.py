@@ -1,21 +1,31 @@
 """
-长期记忆服务 — 跨会话记忆沉淀（module-023 / module-032 身份化）
-===== ===== ===== ===== ===== ===== ===== ===== ===== ===== ===== =====
+长期记忆服务 — 跨会话记忆沉淀（module-023 / module-032 身份化 / module-034 分层）
+===== ===== ===== ===== ===== ===== ===== ===== ===== ===== ===== ===== ===== =====
 
 系统无长期记忆（只有 Redis 短期缓存 + 内存 IP 会话，重启丢失）。
 本模块提供跨会话记忆：复用 documents 表（source='memory:<identity>:' 区分），
 无新表，复用分块（chunker）/向量化（本地 bge-m3）/检索（hybrid_retriever）全链路。
 
-- save(content, identity): 分块 → 向量化 → 写 documents（父块无向量 + 子块含向量）
-- recall(query, identity): hybrid_retriever 限定 source 过滤，只查该身份的
-  记忆，返回 Top-K
+- save(content, identity): 长期记忆，分块 → 向量化 → 写 documents（父块无向量 + 子块含向量）
+- save_short(content, identity): 短期记忆（source='memory:<identity>:short:'，TTL 7 天）
+- recall(query, identity): 长期记忆检索（source 精确匹配，动态 K）
+- recall_short(query, identity): 短期记忆检索（动态 K + TTL 过滤）
+
+module-034 三层 source 分层：
+  - 长期 memory:<identity>:
+  - 短期 memory:<identity>:short:
+  - 会话 memory:<identity>:session:（见 session_memory.py）
+  各层检索 source_pattern 精确匹配（_layer_pattern），互不混淆；既有长期数据
+  source 恒为精确 'memory:<identity>:'，长期检索由旧 ':%' 通配改为精确匹配后
+  行为一致（零回归），且不再误命中 short/session 层。
 
 身份（module-032）：
 - identity = user_id（JWT.sub）优先，否则 client_ip（匿名降级，零回归）
 - 用户登录后记忆按 user_id 隔离（跨设备/跨会话）；匿名访客仍按 client_ip 隔离
 
 隔离设计：
-- 记忆检索 source_pattern='memory:<identity>:%'，只查该身份的记忆文档；
+- 记忆检索 source_pattern 精确匹配（_layer_pattern，如 'memory:<identity>:' /
+  'memory:<identity>:short:'），只查该身份同层记忆文档；
   source 以尾冒号分隔身份与内容（'memory:<identity>:'），避免前缀重叠
   （如 1.1.1.1 与 1.1.1.10）经 LIKE 交叉泄漏记忆
 - identity 必须通过规范化校验（_normalize_identity，空/含 LIKE 元字符降级
@@ -27,7 +37,7 @@
 import hashlib
 import logging
 import re
-from datetime import date
+from datetime import date, timedelta
 
 from sqlalchemy import func, select
 
@@ -88,22 +98,67 @@ def _escape_like(s: str) -> str:
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def format_memory_line(memory: dict) -> str:
-    """格式化单条召回记忆为 '[长期记忆 - YYYY-MM-DD]：内容'（module-033）
+def _memory_source(identity: str, layer: str = "") -> str:
+    """构造记忆 source（module-034 三层 source 分层）
+
+    - 长期: memory:<identity>:          （module-023/032/033，格式不变）
+    - 短期: memory:<identity>:short:    （本次新增）
+    - 会话: memory:<identity>:session:  （本次新增，见 session_memory.py）
+
+    source 以尾冒号分隔身份与内容（'memory:<identity>:'），避免前缀重叠
+    身份（如 1.1.1.1 与 1.1.1.10）经 LIKE 交叉泄漏记忆。
+
+    Args:
+        identity: 已规范化的身份标识（user_id 优先，否则 client_ip）
+        layer: 层标识（""=长期 / "short"=短期 / "session"=会话）
+
+    Returns:
+        对应 source 字符串（尾冒号收尾）
+    """
+    return f"{MEMORY_SOURCE_PREFIX}{identity}:" + (f"{layer}:" if layer else "")
+
+
+def _layer_pattern(safe_identity: str, layer: str = "") -> str:
+    """构造某层记忆的精确 source 匹配模式（无通配符，LIKE 等值匹配）
+
+    三层 source 均以 '<身份>:' 为前缀，若长期层沿用旧 'memory:<id>:%' 通配
+    模式会把 short/session 层记忆一并命中（跨层污染）。改为精确匹配后：
+      - 长期 'memory:<id>:'       只命中长期父块/子块
+      - 短期 'memory:<id>:short:' 只命中短期
+    既有长期数据 source 恒为精确 'memory:<id>:'，精确匹配行为与旧 ':%' 一致
+    （零回归），只是不再误命中新增的 short/session 层。
+
+    Args:
+        safe_identity: 已规范化 + 转义的身份标识
+        layer: 层标识（""=长期 / "short"=短期 / "session"=会话）
+
+    Returns:
+        形如 'memory:<id>:short:' 的精确匹配模式
+    """
+    return f"{MEMORY_SOURCE_PREFIX}{safe_identity}:" + (f"{layer}:" if layer else "")
+
+
+def format_memory_line(memory: dict, label: str = "长期记忆") -> str:
+    """格式化单条召回记忆为 '[<label> - YYYY-MM-DD]：内容'（module-033/034）
 
     带日期前缀帮助生成模型区分记忆与当前对话；无 created_at（或解析失败）
-    时省略日期，仅保留 '[长期记忆]：内容'。格式化逻辑放本模块，由
+    时省略日期，仅保留 '[<label>]：内容'。格式化逻辑放本模块，由
     engine._recall_memory 拼接注入 prompt。
+
+    module-034：label 参数区分长/短期注入段（长期 '[长期记忆...]' 注入"历史
+    记忆"段；短期 '[短期记忆...]' 注入"最近上下文"段）。默认 '长期记忆'
+    保持既有调用（module-033）行为不变。
 
     Args:
         memory: 召回记忆 dict，含 content；created_at 可选（'YYYY-MM-DD' 或 None）
+        label: 记忆类型标签（默认 '长期记忆'；短期调用传 '短期记忆'）
 
     Returns:
         形如 "[长期记忆 - 2026-08-05]：用户偏好简洁回答" 的格式化字符串
     """
     content = memory.get("content") or ""
     created_at = memory.get("created_at")
-    prefix = f"[长期记忆 - {created_at}]" if created_at else "[长期记忆]"
+    prefix = f"[{label} - {created_at}]" if created_at else f"[{label}]"
     return f"{prefix}：{content}"
 
 
@@ -128,19 +183,72 @@ def _date_str(value) -> str | None:
 
 
 class MemoryService:
-    """长期记忆服务（跨会话记忆沉淀）
+    """长期/短期记忆服务（跨会话记忆沉淀）
 
     职责：
-    - save: 保存一条记忆到 documents（source='memory:<identity>:'）
-    - recall: 检索与身份相关的历史记忆（source 过滤，按身份隔离）
+    - save: 保存一条长期记忆到 documents（source='memory:<identity>:'，module-023/033）
+    - save_short: 保存一条短期记忆（source='memory:<identity>:short:'，module-034）
+    - recall: 检索与身份相关的长期记忆（source 精确过滤，按身份隔离）
+    - recall_short: 检索与身份相关的短期记忆（动态 K + TTL 过滤，module-034）
+
+    module-034 三层 source 分层（长期/短期/会话）：
+      - 长期 memory:<identity>:
+      - 短期 memory:<identity>:short:
+      - 会话 memory:<identity>:session:（见 session_memory.py）
+    各层 source_pattern 精确匹配（_layer_pattern），互不混淆；既有长期数据
+    source 恒为精确 'memory:<identity>:'，长期检索由 ':%' 改精确匹配后行为
+    一致（零回归），只是不再误命中 short/session 层。
     """
 
     async def save(self, content: str, identity: str = DEFAULT_IDENTITY,
                    dedup: bool = True) -> dict:
-        """保存一条长期记忆
+        """保存一条长期记忆（签名兼容 module-023/033）
+
+        委托 _save（layer=''）执行分块/去重/入库；语义去重仅在长期层内查重。
+
+        Args:
+            content: 记忆内容（不能为空）
+            identity: 身份标识（user_id 优先，否则 client_ip；空/空白则默认 'unknown'）
+            dedup: 写入前是否语义去重（默认 True）
+
+        Returns:
+            {"id": int, "title": str, "status": "saved"} 或 {"status": "updated"}
+
+        Raises:
+            ValueError: content 为空
+            RuntimeError: 向量化或入库失败
+        """
+        return await self._save(content, identity, layer="", dedup=dedup)
+
+    async def save_short(self, content: str, identity: str = DEFAULT_IDENTITY,
+                         dedup: bool = True) -> dict:
+        """保存一条短期记忆（source='memory:<identity>:short:'，module-034）
+
+        复用 _save 的分块/嵌入/入库全链路；语义去重仅在短期层内
+        （_find_duplicate layer='short'），与长期记忆互不混淆。短期记忆带
+        created_at，TTL 由 recall_short 召回时按 settings.memory_short_ttl_days
+        （默认 7 天）过滤（惰性过期，不参与召回）。
+
+        Args:
+            content: 短期记忆内容（不能为空）
+            identity: 身份标识（user_id 优先，否则 client_ip；空/空白则默认 'unknown'）
+            dedup: 写入前是否语义去重（默认 True）
+
+        Returns:
+            {"id": int, "title": str, "status": "saved"} 或 {"status": "updated"}
+
+        Raises:
+            ValueError: content 为空
+            RuntimeError: 向量化或入库失败
+        """
+        return await self._save(content, identity, layer="short", dedup=dedup)
+
+    async def _save(self, content: str, identity: str, layer: str,
+                    dedup: bool = True) -> dict:
+        """保存一条记忆（长期/短期共用，module-034 重构）
 
         流程（dedup=True 默认，module-033）：
-          1. 语义去重：与本身份现有记忆嵌入 cosine 相似度最高值 > 阈值
+          1. 语义去重：与本身份同层现有记忆嵌入 cosine 相似度最高值 > 阈值
              （settings.memory_dedup_threshold=0.95）→ 视为重复 → 更新既有
              父块（追加内容）并返回 status="updated"（不新增行，库内条数不涨）
           2. 未命中重复 → 分块（复用 chunker）→ 写父块 → 子块向量化 + 写子块
@@ -151,6 +259,7 @@ class MemoryService:
         Args:
             content: 记忆内容（不能为空）
             identity: 身份标识（user_id 优先，否则 client_ip；空/空白则默认 'unknown'）
+            layer: 层标识（""=长期 / "short"=短期）
             dedup: 写入前是否语义去重（默认 True；手动 save 也去重，统一防堆积）
 
         Returns:
@@ -165,16 +274,16 @@ class MemoryService:
         # 规范化 + 校验身份：空/含 LIKE 通配符一律降级为 'unknown'，
         # 防止通配符注入绕过按身份隔离（review #1）
         identity = _normalize_identity(identity)
-        # source 带尾冒号分隔符：'memory:<identity>:'，配合 recall 的
-        # 'memory:<identity>:%' LIKE 匹配，避免前缀重叠身份（如 192.168.1.1
-        # 与 192.168.1.10）交叉泄漏记忆
-        source = f"{MEMORY_SOURCE_PREFIX}{identity}:"
+        # source 带尾冒号分隔符：'memory:<identity>:' / 'memory:<identity>:short:'，
+        # 配合 recall / recall_short 的精确 source_pattern 匹配，避免前缀重叠身份
+        #（如 192.168.1.1 与 192.168.1.10）交叉泄漏记忆
+        source = _memory_source(identity, layer)
 
-        # module-033 语义去重：写入前查重，命中重复则更新旧记忆而非新增。
-        # 任何去重异常降级为正常新增（不阻塞，零回归）
+        # module-033 语义去重：写入前查同层现有记忆（_find_duplicate layer 隔离），
+        # 命中重复则更新旧记忆而非新增。任何去重异常降级为正常新增（不阻塞，零回归）
         if dedup:
             try:
-                duplicate = await self._find_duplicate(content, identity)
+                duplicate = await self._find_duplicate(content, identity, layer=layer)
                 if duplicate is not None:
                     merged = await self._merge_duplicate(duplicate, content)
                     if merged is not None:
@@ -184,7 +293,7 @@ class MemoryService:
 
         # 当日参数传 date 对象而非 ISO 字符串：字符串经 asyncpg 绑定为 VARCHAR，
         # PG 无 date=varchar 运算符 → 真实 save 崩溃（tester 阻塞 #1 回归）
-        title = await self._next_title(date.today(), identity)
+        title = await self._next_title(date.today(), identity, layer=layer)
 
         # 分块：短内容无 ## 标题 → parents 为空 → 兜底单父块
         chunk_result = chunker.chunk(content, source=source)
@@ -209,20 +318,23 @@ class MemoryService:
                 logger.error("记忆保存失败: %s", e)
                 raise RuntimeError("记忆保存失败") from e
 
-    async def _find_duplicate(self, content: str, identity: str):
-        """语义去重：与本身份现有记忆嵌入 cosine 最高相似度 > 阈值 → 返回重复记忆
+    async def _find_duplicate(self, content: str, identity: str, layer: str = ""):
+        """语义去重：与本身份同层现有记忆嵌入 cosine 最高相似度 > 阈值 → 返回重复记忆
 
         流程：
           1. 新事实向量化（失败 → None，视为无重复，不阻塞）
-          2. 查本身份现有记忆子块（source='memory:<identity>:%' 且带向量）
+          2. 查本身份同层现有记忆子块（source 精确匹配 _layer_pattern 且带向量）
           3. 嵌入已 L2 归一化，cosine 相似度 = 点积；逐条计算取最高
           4. 最高相似度 > settings.memory_dedup_threshold → 返回该子块
 
-        任何异常降级返回 None（视为无重复 → 正常新增）。
+        module-034：layer 限定去重范围（""=长期 / "short"=短期），同层内查重，
+        长/短记忆互不混淆；session 层无向量不参与去重。任何异常降级返回 None
+        （视为无重复 → 正常新增）。
 
         Args:
             content: 新记忆内容
             identity: 已规范化的身份标识（user_id 优先，否则 client_ip）
+            layer: 层标识（""=长期 / "short"=短期）
 
         Returns:
             命中重复时返回最佳匹配子块 Document（含 parent_id）；否则 None
@@ -233,7 +345,7 @@ class MemoryService:
             logger.warning("去重向量化失败，视为无重复: %s", e)
             return None
         safe_identity = _escape_like(identity)
-        pattern = f"{MEMORY_SOURCE_PREFIX}{safe_identity}:%"
+        pattern = _layer_pattern(safe_identity, layer)
         try:
             async with async_session_factory() as session:
                 rows = await session.execute(
@@ -359,7 +471,8 @@ class MemoryService:
     ) -> list[dict]:
         """检索与 query 相关的长期记忆（按身份隔离；动态 K 召回，module-033）
 
-        复用 hybrid_retriever（source_pattern 限定 'memory:<identity>:%'），
+        复用 hybrid_retriever（source_pattern 精确匹配 'memory:<identity>:'，
+        module-034 后不再用 ':%' 通配，避免命中 short/session 层），
         检索命中的子块再映射回父块，返回完整记忆内容（同父块去重取最高分）。
 
         module-033 动态 K：先取 top_k 个候选，按候选平均相似度动态调整最终
@@ -381,9 +494,11 @@ class MemoryService:
         # 规范化 + 校验身份，并对 LIKE 元字符转义（双保险，review #1）：
         # 客户端传 identity="%" 或 "_" 时不会构造出 'memory:%:%' 匹配全部记忆
         safe_identity = _escape_like(_normalize_identity(identity))
+        # module-034：长期层 source 精确匹配（_layer_pattern），不再用 ':%' 通配，
+        # 避免命中新增的 short/session 层（既有长期数据 source 恒为精确值，零回归）
         try:
             docs = await hybrid_retriever.retrieve(
-                query, top_k=top_k, source_pattern=f"{MEMORY_SOURCE_PREFIX}{safe_identity}:%",
+                query, top_k=top_k, source_pattern=_layer_pattern(safe_identity),
             )
         except Exception as e:
             logger.warning("记忆检索失败，返回空记忆: %s", e)
@@ -396,6 +511,53 @@ class MemoryService:
         ) / len(docs)
         dynamic_k = self._dynamic_k(avg_score)
         memories = await self._expand_to_parents(docs)
+        return memories[:dynamic_k]
+
+    async def recall_short(
+        self, query: str, identity: str = DEFAULT_IDENTITY, top_k: int = 5,
+    ) -> list[dict]:
+        """检索与 query 相关的短期记忆（module-034：按身份隔离；动态 K + TTL 过滤）
+
+        复用 hybrid_retriever（source_pattern 精确匹配 'memory:<identity>:short:'，
+        只查短期层，与长期/会话互不混淆），命中子块映射回父块（_expand_to_parents）。
+
+        动态 K：与长期 recall 一致（候选平均相似度 >0.85→5 / 0.75-0.85→3 /
+        <0.75→1，宁缺毋滥）。TTL：created_at 早于 today - settings.memory_short_ttl_days
+        （默认 7 天）的短期记忆召回时过滤（惰性过期，不参与召回）；无 created_at
+        的记录保留（fail-open，无法判断年龄不误删）。
+
+        Args:
+            query: 检索查询
+            identity: 身份标识（user_id 优先，否则 client_ip；空/空白则默认 'unknown'）
+            top_k: 动态 K 的最大候选数（默认 5，同时是动态 K 的条数上限）
+
+        Returns:
+            [{"content": str, "score": float, "title": str, "created_at": str|None}, ...]
+            按 score 降序；query 为空、无候选或检索失败时返回空列表
+        """
+        if not query or not query.strip():
+            return []
+        safe_identity = _escape_like(_normalize_identity(identity))
+        try:
+            docs = await hybrid_retriever.retrieve(
+                query, top_k=top_k, source_pattern=_layer_pattern(safe_identity, "short"),
+            )
+        except Exception as e:
+            logger.warning("短期记忆检索失败，返回空记忆: %s", e)
+            return []
+        if not docs:
+            return []
+        avg_score = sum(
+            d.get("hybrid_score", d.get("score", 0.0)) for d in docs
+        ) / len(docs)
+        dynamic_k = self._dynamic_k(avg_score)
+        memories = await self._expand_to_parents(docs)
+        # TTL 惰性过滤：'YYYY-MM-DD' 零填充字符串字典序 == 时间序，直接比较
+        cutoff = (date.today() - timedelta(days=settings.memory_short_ttl_days)).isoformat()
+        memories = [
+            m for m in memories
+            if not m.get("created_at") or m["created_at"] >= cutoff
+        ]
         return memories[:dynamic_k]
 
     @staticmethod
@@ -414,11 +576,12 @@ class MemoryService:
             return 3
         return 1
 
-    async def _next_title(self, day: date, identity: str) -> str:
-        """生成标题 '记忆-<日期>-<序号>'（序号=本身份当日已存记忆父块数+1）
+    async def _next_title(self, day: date, identity: str, layer: str = "") -> str:
+        """生成标题 '记忆-<日期>-<序号>'（序号=本身份同层当日已存记忆父块数+1）
 
-        只统计父块（parent_id IS NULL），并按「本身份 + 当日」过滤：
-        - source LIKE 'memory:<identity>:%'（身份规范化 + 转义，review #1）
+        只统计父块（parent_id IS NULL），并按「本身份同层 + 当日」过滤：
+        - source 精确匹配 _layer_pattern(identity, layer)（module-034：长期/短期
+          各自独立计数，互不混用）
         - created_at 落在当日（避免序号跨日期累计，review #4）
         不依赖标题格式：记忆内容含 markdown 标题时父块标题为标题文本
         （非 '记忆-<日期>-NN'），若按标题统计会漏计导致序号重复/跳号。
@@ -428,10 +591,11 @@ class MemoryService:
                 ISO 字符串，否则 asyncpg 绑定为 VARCHAR，PG 无 date=varchar
                 运算符导致真实查询崩溃 — tester 阻塞 #1）
             identity: 已规范化的身份标识（空/非法已由调用方降级为 'unknown'）
+            layer: 层标识（""=长期 / "short"=短期）
         """
         prefix = f"记忆-{day}-"
         safe_identity = _escape_like(identity)
-        pattern = f"{MEMORY_SOURCE_PREFIX}{safe_identity}:%"
+        pattern = _layer_pattern(safe_identity, layer)
         async with async_session_factory() as session:
             count = (
                 await session.execute(

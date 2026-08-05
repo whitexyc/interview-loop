@@ -40,6 +40,7 @@ from rag.graph_store import graph_store
 from rag.graph_extractor import graph_extractor
 from rag.memory import memory_service, format_memory_line
 from rag.memory_extractor import extract_facts
+from rag.session_memory import session_memory_service
 
 logger = logging.getLogger(__name__)
 
@@ -249,15 +250,22 @@ class RAGEngine:
                     prompt = f"{memory_text}\n\n{prompt}"
                 answer = await client.generate(prompt)
                 self._schedule_persist(request, answer, identity)
+                # module-034：knowledge 路径异步持久化会话轮次（不阻塞响应）
+                self._schedule_session_persist(identity, request.query, answer)
                 return ChatResponse(answer=answer, sources=[], message="ok")
 
             # ========== 4. 生成答案 + 引用溯源 ==========
+            # module-034：会话恢复优先持久化（刷新/换设备不丢）；无持久化会话
+            # 时回退当前请求 history（零回归）
+            effective_history = await self._resolve_session_history(identity, request.history)
             answer = await reflector.generate_answer(
-                request.query, docs, history=request.history, memory=memory_text,
+                request.query, docs, history=effective_history, memory=memory_text,
             )
             # module-033：knowledge 路径生成答案后异步触发长期记忆自动写入
             #（fire-and-forget，不阻塞响应；casual_chat/realtime 已在分支提前返回）
             self._schedule_persist(request, answer, identity)
+            # module-034：异步持久化会话轮次（不阻塞响应）
+            self._schedule_session_persist(identity, request.query, answer)
 
             sources = []
             for i, doc in enumerate(docs[:5]):
@@ -280,37 +288,49 @@ class RAGEngine:
             )
 
     async def _recall_memory(self, query: str, identity: str, top_k: int = 3) -> str:
-        """召回相关长期记忆并格式化为生成 prompt 片段
+        """召回长期记忆 + 短期记忆并格式化为生成 prompt 片段
 
-        module-023：chat 生成前调用 memory_service.recall(query, identity)。
-        module-032：identity = user_id 优先，否则 client_ip，按身份隔离检索记忆。
-        module-033：动态 K 召回（recall 内部按候选相似度调整条数），格式化注入
-        '[长期记忆 - YYYY-MM-DD]：内容'（无 created_at 省略日期），帮助模型区分
-        记忆与当前对话。
-        失败/超时/无记忆时返回空串，生成 prompt 不包含记忆段，
-        与无记忆时行为完全一致（零回归）。
+        module-023/033：长期记忆（"历史记忆"段，'[长期记忆 - YYYY-MM-DD]：内容'）。
+        module-034：短期记忆（"最近上下文"段，'[短期记忆 - YYYY-MM-DD]：内容'），
+        两段均按身份隔离检索（memory_service.recall / recall_short）。长期在前、
+        短期在后，帮助模型区分"持久偏好"与"最近上下文"；任一召回失败/为空 →
+        跳过对应段；两者皆空 → 返回 ""。失败/超时/无记忆时返回空串，生成 prompt
+        不包含记忆段，与无记忆时行为完全一致（零回归）。
 
         Args:
             query: 用户当前问题
             identity: 请求身份标识（user_id 优先，否则 client_ip）
-            top_k: 最多召回记忆条数
+            top_k: 最多召回记忆条数（长/短各最多 top_k 条）
 
         Returns:
-            "历史记忆:\n[长期记忆 - 日期]：内容..." 格式字符串；无记忆/失败返回 ""
+            "历史记忆:\n[长期记忆 - 日期]：内容...\n\n最近上下文:\n[短期记忆 - 日期]：内容..."
+            格式字符串；无记忆/失败返回 ""
         """
         if not identity:
             return ""
+        long_text = ""
         try:
             memories = await asyncio.wait_for(
                 memory_service.recall(query, identity, top_k=top_k),
                 timeout=5,
             )
+            if memories:
+                long_text = "历史记忆:\n" + "\n".join(format_memory_line(m) for m in memories)
         except Exception as e:
             logger.warning("长期记忆召回失败，跳过注入: %s", e)
-            return ""
-        if not memories:
-            return ""
-        return "历史记忆:\n" + "\n".join(format_memory_line(m) for m in memories)
+        short_text = ""
+        try:
+            short_memories = await asyncio.wait_for(
+                memory_service.recall_short(query, identity, top_k=top_k),
+                timeout=5,
+            )
+            if short_memories:
+                short_text = "最近上下文:\n" + "\n".join(
+                    format_memory_line(m, label="短期记忆") for m in short_memories)
+        except Exception as e:
+            logger.warning("短期记忆召回失败，跳过注入: %s", e)
+        sections = [s for s in (long_text, short_text) if s]
+        return "\n\n".join(sections)
 
     def _schedule_persist(self, request: ChatRequest, answer: str, identity: str) -> None:
         """knowledge 路径生成答案后异步触发长期记忆写入（fire-and-forget）
@@ -332,12 +352,13 @@ class RAGEngine:
 
     async def _persist_memory(self, query: str, answer: str, identity: str,
                               history: list[dict] | None = None) -> None:
-        """对话结束后异步提取并写入长期记忆（module-033，失败降级）
+        """对话结束后异步提取并写入长期 + 短期记忆（module-033/034，失败降级）
 
         内部流程：extract_facts(query, answer, history) → 逐条
-        memory_service.save(content, identity, dedup=True)（语义去重，重复更新）。
-        提取失败/超时返回空 facts → 不写任何记忆；单条 save 失败仅日志降级，
-        不影响其余事实与对话响应。
+        memory_service.save(content, identity, dedup=True)（长期，语义去重）+
+        memory_service.save_short(content, identity, dedup=True)（短期，TTL 7 天）。
+        提取失败/超时返回空 facts → 不写任何记忆；单条 save/save_short 失败仅
+        日志降级，不影响其余事实与对话响应。
 
         Args:
             query: 用户问题
@@ -354,15 +375,87 @@ class RAGEngine:
             return
         if not facts:
             return
-        saved = 0
+        long_saved = 0
+        short_saved = 0
         for fact in facts:
+            # 长期记忆：持久偏好（无 TTL，module-033）
             try:
                 await memory_service.save(fact["content"], identity, dedup=True)
-                saved += 1
+                long_saved += 1
             except Exception as e:
                 logger.warning("长期记忆写入失败（降级）: %s", e)
+            # 短期记忆：最近主题/会话摘要（TTL 7 天，module-034）
+            try:
+                await memory_service.save_short(fact["content"], identity, dedup=True)
+                short_saved += 1
+            except Exception as e:
+                logger.warning("短期记忆写入失败（降级）: %s", e)
         logger.info("长期记忆自动写入完成: identity=%s, facts=%d, saved=%d",
-                    identity, len(facts), saved)
+                    identity, len(facts), long_saved)
+        logger.info("短期记忆自动写入完成: identity=%s, facts=%d, saved=%d",
+                    identity, len(facts), short_saved)
+
+    async def _resolve_session_history(self, identity: str,
+                                       request_history: list[dict]) -> list[dict]:
+        """会话恢复：优先持久化会话历史，无则用当前请求 history（零回归）
+
+        module-034：get_session_messages 恢复最近会话（按身份隔离）；持久化会话
+        存在 → 用它作生成历史（刷新/换设备不丢）；否则回退当前请求 history（与
+        module-034 之前行为完全一致）。恢复失败/超时/身份为空 → 回退当前请求。
+
+        Args:
+            identity: 请求身份（user_id 优先，否则 client_ip）
+            request_history: 当前请求携带的历史
+
+        Returns:
+            用于生成的有效历史列表（持久化会话优先）
+        """
+        if not identity:
+            return request_history or []
+        try:
+            persisted = await asyncio.wait_for(
+                session_memory_service.get_session_messages(
+                    identity, limit=settings.memory_session_history_limit),
+                timeout=3,
+            )
+        except Exception as e:
+            logger.warning("会话恢复失败，使用当前请求 history: %s", e)
+            persisted = []
+        if persisted:
+            return persisted
+        return request_history or []
+
+    def _schedule_session_persist(self, identity: str, query: str, answer: str) -> None:
+        """knowledge 路径生成答案后异步持久化会话轮次（fire-and-forget）
+
+        module-034：save_session_messages 写入 source='memory:<identity>:session:'，
+        供刷新/换设备恢复。asyncio.create_task 只调度不 await，写入后台进行不
+        阻塞响应；后台任务异常全部在 _persist_session 内降级捕获，绝不抛回响应
+        （零回归）。
+
+        Args:
+            identity: 请求身份（user_id 优先，否则 client_ip）
+            query: 用户问题
+            answer: 助手回答（非空才持久化）
+        """
+        if identity and query and answer and answer.strip():
+            asyncio.create_task(self._persist_session(query, answer, identity))
+
+    async def _persist_session(self, query: str, answer: str, identity: str) -> None:
+        """会话轮次持久化（写入用户问题 + 助手回答各一条，失败降级）
+
+        Args:
+            query: 用户问题
+            answer: 助手回答
+            identity: 请求身份（user_id 优先，否则 client_ip）
+        """
+        try:
+            await session_memory_service.save_session_messages(identity, [
+                {"role": "user", "content": query},
+                {"role": "assistant", "content": answer},
+            ])
+        except Exception as e:
+            logger.warning("会话持久化失败（降级，不影响对话）: %s", e)
 
     async def _hyde_expand(self, query: str) -> str:
         """使用 LLM 生成假设性回答作为检索查询（module-024 起带 Redis 缓存）

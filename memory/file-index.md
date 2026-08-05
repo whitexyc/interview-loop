@@ -33,7 +33,8 @@
 | ai_service/rag/graph_store.py | module-016 | 代码 | Graph RAG 图操作（AGE，真实分数） | ✅ |
 | ai_service/rag/graph_extractor.py | module-016 | 代码 | 图实体/关系提取 | ✅ |
 | ai_service/rag/chunker.py | module-017 | 代码 | 父子两级分块 | ✅ |
-| ai_service/rag/memory.py | module-023/033 | 代码 | 长期记忆（save 语义去重 + recall 动态K + 格式化注入，IP/user_id 隔离） | ✅ |
+| ai_service/rag/memory.py | module-023/033/034 | 代码 | 长期/短期记忆（save 语义去重 + recall 动态K + save_short/recall_short TTL + 三层 source 分层 + 格式化注入，IP/user_id 隔离） | ✅ |
+| ai_service/rag/session_memory.py | module-034 | 代码 | 会话记忆持久化（source=memory:\<identity\>:session:，content_hash 幂等 + 上限滚动 + 隔离恢复） | ✅ |
 | ai_service/rag/memory_extractor.py | module-033 | 代码 | 长期记忆事实提取器（extract_facts LLM 提取，importance 过滤 + 失败降级） | ✅ |
 | ai_service/rag/text_tokenizer.py | module-020 | 代码 | jieba 分词工具 | ✅ |
 | ai_service/agent/router.py | module-005 | 代码 | 意图路由（LLM-as-Classifier） | ✅ |
@@ -82,6 +83,7 @@
 | module-030 | specs/module-030-rerank-langgraph/ | ✅ 重排+LangGraph |
 | module-031 | specs/module-031-knowledge-reindex/ | ✅ 知识库重建 + chunker Option C |
 | module-032 | specs/module-032-jwt-login/ | ✅ JWT 登录体系（HS256 显式签名修复后 40/40） |
-| module-033 | specs/module-033-long-term-memory/ | ✅ 长期记忆自动写入（Tester 验收 40/40，2026-08-06） |
+| module-033 | specs/module-033-long-term-memory/ | ✅ 长期记忆自动写入（Tester 验收 40/40，含真实 HTTP 端点 E2E 复验，2026-08-06） |
+| module-034 | specs/module-034-short-session-memory/ | ✅ 短期记忆+会话记忆（Tester 验收 36/36，2026-08-06） |
 
 > 每个模块目录含 plan.md / acceptance-criteria.md / changelog.md / review-report.md / test-report.md。

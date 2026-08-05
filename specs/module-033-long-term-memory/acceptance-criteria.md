@@ -107,8 +107,8 @@
 
 ### 4.3 真实 E2E（Tester 可选执行）
 
-- [x] 🧪 登录对话 → 自动提取记忆 → 二次同义对话 → 去重不膨胀（⚠️ 半真实 E2E：自动提取✅、去重机制✅（identical content cosine 1.0→updated）；LLM 提取措辞不稳定致「措辞不同→不膨胀」受限，阈值校准观察，见 test-report §6.4）
-- [x] 🧪 无 token 匿名对话 → 按 client_ip 隔离自动记忆（✅ 半真实 E2E：IP-A/IP-B 两身份隔离 PASS，含 _persist_memory 自动写入路径）
+- [x] 🧪 登录对话 → 自动提取记忆 → 二次同义对话 → 去重不膨胀（✅ 真实 HTTP E2E：注册/登录 → /ai/rag/chat knowledge → extract_facts facts=1 → 落库 memory:8:；二次同义对话自动写入完成；identical content 二次保存 status=updated 条数不涨。措辞不同 cosine≈0.88<0.95 触发有限，阈值校准观察，见 test-report §6.4/§6.6）
+- [x] 🧪 无 token 匿名对话 → 按 client_ip 隔离自动记忆（✅ 真实 HTTP E2E：无 token chat XFF=7.7.7.7 → 自动落库 memory:7.7.7.7:；匿名 recall 仅返回本身份记忆，user 8 不受影响，见 test-report §6.6）
 
 ### 4.4 测试命令
 
@@ -164,7 +164,7 @@ python -m pytest tests/ -q
   - [x] ✅ **通过**
   - [ ] ❌ **不通过**
   - [ ] ⚠️ **有条件通过**
-- 备注: **40/40 全部勾选，0 失败。** 全量回归 254 passed / 0 failed（215 基线 + 39 新增）；新增单测 39/39；半真实 E2E（真实 PG + 真实 bge-m3 + 真实 DeepSeek）自动提取链路/匿名 IP 隔离/去重机制均通过。4 项附条件非阻塞观察：① 去重阈值 0.95 对真实同义改写（cosine≈0.88）触发有限（阈值校准，建议 module-034）；② 动态 K 高档位受 min-max 相对分影响实际不可达（Reviewer #1）；③ 模块生产代码约438行略超 400 预算；④ save() 约73行超 50 行（module-023 既有）。详见 test-report.md。
+- 备注: **40/40 全部勾选，0 失败。** 全量回归 254 passed / 0 failed（215 基线 + 39 新增）；新增单测 39/39；E2E 双轨验证：首轮半真实链路（真实 PG + 真实 bge-m3 + 真实 DeepSeek）自动提取/匿名 IP 隔离/去重机制通过 + **二轮真实 HTTP 端点 E2E 复验通过（Java 8081 + AI 8001，登录→自动提取→同义去重→匿名 client_ip 隔离→recall 格式化）**。4 项附条件非阻塞观察：① 去重阈值 0.95 对真实同义改写（cosine≈0.88）触发有限（阈值校准，建议 module-034）；② 动态 K 高档位受 min-max 相对分影响实际不可达（Reviewer #1）；③ 模块生产代码约438行略超 400 预算；④ save() 约73行超 50 行（module-023 既有）。详见 test-report.md。
 
 ---
 

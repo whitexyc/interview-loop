@@ -257,7 +257,7 @@ class TestMemorySourcePrefix:
 
 
 class TestEngineRecallIdentity:
-    """engine._recall_memory：identity 透传 memory_service.recall"""
+    """engine._recall_memory：identity 透传 memory_service.recall / recall_short"""
 
     def test_identity_passed_to_service(self):
         captured = {}
@@ -268,15 +268,27 @@ class TestEngineRecallIdentity:
                 captured["top_k"] = top_k
                 return []
 
+            async def fake_recall_short(query, identity, top_k=3):
+                captured["short_identity"] = identity
+                captured["short_top_k"] = top_k
+                return []
+
             with mock.patch(
                 "rag.engine.memory_service.recall",
                 new=mock.AsyncMock(side_effect=fake_recall),
             ):
-                await rag_engine._recall_memory("q", "42")
+                with mock.patch(
+                    "rag.engine.memory_service.recall_short",
+                    new=mock.AsyncMock(side_effect=fake_recall_short),
+                ):
+                    await rag_engine._recall_memory("q", "42")
 
         asyncio.run(run())
         assert captured["identity"] == "42"
         assert captured["top_k"] == 3
+        # module-034：短期召回同样按身份隔离透传
+        assert captured["short_identity"] == "42"
+        assert captured["short_top_k"] == 3
 
     def test_empty_identity_returns_without_calling_service(self):
         async def run():

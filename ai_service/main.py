@@ -30,9 +30,11 @@ from rag.memory import memory_service
 from llm.client import LLMFactory
 
 
-# ─── IP 会话缓存 ───
+# ─── IP 会话缓存（module-034：内存态降级为兜底缓存） ───
 # 结构: {client_ip: [{"role": str, "content": str, "timestamp": float}, ...]}
 # 每个 IP 最多保存 MAX_MESSAGES_PER_IP 条
+# module-034 后会话持久化为主（session_memory 写库，供刷新/换设备恢复），
+# 本内存 dict 保留为会话内即时兜底缓存（/ai/chat/sessions 等端点即时读取）。
 IP_SESSION_MESSAGES: dict[str, list[dict]] = defaultdict(list)
 MAX_MESSAGES_PER_IP = 50
 
@@ -324,9 +326,12 @@ async def chat(request: ChatRequest, fastapi_req: Request):
     client_ip = getattr(fastapi_req.state, "client_ip", "unknown")
     identity = resolve_identity(fastapi_req)
     result = await rag_engine.chat(request, identity=identity)
-    # 保存消息到 IP 会话缓存（仅知识库路径保存）
+    # 保存消息到 IP 会话缓存（仅知识库路径保存；内存态，module-034 降级为兜底缓存）
     if result.message not in ("casual_chat", "realtime_not_implemented") and result.answer:
         save_messages_to_session(client_ip, request.query, result.answer, result.sources)
+        # 注：会话持久化（_schedule_session_persist）已由 engine.chat 内部在 no-docs/docs
+        # 两个 return 点自包含调度（module-034），此处不再重复调用——此前双重调度导致
+        # 每轮会话消息确定性重复落库 4 行/轮（Reviewer 阻塞 #1，content_hash 无唯一约束）。
     return result
 
 
@@ -413,6 +418,8 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
                     yield f"event: token\ndata: {json.dumps(token)}\n\n"
                 # module-033：knowledge 路径生成结束后异步触发长期记忆自动写入
                 schedule_stream_persist(intent, request.query, "".join(answer_parts), identity, request.history)
+                # module-034：会话持久化为主（异步写库，不阻塞 SSE 响应）
+                rag_engine._schedule_session_persist(identity, request.query, "".join(answer_parts))
                 yield "event: done\ndata: {}\n\n"
                 return
 
@@ -444,12 +451,14 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
             yield f"event: step\ndata: {step_data}\n\n"
 
             # ====== Step 5: 流式生成 ======
-            # module-025: 流式路径接入长期记忆（复用 engine._recall_memory，
+            # module-025: 流式路径接入记忆（复用 engine._recall_memory，
             # 5s 超时 + 失败降级返回空串；无记忆时 memory 为空串，零回归）
             # module-032: 记忆按身份隔离（user_id 优先，否则 client_ip）
+            # module-034: 会话恢复优先持久化（刷新/换设备不丢）；无则用当前请求
             memory = await rag_engine._recall_memory(request.query, identity)
+            history = await rag_engine._resolve_session_history(identity, request.history)
             answer_parts = []
-            async for token in reflector.generate_answer_stream(request.query, docs, history=request.history, memory=memory):
+            async for token in reflector.generate_answer_stream(request.query, docs, history=history, memory=memory):
                 answer_parts.append(token)
                 yield f"event: token\ndata: {json.dumps(token)}\n\n"
 
@@ -466,6 +475,8 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
             # module-033：knowledge 路径流式生成结束后异步触发长期记忆自动写入
             #（fire-and-forget；casual_chat 已提前返回、realtime 由 intent 检查跳过）
             schedule_stream_persist(intent, request.query, "".join(answer_parts), identity, request.history)
+            # module-034：会话持久化为主（异步写库，不阻塞 SSE 响应）
+            rag_engine._schedule_session_persist(identity, request.query, "".join(answer_parts))
             yield f"event: done\ndata: {json.dumps({'sources': sources})}\n\n"
 
         except Exception as e:

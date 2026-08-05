@@ -26,6 +26,10 @@ public class JwtUtil {
     /** HS256 要求密钥至少 256 bits = 32 字节 */
     private static final int MIN_SECRET_BYTES = 32;
 
+    /** 本地开发占位符（application.yml 默认值，与 ai_service/.env 的 PW_JWT_SECRET 同值）——
+     *  检测到即告警：生产必须用环境变量 APP_JWT_SECRET 覆盖，不得使用公开占位符 */
+    private static final String DEV_PLACEHOLDER_PREFIX = "dev-only-local-jwt-secret";
+
     private final SecretKey key;
     private final long expireDays;
 
@@ -41,6 +45,10 @@ public class JwtUtil {
         if (keyBytes.length < MIN_SECRET_BYTES) {
             throw new IllegalStateException(
                     "jwt.secret 配置缺失或长度不足（HS256 要求 ≥" + MIN_SECRET_BYTES + " 字节），请通过环境变量 APP_JWT_SECRET 设置");
+        }
+        if (secret.startsWith(DEV_PLACEHOLDER_PREFIX)) {
+            log.warn("当前使用【本地开发占位符】JWT 密钥（{}…）。生产环境必须设置环境变量 APP_JWT_SECRET 覆盖，"
+                    + "否则任何可访问仓库的人都知道此密钥、可伪造用户 token。", secret.substring(0, Math.min(16, secret.length())));
         }
         this.key = Keys.hmacShaKeyFor(keyBytes);
         this.expireDays = expireDays;

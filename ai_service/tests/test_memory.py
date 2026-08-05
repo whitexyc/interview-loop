@@ -18,13 +18,14 @@
 - 同步用例内 asyncio.run 执行，不依赖 pytest-asyncio（规避既有环境问题）
 """
 import asyncio
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from unittest import mock
 
-from rag.memory import memory_service, _escape_like
+from rag.memory import memory_service, _escape_like, _layer_pattern, _memory_source, format_memory_line
 from rag.retriever import HybridRetriever
 from rag.engine import rag_engine
 from rag.schemas import ChatRequest
+from src.config import settings
 
 
 class _FakeSession:
@@ -184,7 +185,7 @@ class TestRecall:
                     memories = await memory_service.recall("线程池", "192.168.1.1", top_k=3)
 
             ret.retrieve.assert_awaited_once_with(
-                "线程池", top_k=3, source_pattern="memory:192.168.1.1:%",
+                "线程池", top_k=3, source_pattern="memory:192.168.1.1:",
             )
             assert memories == [{
                 "content": "完整记忆：上次结论是 X",
@@ -207,7 +208,7 @@ class TestRecall:
                 await memory_service.recall("q", "2.2.2.2")
 
         asyncio.run(run())
-        assert calls == ["memory:1.1.1.1:%", "memory:2.2.2.2:%"]
+        assert calls == ["memory:1.1.1.1:", "memory:2.2.2.2:"]
 
     def test_recall_ip_prefix_overlap_no_cross_match(self):
         """前缀重叠 IP（192.168.1.1 vs 192.168.1.10）隔离不泄漏（回归 #1）
@@ -228,7 +229,7 @@ class TestRecall:
                 await memory_service.recall("q", "192.168.1.10")
 
         asyncio.run(run())
-        assert calls == ["memory:192.168.1.1:%", "memory:192.168.1.10:%"]
+        assert calls == ["memory:192.168.1.1:", "memory:192.168.1.10:"]
         # LIKE 语义镜像：1.1 的检索模式不得匹配 1.10 的记忆 source，反之亦然
         assert not "memory:192.168.1.10:xyz".startswith("memory:192.168.1.1:")
         assert not "memory:192.168.1.1:xyz".startswith("memory:192.168.1.10:")
@@ -256,7 +257,7 @@ class TestRecall:
 
         asyncio.run(run())
         # 通配符 ip 全部降级为 'unknown' 桶，合法 IPv4 原样保留
-        assert calls == ["memory:unknown:%"] * 3 + ["memory:1.1.1.1:%"]
+        assert calls == ["memory:unknown:"] * 3 + ["memory:1.1.1.1:"]
         # LIKE 语义镜像：'memory:unknown:%' 不得匹配任意 IP 的记忆 source
         assert "memory:1.1.1.1:xyz".startswith("memory:unknown:") is False
 
@@ -317,7 +318,7 @@ class TestNextTitle:
         assert "source LIKE" in sql
         assert "parent_id IS NULL" in sql
         # review #4：计数限定本 IP + 当日（created_at），避免序号跨日期/IP 累计
-        assert "memory:192.168.1.1:%" in sql
+        assert "memory:192.168.1.1:" in sql
         assert "2026-08-01" in sql
         assert captured["title"] == "记忆-2026-08-01-03"
 
@@ -337,8 +338,8 @@ class TestNextTitle:
 
         asyncio.run(run())
         sql = str(captured["stmt"].compile(compile_kwargs={"literal_binds": True}))
-        assert "memory:2.2.2.2:%" in sql
-        assert "memory:%" not in sql.replace("memory:2.2.2.2:%", "")  # 非全量前缀
+        assert "memory:2.2.2.2:" in sql
+        assert "memory:%" not in sql  # 非全量前缀（module-034 各层精确匹配，不用 % 通配）
         assert captured["title"] == "记忆-2026-08-01-06"
 
     def test_save_passes_date_object_to_next_title(self):
@@ -444,14 +445,16 @@ class TestEngineMemoryInjection:
     def test_no_memories_returns_empty(self):
         async def run():
             with mock.patch("rag.engine.memory_service.recall", new=mock.AsyncMock(return_value=[])):
-                assert await rag_engine._recall_memory("q", "ip") == ""
+                with mock.patch("rag.engine.memory_service.recall_short", new=mock.AsyncMock(return_value=[])):
+                    assert await rag_engine._recall_memory("q", "ip") == ""
         asyncio.run(run())
 
     def test_failure_returns_empty(self):
         async def run():
             with mock.patch("rag.engine.memory_service.recall",
                             new=mock.AsyncMock(side_effect=RuntimeError("down"))):
-                assert await rag_engine._recall_memory("q", "ip") == ""
+                with mock.patch("rag.engine.memory_service.recall_short", new=mock.AsyncMock(return_value=[])):
+                    assert await rag_engine._recall_memory("q", "ip") == ""
         asyncio.run(run())
 
     def test_formats_memory_section(self):
@@ -460,7 +463,8 @@ class TestEngineMemoryInjection:
                             new=mock.AsyncMock(return_value=[
                                 {"content": "用户偏好简短 Java 回答", "score": 0.9},
                             ])):
-                text = await rag_engine._recall_memory("回答风格", "ip", top_k=3)
+                with mock.patch("rag.engine.memory_service.recall_short", new=mock.AsyncMock(return_value=[])):
+                    text = await rag_engine._recall_memory("回答风格", "ip", top_k=3)
             assert text.startswith("历史记忆:")
             assert "用户偏好简短 Java 回答" in text
         asyncio.run(run())
@@ -488,11 +492,13 @@ class TestEngineRealtimeSkipsMemory:
                                 new=mock.AsyncMock(return_value=[
                                     {"content": "用户偏好简洁回答", "score": 1.0},
                                 ])):
-                    with mock.patch("rag.engine.LLMFactory.get_client") as gc:
-                        fake = mock.MagicMock()
-                        fake.chat = mock.AsyncMock(return_value="好的")
-                        gc.return_value = fake
-                        result = await rag_engine.chat(ChatRequest(query="你好"), identity="1.2.3.4")
+                    with mock.patch("rag.engine.memory_service.recall_short",
+                                    new=mock.AsyncMock(return_value=[])):
+                        with mock.patch("rag.engine.LLMFactory.get_client") as gc:
+                            fake = mock.MagicMock()
+                            fake.chat = mock.AsyncMock(return_value="好的")
+                            gc.return_value = fake
+                            result = await rag_engine.chat(ChatRequest(query="你好"), identity="1.2.3.4")
             assert result.message == "casual_chat"
             sys_prompt = fake.chat.call_args.args[0][0]["content"]
             assert "用户偏好简洁回答" in sys_prompt  # 记忆仍注入闲聊 system prompt
@@ -553,3 +559,172 @@ class TestListDocumentsExcludesMemory:
         # 列表查询（含分组子查询）必须排除记忆文档（source='memory:%'）
         assert "NOT LIKE 'memory:%'" in captured[0]
         assert resp["code"] == 0
+
+
+# ─── module-034：三层 source 分层 ───
+
+
+class TestSourceLayering:
+    """_memory_source / _layer_pattern：长/短/会话三层 source 互不混淆"""
+
+    def test_memory_source_long_short_session(self):
+        assert _memory_source("42") == "memory:42:"
+        assert _memory_source("42", "short") == "memory:42:short:"
+        assert _memory_source("42", "session") == "memory:42:session:"
+        assert _memory_source("1.1.1.1") == "memory:1.1.1.1:"
+
+    def test_layer_pattern_exact_no_wildcard(self):
+        # 长期层不再用 ':%' 通配（避免命中 short/session 层），各层精确匹配
+        assert _layer_pattern("42") == "memory:42:"
+        assert _layer_pattern("42", "short") == "memory:42:short:"
+        assert _layer_pattern("42", "session") == "memory:42:session:"
+        assert "%" not in _layer_pattern("42")
+        assert "%" not in _layer_pattern("42", "short")
+
+    def test_long_pattern_does_not_match_short_source(self):
+        # 长期层 source 精确匹配（等值），短/会话层 source 不同 → 等值不命中
+        assert _layer_pattern("42") == "memory:42:"
+        assert _layer_pattern("42") != "memory:42:short:"
+        assert _layer_pattern("42") != "memory:42:session:"
+        # 短/会话层各自精确匹配，互不命中
+        assert _layer_pattern("42", "short") != "memory:42:session:"
+        assert _layer_pattern("42", "session") != "memory:42:short:"
+
+    def test_format_memory_line_short_label(self):
+        line = format_memory_line(
+            {"content": "最近在学 Java 并发", "created_at": "2026-08-05"}, label="短期记忆")
+        assert line == "[短期记忆 - 2026-08-05]：最近在学 Java 并发"
+        # 默认 label 保持长期记忆（module-033 兼容）
+        assert format_memory_line({"content": "x"}) == "[长期记忆]：x"
+
+
+class TestSaveShort:
+    """MemoryService.save_short（module-034）"""
+
+    def test_save_short_writes_short_source(self):
+        async def run():
+            fs = _FakeSession(scalar=0)
+            with mock.patch("rag.memory.async_session_factory", _fake_factory(fs)):
+                with mock.patch("rag.memory.chunker") as chunker_mock:
+                    with mock.patch("rag.memory.embedding_service") as emb_mock:
+                        chunker_mock.chunk.return_value = _chunk_single("最近在学 Java 并发")
+                        emb_mock.embed_documents = mock.AsyncMock(return_value=[[0.1]])
+                        result = await memory_service.save_short("最近在学 Java 并发", "42")
+
+            assert result["status"] == "saved"
+            assert result["title"].startswith("记忆-")
+            # 父块 + 子块均写入，source='memory:42:short:'（与长期 'memory:42:' 区分）
+            assert {getattr(d, "source", None) for d in fs.added} == {"memory:42:short:"}
+            embedded = [d for d in fs.added if d.embedding is not None]
+            assert len(embedded) == 1 and embedded[0].parent_id == 1
+        asyncio.run(run())
+
+    def test_save_short_empty_content_raises(self):
+        try:
+            asyncio.run(memory_service.save_short("   ", "ip"))
+            raise AssertionError("应抛出 ValueError")
+        except ValueError:
+            pass
+
+    def test_save_short_dedup_scoped_to_short_layer(self):
+        """短期去重只查 short 层（_find_duplicate layer='short'），不与长期混查"""
+        async def run():
+            fs = _FakeSession(scalar=0)
+            with mock.patch("rag.memory.async_session_factory", _fake_factory(fs)):
+                with mock.patch("rag.memory.chunker") as chunker_mock:
+                    with mock.patch("rag.memory.embedding_service") as emb_mock:
+                        with mock.patch.object(memory_service, "_find_duplicate",
+                                               new=mock.AsyncMock(return_value=None)) as find:
+                            chunker_mock.chunk.return_value = _chunk_single("事实")
+                            emb_mock.embed_documents = mock.AsyncMock(return_value=[[0.1]])
+                            await memory_service.save_short("事实", "42")
+            assert find.call_args.kwargs.get("layer") == "short"  # layer='short'
+        asyncio.run(run())
+
+    def test_save_short_title_count_scoped_to_short(self):
+        """_next_title 计数按 short 层（不混入长期父块数）"""
+        captured = {}
+
+        class _CaptureSession(_FakeSession):
+            async def execute(self, stmt):
+                captured["stmt"] = stmt
+                return await super().execute(stmt)
+
+        async def run():
+            with mock.patch("rag.memory.async_session_factory",
+                            _fake_factory(_CaptureSession(scalar=3))):
+                captured["title"] = await memory_service._next_title(date(2026, 8, 1), "42", layer="short")
+
+        asyncio.run(run())
+        sql = str(captured["stmt"].compile(compile_kwargs={"literal_binds": True}))
+        assert "memory:42:short:" in sql  # 只统计短期层父块
+        assert captured["title"] == "记忆-2026-08-01-04"
+
+
+class TestRecallShort:
+    """MemoryService.recall_short（module-034：动态 K + TTL 过滤）"""
+
+    def test_recall_short_empty_query_returns_empty(self):
+        async def run():
+            with mock.patch("rag.memory.hybrid_retriever") as ret:
+                ret.retrieve = mock.AsyncMock()
+                assert await memory_service.recall_short("  ", "ip") == []
+                ret.retrieve.assert_not_called()
+        asyncio.run(run())
+
+    def test_recall_short_passes_short_source_pattern(self):
+        async def run():
+            with mock.patch("rag.memory.hybrid_retriever") as ret:
+                ret.retrieve = mock.AsyncMock(return_value=[])
+                await memory_service.recall_short("q", "42")
+            ret.retrieve.assert_awaited_once_with("q", top_k=5, source_pattern="memory:42:short:")
+        asyncio.run(run())
+
+    def test_recall_short_retrieval_failure_returns_empty(self):
+        async def run():
+            with mock.patch("rag.memory.hybrid_retriever") as ret:
+                ret.retrieve = mock.AsyncMock(side_effect=RuntimeError("db down"))
+                assert await memory_service.recall_short("q", "ip") == []
+        asyncio.run(run())
+
+    def test_recall_short_filters_expired_by_ttl(self):
+        """超 memory_short_ttl_days 的短期记忆召回时被过滤（惰性过期）"""
+        today = date.today()
+        recent = today.isoformat()
+        expired = (today - timedelta(days=settings.memory_short_ttl_days + 1)).isoformat()
+        expanded = [
+            {"content": "最近主题", "score": 0.9, "created_at": recent},
+            {"content": "过期主题", "score": 0.9, "created_at": expired},
+            {"content": "无日期", "score": 0.9, "created_at": None},
+        ]
+        child = {"id": 2, "content": "子块", "parent_id": 1, "hybrid_score": 0.9}
+        out = {}
+
+        async def run():
+            with mock.patch("rag.memory.hybrid_retriever") as ret:
+                ret.retrieve = mock.AsyncMock(return_value=[child])
+                with mock.patch.object(memory_service, "_expand_to_parents",
+                                       new=mock.AsyncMock(return_value=expanded)):
+                    out["memories"] = await memory_service.recall_short(
+                        "最近聊了什么", "42", top_k=5)
+
+        asyncio.run(run())
+        contents = [m["content"] for m in out["memories"]]
+        assert "过期主题" not in contents       # 超 TTL 被过滤
+        assert "最近主题" in contents          # 未过期保留
+        assert "无日期" in contents            # 无 created_at fail-open 保留
+
+    def test_recall_short_isolated_by_identity(self):
+        calls = []
+
+        async def run():
+            with mock.patch("rag.memory.hybrid_retriever") as ret:
+                async def fake_retrieve(query, top_k=5, source_pattern=None):
+                    calls.append(source_pattern)
+                    return []
+                ret.retrieve = mock.AsyncMock(side_effect=fake_retrieve)
+                await memory_service.recall_short("q", "1.1.1.1")
+                await memory_service.recall_short("q", "2.2.2.2")
+
+        asyncio.run(run())
+        assert calls == ["memory:1.1.1.1:short:", "memory:2.2.2.2:short:"]
