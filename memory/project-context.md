@@ -58,8 +58,8 @@
 | adr-001 | Qwen3-Reranker 需 chat template 适配（不能裸 pair） | 已采纳（superseded by module-030） | 2026-08-01 |
 
 ## 5. 当前迭代状态
-- 当前迭代版本: v0.35.0
-- 正在进行的模块: module-035 已完成；**golden_retrieval 评估脚本修复（标题层级前缀匹配）**
+- 当前迭代版本: v0.36.0
+- 正在进行的模块: **module-036 Agent 端点接入会话记忆**（规划完成，待 DEVELOP 派发）
 - 下一个待开发模块: 待定
 
 ## 7. 关键技术决策记录
