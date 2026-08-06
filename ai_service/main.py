@@ -388,12 +388,13 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
             retrieval_count = len(docs)
             # 预览文档（前5条标题+摘要）
             previews = []
-            relevant_count = 0
-            MIN_SCORE = 0.3
+            # module-035 (P2)：移除失真阈值——hybrid_score 是 min-max 相对分
+            #（跨查询不可比），旧 MIN_SCORE=0.3 套相对分当绝对阈值语义失真。
+            # relevant 仅供 UI 展示统计（不影响回答正确性），检索步骤本身即
+            # 相关性门控，故直接统计检索召回数，不做虚假的绝对质量判断。
+            relevant_count = retrieval_count
             for d in docs:
                 score = d.get("hybrid_score", 0)
-                if score >= MIN_SCORE:
-                    relevant_count += 1
                 if len(previews) < 5:
                     previews.append({
                         "title": d.get("title", ""),

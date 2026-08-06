@@ -1,5 +1,5 @@
 """
-长期记忆服务 — 跨会话记忆沉淀（module-023 / module-032 身份化 / module-034 分层）
+长期记忆服务 — 跨会话记忆沉淀（module-023 / module-032 身份化 / module-034 分层 / module-035 分数口径）
 ===== ===== ===== ===== ===== ===== ===== ===== ===== ===== ===== ===== ===== =====
 
 系统无长期记忆（只有 Redis 短期缓存 + 内存 IP 会话，重启丢失）。
@@ -10,6 +10,13 @@
 - save_short(content, identity): 短期记忆（source='memory:<identity>:short:'，TTL 7 天）
 - recall(query, identity): 长期记忆检索（source 精确匹配，动态 K）
 - recall_short(query, identity): 短期记忆检索（动态 K + TTL 过滤）
+
+module-035 分数口径（相对分 vs 绝对分）：
+  - 动态 K / 低分过滤 / 去重统一用**绝对 embedding 余弦**（候选子块 embedding 存库已 L2
+    归一化，点积=cosine；query 经 embed_text 归一化）——相对分（min-max hybrid_score）
+    跨查询不可比，套绝对阈值语义失真（旧动态 K 恒 K=1 的根因，详见
+    specs/module-035-score-calibration/score-issues.md）
+  - query 嵌入失败 → 降级用原 hybrid_score（不回退失败）
 
 module-034 三层 source 分层：
   - 长期 memory:<identity>:
@@ -249,7 +256,7 @@ class MemoryService:
 
         流程（dedup=True 默认，module-033）：
           1. 语义去重：与本身份同层现有记忆嵌入 cosine 相似度最高值 > 阈值
-             （settings.memory_dedup_threshold=0.95）→ 视为重复 → 更新既有
+             （settings.memory_dedup_threshold=0.85，module-035 校准）→ 视为重复 → 更新既有
              父块（追加内容）并返回 status="updated"（不新增行，库内条数不涨）
           2. 未命中重复 → 分块（复用 chunker）→ 写父块 → 子块向量化 + 写子块
              （细节拆分到 _insert_parents / _insert_children）；embedding 失败时
@@ -469,16 +476,19 @@ class MemoryService:
     async def recall(
         self, query: str, identity: str = DEFAULT_IDENTITY, top_k: int = 5,
     ) -> list[dict]:
-        """检索与 query 相关的长期记忆（按身份隔离；动态 K 召回，module-033）
+        """检索与 query 相关的长期记忆（按身份隔离；动态 K 召回，module-033/035）
 
         复用 hybrid_retriever（source_pattern 精确匹配 'memory:<identity>:'，
         module-034 后不再用 ':%' 通配，避免命中 short/session 层），
         检索命中的子块再映射回父块，返回完整记忆内容（同父块去重取最高分）。
 
-        module-033 动态 K：先取 top_k 个候选，按候选平均相似度动态调整最终
-        召回条数（均值>0.85→5 / 0.75-0.85→3 / <0.75→1，宁缺毋滥）——候选
-        质量越高多召回几条，越低只保留最相关一条。每条结果新增 created_at
-        （'YYYY-MM-DD' 或 None），供 '[长期记忆 - 日期]：内容' 格式化注入。
+        module-035 动态 K（绝对余弦口径）：query 嵌入 + 候选子块 embedding
+        （存库已 L2 归一化，点积=cosine）算每条绝对余弦；绝对余弦 <
+        memory_recall_min_score（默认 0.4）的候选丢弃（防"本批相对高但绝对烂"
+        注入）；按平均绝对余弦动态调整召回条数（>0.85→5 / 0.75-0.85→3 /
+        <0.75→1，宁缺毋滥）。query 嵌入失败 → 降级用原 hybrid_score（不回退
+        失败）。每条结果新增 created_at（'YYYY-MM-DD' 或 None），供
+        '[长期记忆 - 日期]：内容' 格式化注入。
 
         Args:
             query: 检索查询
@@ -505,10 +515,8 @@ class MemoryService:
             return []
         if not docs:
             return []
-        # module-033 动态 K：按候选平均相似度调整召回条数（宁缺毋滥）
-        avg_score = sum(
-            d.get("hybrid_score", d.get("score", 0.0)) for d in docs
-        ) / len(docs)
+        # module-035 动态 K：绝对余弦口径（低分过滤 + 按绝对余弦降序 + 均值判定）
+        avg_score = await self._absolute_cosine_avg(query, docs)
         dynamic_k = self._dynamic_k(avg_score)
         memories = await self._expand_to_parents(docs)
         return memories[:dynamic_k]
@@ -521,10 +529,11 @@ class MemoryService:
         复用 hybrid_retriever（source_pattern 精确匹配 'memory:<identity>:short:'，
         只查短期层，与长期/会话互不混淆），命中子块映射回父块（_expand_to_parents）。
 
-        动态 K：与长期 recall 一致（候选平均相似度 >0.85→5 / 0.75-0.85→3 /
-        <0.75→1，宁缺毋滥）。TTL：created_at 早于 today - settings.memory_short_ttl_days
-        （默认 7 天）的短期记忆召回时过滤（惰性过期，不参与召回）；无 created_at
-        的记录保留（fail-open，无法判断年龄不误删）。
+        动态 K：与长期 recall 一致（module-035 绝对余弦口径——候选平均绝对余弦
+        >0.85→5 / 0.75-0.85→3 / <0.75→1，宁缺毋滥；低分过滤 + 嵌入失败降级同 recall）。
+        TTL：created_at 早于 today - settings.memory_short_ttl_days（默认 7 天）的
+        短期记忆召回时过滤（惰性过期，不参与召回）；无 created_at 的记录保留
+        （fail-open，无法判断年龄不误删）。
 
         Args:
             query: 检索查询
@@ -547,9 +556,8 @@ class MemoryService:
             return []
         if not docs:
             return []
-        avg_score = sum(
-            d.get("hybrid_score", d.get("score", 0.0)) for d in docs
-        ) / len(docs)
+        # module-035 动态 K：绝对余弦口径（低分过滤 + 按绝对余弦降序 + 均值判定）
+        avg_score = await self._absolute_cosine_avg(query, docs)
         dynamic_k = self._dynamic_k(avg_score)
         memories = await self._expand_to_parents(docs)
         # TTL 惰性过滤：'YYYY-MM-DD' 零填充字符串字典序 == 时间序，直接比较
@@ -562,10 +570,10 @@ class MemoryService:
 
     @staticmethod
     def _dynamic_k(avg_score: float) -> int:
-        """按候选平均相似度动态调整召回 K（module-033，宁缺毋滥）
+        """按候选平均相似度动态调整召回 K（module-033 阈值 / module-035 绝对余弦口径）
 
         Args:
-            avg_score: 检索候选的平均相似度（0-1）
+            avg_score: 检索候选的平均相似度（module-035 起为绝对余弦均值，0-1）
 
         Returns:
             召回条数：>0.85 → 5；0.75-0.85 → 3；<0.75 → 1
@@ -575,6 +583,95 @@ class MemoryService:
         if avg_score >= settings.memory_recall_mid_threshold:
             return 3
         return 1
+
+    @staticmethod
+    def _cosine(a: list[float], b: list[float]) -> float:
+        """向量余弦相似度（module-035 绝对余弦口径）
+
+        候选子块 embedding 存库时已 L2 归一化（module-033），query embedding 由
+        embedding_service.embed_text 归一化，故点积即余弦。维度不一致（历史脏
+        数据）或任一为空时返回 0.0（视为不相似，宁缺毋滥）。
+
+        Args:
+            a: 向量 A（query embedding）
+            b: 向量 B（候选 embedding）
+
+        Returns:
+            [0, 1] 余弦相似度
+        """
+        if not a or not b or len(a) != len(b):
+            return 0.0
+        return sum(x * y for x, y in zip(a, b))
+
+    async def _child_embeddings(self, child_docs: list[dict]) -> dict[int, list[float]]:
+        """批量读取候选子块的存储 embedding（module-035 绝对余弦用）
+
+        子块 embedding 存库时已 L2 归一化（module-033），读取后可直接
+        dot(query_emb, doc_emb) 作为绝对余弦。按候选子块 id 做 IN 查询
+        （只查这批候选，避免全表扫描）。
+
+        Args:
+            child_docs: 检索命中的子块候选列表（含 id）
+
+        Returns:
+            {子块 id: embedding 向量}；读取失败返回空 dict（由调用方降级）
+        """
+        ids = {d.get("id") for d in child_docs if d.get("id")}
+        if not ids:
+            return {}
+        try:
+            async with async_session_factory() as session:
+                rows = await session.execute(
+                    select(Document.id, Document.embedding).where(Document.id.in_(ids))
+                )
+                return {row.id: row.embedding for row in rows.all()}
+        except Exception as e:
+            logger.warning("候选子块 embedding 读取失败，降级 hybrid_score: %s", e)
+            return {}
+
+    async def _absolute_cosine_avg(self, query: str, docs: list[dict]) -> float:
+        """module-035 动态 K 绝对余弦口径（低分过滤 + 绝对余弦排序 + 均值）
+
+        对每条候选计算绝对余弦 = dot(query_emb, doc_emb)（候选子块 embedding
+        存库已 L2 归一化，点积=cosine），绝对余弦 < memory_recall_min_score 的
+        候选丢弃（防"本批相对高但绝对烂"的记忆注入），剩余候选按绝对余弦降序
+        排序，返回平均绝对余弦供 _dynamic_k 判定档位。
+
+        query 嵌入失败或候选 embedding 读取失败 → 降级返回原 hybrid_score 均值
+        （相对分，跨查询不可比但保留既有排序行为；不回退失败）。
+
+        Args:
+            query: 检索查询
+            docs: 检索命中的子块候选列表（原地修改：注入 abs_cosine / 低分过滤 / 排序）
+
+        Returns:
+            平均相似度（绝对余弦均值；降级时为 hybrid_score 均值）
+        """
+        query_emb = None
+        try:
+            query_emb = await embedding_service.embed_text(query)
+        except Exception as e:
+            logger.warning("记忆绝对余弦失败（query 嵌入），降级 hybrid_score: %s", e)
+        emb_by_id: dict[int, list[float]] = {}
+        if query_emb is not None:
+            emb_by_id = await self._child_embeddings(docs)
+        if query_emb is not None and emb_by_id:
+            for d in docs:
+                emb = emb_by_id.get(d.get("id"))
+                if emb:
+                    d["abs_cosine"] = self._cosine(query_emb, emb)
+            # 低分过滤：绝对余弦 < memory_recall_min_score 的候选丢弃
+            docs[:] = [
+                d for d in docs
+                if d.get("abs_cosine", 0.0) >= settings.memory_recall_min_score
+            ]
+            if not docs:
+                return 0.0
+            docs.sort(key=lambda d: d["abs_cosine"], reverse=True)
+            return sum(d["abs_cosine"] for d in docs) / len(docs)
+        return sum(
+            d.get("hybrid_score", d.get("score", 0.0)) for d in docs
+        ) / len(docs)
 
     async def _next_title(self, day: date, identity: str, layer: str = "") -> str:
         """生成标题 '记忆-<日期>-<序号>'（序号=本身份同层当日已存记忆父块数+1）
@@ -640,7 +737,8 @@ class MemoryService:
             content = p.content if p else d.get("content", "")
             if not content:
                 continue
-            score = d.get("hybrid_score", d.get("score", 0.0))
+            # module-035：优先用绝对余弦（abs_cosine）；嵌入失败降级路径仍用 hybrid_score
+            score = d.get("abs_cosine", d.get("hybrid_score", d.get("score", 0.0)))
             if content not in best or score > best[content]["score"]:
                 created_at = _date_str(p.created_at) if p else _date_str(d.get("created_at"))
                 best[content] = {

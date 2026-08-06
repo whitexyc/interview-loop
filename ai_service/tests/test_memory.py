@@ -31,10 +31,11 @@ from src.config import settings
 class _FakeSession:
     """假 AsyncSession：记录 add 的对象 + 可配置 execute 结果"""
 
-    def __init__(self, scalar=None, scalars=None):
+    def __init__(self, scalar=None, scalars=None, all_rows=None):
         self.added: list = []
         self._scalar = scalar
         self._scalars = scalars or []
+        self._all = all_rows or []
         self.rolled_back = False
 
     def add(self, obj):
@@ -58,6 +59,7 @@ class _FakeSession:
         result.scalars.return_value = mock.MagicMock(
             all=mock.MagicMock(return_value=self._scalars),
         )
+        result.all.return_value = self._all  # module-035：_child_embeddings 列选择查询
         return result
 
 
@@ -173,6 +175,8 @@ class TestRecall:
         asyncio.run(run())
 
     def test_recall_passes_source_pattern_and_expands_to_parent(self):
+        # module-035：query 嵌入失败 → 降级用原 hybrid_score（不回退失败）。
+        # 本用例覆盖降级路径（score 取 hybrid_score=0.8），source_pattern 透传不变
         child = {"id": 2, "content": "子块", "parent_id": 1, "hybrid_score": 0.8}
         parent = mock.MagicMock(id=1, content="完整记忆：上次结论是 X",
                                 title="记忆-2026-08-01-01",
@@ -181,8 +185,10 @@ class TestRecall:
         async def run():
             with mock.patch("rag.memory.hybrid_retriever") as ret:
                 with mock.patch("rag.memory.async_session_factory", _fake_factory(_FakeSession(scalars=[parent]))):
-                    ret.retrieve = mock.AsyncMock(return_value=[child])
-                    memories = await memory_service.recall("线程池", "192.168.1.1", top_k=3)
+                    with mock.patch("rag.memory.embedding_service") as emb:
+                        emb.embed_text = mock.AsyncMock(side_effect=RuntimeError("embed down"))
+                        ret.retrieve = mock.AsyncMock(return_value=[child])
+                        memories = await memory_service.recall("线程池", "192.168.1.1", top_k=3)
 
             ret.retrieve.assert_awaited_once_with(
                 "线程池", top_k=3, source_pattern="memory:192.168.1.1:",
@@ -277,6 +283,7 @@ class TestRecall:
         asyncio.run(run())
 
     def test_recall_dedup_same_parent_take_highest_score(self):
+        # module-035：query 嵌入失败 → 降级 hybrid_score 路径（同父块去重取最高分语义不变）
         parent = mock.MagicMock(id=1, content="完整记忆内容", title="记忆-2026-08-01-01",
                                 created_at=datetime(2026, 8, 1))
         child_low = {"id": 2, "content": "子块1", "parent_id": 1, "hybrid_score": 0.5}
@@ -285,8 +292,10 @@ class TestRecall:
         async def run():
             with mock.patch("rag.memory.hybrid_retriever") as ret:
                 with mock.patch("rag.memory.async_session_factory", _fake_factory(_FakeSession(scalars=[parent]))):
-                    ret.retrieve = mock.AsyncMock(return_value=[child_low, child_high])
-                    memories = await memory_service.recall("q", "ip")
+                    with mock.patch("rag.memory.embedding_service") as emb:
+                        emb.embed_text = mock.AsyncMock(side_effect=RuntimeError("embed down"))
+                        ret.retrieve = mock.AsyncMock(return_value=[child_low, child_high])
+                        memories = await memory_service.recall("q", "ip")
 
             assert len(memories) == 1
             assert memories[0]["content"] == "完整记忆内容"
@@ -703,10 +712,13 @@ class TestRecallShort:
         async def run():
             with mock.patch("rag.memory.hybrid_retriever") as ret:
                 ret.retrieve = mock.AsyncMock(return_value=[child])
-                with mock.patch.object(memory_service, "_expand_to_parents",
-                                       new=mock.AsyncMock(return_value=expanded)):
-                    out["memories"] = await memory_service.recall_short(
-                        "最近聊了什么", "42", top_k=5)
+                # module-035：query 嵌入失败 → 降级 hybrid_score 路径（TTL 过滤逻辑不变）
+                with mock.patch("rag.memory.embedding_service") as emb:
+                    emb.embed_text = mock.AsyncMock(side_effect=RuntimeError("embed down"))
+                    with mock.patch.object(memory_service, "_expand_to_parents",
+                                           new=mock.AsyncMock(return_value=expanded)):
+                        out["memories"] = await memory_service.recall_short(
+                            "最近聊了什么", "42", top_k=5)
 
         asyncio.run(run())
         contents = [m["content"] for m in out["memories"]]
@@ -728,3 +740,211 @@ class TestRecallShort:
 
         asyncio.run(run())
         assert calls == ["memory:1.1.1.1:short:", "memory:2.2.2.2:short:"]
+
+
+# ─── module-035：动态 K 绝对余弦口径 ───
+
+
+class TestRecallDynamicKAbsCosine:
+    """module-035 动态 K 绝对余弦口径：三档真实可达 + 低分过滤 + 空候选 + 嵌入失败降级"""
+
+    @staticmethod
+    def _children(cosines):
+        """子块候选：id/parent_id 一一对应（从 1 起，避免 parent_id=0 被 when 视为空），
+        embedding 由 mock 提供 → 绝对余弦"""
+        return [
+            {"id": i + 1, "content": f"子{i}", "parent_id": i + 1, "hybrid_score": 0.5}
+            for i in range(len(cosines))
+        ]
+
+    @staticmethod
+    def _parents(n):
+        return [
+            mock.MagicMock(id=i + 1, content=f"记忆{i}", title=f"记忆-2026-08-01-0{i + 1}",
+                           created_at=datetime(2026, 8, 1))
+            for i in range(n)
+        ]
+
+    def _recall(self, children, emb_by_id, query_emb, parents):
+        async def run():
+            with mock.patch("rag.memory.hybrid_retriever") as ret:
+                ret.retrieve = mock.AsyncMock(return_value=children)
+                with mock.patch("rag.memory.embedding_service") as emb:
+                    emb.embed_text = mock.AsyncMock(return_value=query_emb)
+                    with mock.patch.object(memory_service, "_child_embeddings",
+                                           new=mock.AsyncMock(return_value=emb_by_id)):
+                        with mock.patch("rag.memory.async_session_factory",
+                                        _fake_factory(_FakeSession(scalars=parents))):
+                            return await memory_service.recall("q", "42", top_k=5)
+        return asyncio.run(run())
+
+    def test_high_quality_recalls_five(self):
+        cosines = [0.9] * 5
+        children = self._children(cosines)
+        emb_by_id = {i + 1: [c, 0.0] for i, c in enumerate(cosines)}
+        memories = self._recall(children, emb_by_id, [1.0, 0.0], self._parents(5))
+        assert len(memories) == 5  # 绝对余弦均值 0.9 > 0.85 → K=5 真实可达（不再恒 1）
+        assert all(m["score"] == 0.9 for m in memories)
+
+    def test_mid_quality_recalls_three(self):
+        cosines = [0.78] * 5
+        children = self._children(cosines)
+        emb_by_id = {i + 1: [c, 0.0] for i, c in enumerate(cosines)}
+        memories = self._recall(children, emb_by_id, [1.0, 0.0], self._parents(5))
+        assert len(memories) == 3  # 绝对余弦均值 0.78 ∈ [0.75,0.85) → K=3
+
+    def test_low_quality_recalls_one(self):
+        cosines = [0.5] * 5
+        children = self._children(cosines)
+        emb_by_id = {i + 1: [c, 0.0] for i, c in enumerate(cosines)}
+        memories = self._recall(children, emb_by_id, [1.0, 0.0], self._parents(5))
+        assert len(memories) == 1  # 绝对余弦均值 0.5 < 0.75 → K=1（宁缺毋滥）
+
+    def test_low_score_candidates_filtered_out(self):
+        # 第二条候选绝对余弦 0.3 < memory_recall_min_score(0.4) → 丢弃
+        children = self._children([0.9, 0.3])
+        emb_by_id = {1: [0.9, 0.0], 2: [0.3, 0.0]}
+        memories = self._recall(children, emb_by_id, [1.0, 0.0], self._parents(5))
+        contents = [m["content"] for m in memories]
+        assert len(memories) == 1
+        assert memories[0]["content"] == "记忆0"
+        assert "记忆1" not in contents  # 不注入"本批相对高但绝对烂"的低分记忆
+
+    def test_all_candidates_low_score_returns_empty(self):
+        children = self._children([0.2, 0.3])
+        emb_by_id = {1: [0.2, 0.0], 2: [0.3, 0.0]}
+        memories = self._recall(children, emb_by_id, [1.0, 0.0], self._parents(5))
+        assert memories == []  # 全部低于 min_score → 空（不崩）
+
+    def test_empty_candidates_returns_empty(self):
+        async def run():
+            with mock.patch("rag.memory.hybrid_retriever") as ret:
+                ret.retrieve = mock.AsyncMock(return_value=[])
+                with mock.patch.object(memory_service, "_expand_to_parents",
+                                       new=mock.AsyncMock()) as expand:
+                    assert await memory_service.recall("q", "42") == []
+                    expand.assert_not_called()
+        asyncio.run(run())
+
+    def test_embedding_failure_degrades_to_hybrid_score(self):
+        children = self._children([0.5] * 5)
+
+        async def run():
+            with mock.patch("rag.memory.hybrid_retriever") as ret:
+                ret.retrieve = mock.AsyncMock(return_value=children)
+                with mock.patch("rag.memory.embedding_service") as emb:
+                    emb.embed_text = mock.AsyncMock(side_effect=RuntimeError("embed down"))
+                    with mock.patch("rag.memory.async_session_factory",
+                                    _fake_factory(_FakeSession(scalars=self._parents(5)))):
+                        return await memory_service.recall("q", "42", top_k=5)
+        memories = asyncio.run(run())
+        # 降级不回退失败：用原 hybrid_score 均值（0.5 < 0.75 → K=1）
+        assert len(memories) == 1
+        assert memories[0]["score"] == 0.5
+
+
+class TestRecallShortAbsCosine:
+    """module-035：recall_short 动态 K 绝对余弦口径（与长期 recall 一致）"""
+
+    def test_recall_short_abs_cosine_reaches_three(self):
+        children = [
+            {"id": i + 1, "content": f"子{i}", "parent_id": i + 1, "hybrid_score": 0.5}
+            for i in range(5)
+        ]
+        emb_by_id = {i + 1: [0.78, 0.0] for i in range(5)}
+        parents = [
+            mock.MagicMock(id=i + 1, content=f"短记忆{i}", title=f"t{i}",
+                           created_at=datetime.now())
+            for i in range(5)
+        ]
+
+        async def run():
+            with mock.patch("rag.memory.hybrid_retriever") as ret:
+                ret.retrieve = mock.AsyncMock(return_value=children)
+                with mock.patch("rag.memory.embedding_service") as emb:
+                    emb.embed_text = mock.AsyncMock(return_value=[1.0, 0.0])
+                    with mock.patch.object(memory_service, "_child_embeddings",
+                                           new=mock.AsyncMock(return_value=emb_by_id)):
+                        with mock.patch("rag.memory.async_session_factory",
+                                        _fake_factory(_FakeSession(scalars=parents))):
+                            return await memory_service.recall_short("q", "42", top_k=5)
+        memories = asyncio.run(run())
+        # 绝对余弦均值 0.78 ∈ [0.75,0.85) → K=3（created_at=now 未超 TTL，全部保留）
+        assert len(memories) == 3
+
+
+class TestChildEmbeddings:
+    """module-035：_child_embeddings 按子块 id 批量取存储 embedding"""
+
+    def test_fetches_embeddings_by_child_ids(self):
+        row1 = mock.MagicMock(id=1, embedding=[0.9, 0.0])
+        row2 = mock.MagicMock(id=2, embedding=[0.8, 0.0])
+        captured = {}
+
+        class _CaptureSession(_FakeSession):
+            async def execute(self, stmt):
+                captured["stmt"] = stmt
+                return await super().execute(stmt)
+
+        async def run():
+            with mock.patch("rag.memory.async_session_factory",
+                            _fake_factory(_CaptureSession(all_rows=[row1, row2]))):
+                return await memory_service._child_embeddings([{"id": 1}, {"id": 2}])
+
+        emb_map = asyncio.run(run())
+        sql = str(captured["stmt"].compile(compile_kwargs={"literal_binds": True}))
+        assert "IN (1, 2)" in sql or "IN (2, 1)" in sql
+        assert emb_map == {1: [0.9, 0.0], 2: [0.8, 0.0]}
+
+    def test_no_ids_returns_empty_without_db(self):
+        async def run():
+            with mock.patch("rag.memory.async_session_factory") as fac:
+                assert await memory_service._child_embeddings([]) == {}
+                fac.assert_not_called()
+        asyncio.run(run())
+
+    def test_db_failure_returns_empty(self):
+        async def run():
+            with mock.patch("rag.memory.async_session_factory",
+                            mock.MagicMock(side_effect=RuntimeError("db down"))):
+                assert await memory_service._child_embeddings([{"id": 1}]) == {}
+        asyncio.run(run())
+
+
+class TestDedupThreshold035:
+    """module-035：去重阈值 0.85 校准（同义改写触发 / 不同事实不触发）"""
+
+    def test_synonym_paraphrase_cosine_088_triggers_dedup(self):
+        # 真实 bge-m3 同义改写 cosine≈0.88 > 0.85 → 触发去重（更新而非新增，条数不涨）
+        existing = mock.MagicMock(id=7, parent_id=5, embedding=[0.88, 0.0, 0.0])
+
+        async def run():
+            with mock.patch("rag.memory.embedding_service") as emb:
+                emb.embed_text = mock.AsyncMock(return_value=[1.0, 0.0, 0.0])
+                with mock.patch("rag.memory.async_session_factory",
+                                _fake_factory(_FakeSession(scalars=[existing]))):
+                    dup = await memory_service._find_duplicate("同义新措辞", "42")
+            assert dup is not None  # 0.88 > 0.85 → 命中重复
+        asyncio.run(run())
+
+    def test_distinct_fact_cosine_080_no_dedup(self):
+        existing = mock.MagicMock(id=7, parent_id=5, embedding=[0.80, 0.0, 0.0])
+
+        async def run():
+            with mock.patch("rag.memory.embedding_service") as emb:
+                emb.embed_text = mock.AsyncMock(return_value=[1.0, 0.0, 0.0])
+                with mock.patch("rag.memory.async_session_factory",
+                                _fake_factory(_FakeSession(scalars=[existing]))):
+                    dup = await memory_service._find_duplicate("不同事实", "42")
+            assert dup is None  # 0.80 ≤ 0.85 → 不同事实，正常新增
+        asyncio.run(run())
+
+
+class TestConfig035:
+    """module-035：分数口径配置默认值"""
+
+    def test_dedup_threshold_and_min_score_defaults(self):
+        assert settings.memory_dedup_threshold == 0.85   # 0.95 → 0.85（真实同义改写可触发）
+        assert settings.memory_recall_min_score == 0.4   # 低分过滤阈值（绝对余弦口径）
+        assert settings.memory_recall_high_threshold == 0.85  # 动态 K 档位阈值不变
+        assert settings.memory_recall_mid_threshold == 0.75

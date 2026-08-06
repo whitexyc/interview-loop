@@ -261,7 +261,7 @@ class TestFindDuplicate:
                                 _fake_factory(_FakeSession(scalars=[existing]))):
                     dup = await memory_service._find_duplicate("用户偏好", "42")
             assert dup is not None
-            assert dup.id == 7  # 0.99 > 0.95 → 命中重复
+            assert dup.id == 7  # 0.99 > 0.85 → 命中重复
         asyncio.run(run())
 
     def test_low_cosine_returns_none(self):
@@ -273,7 +273,7 @@ class TestFindDuplicate:
                 with mock.patch("rag.memory.async_session_factory",
                                 _fake_factory(_FakeSession(scalars=[existing]))):
                     dup = await memory_service._find_duplicate("另一个偏好", "42")
-            assert dup is None  # 0.4 ≤ 0.95 → 不同事实
+            assert dup is None  # 0.4 ≤ 0.85 → 不同事实
         asyncio.run(run())
 
     def test_embedding_failure_returns_none(self):
@@ -367,36 +367,42 @@ class TestSaveDedup:
 
 
 class TestRecallDynamicK:
-    """recall 动态 K：按候选平均相似度调整召回条数（宁缺毋滥）"""
+    """recall 动态 K：按候选平均绝对余弦调整召回条数（module-035 口径，宁缺毋滥）"""
 
     @staticmethod
-    def _retrieve_docs(scores):
-        return [{"id": i, "parent_id": i, "hybrid_score": s}
-                for i, s in enumerate(scores)]
+    def _retrieve_docs(cosines):
+        # module-035：候选 embedding 由 mock 提供 → 绝对余弦（id/parent_id 一一对应）
+        return [{"id": i, "parent_id": i, "hybrid_score": 0.5}
+                for i in range(len(cosines))]
 
-    def _recall(self, scores, expanded):
+    def _recall(self, cosines, expanded):
         async def run():
             with mock.patch("rag.memory.hybrid_retriever") as ret:
-                ret.retrieve = mock.AsyncMock(return_value=self._retrieve_docs(scores))
-                with mock.patch.object(memory_service, "_expand_to_parents",
-                                       new=mock.AsyncMock(return_value=expanded)):
-                    return await memory_service.recall("q", "42")
+                ret.retrieve = mock.AsyncMock(return_value=self._retrieve_docs(cosines))
+                with mock.patch("rag.memory.embedding_service") as emb:
+                    emb.embed_text = mock.AsyncMock(return_value=[1.0, 0.0])
+                    with mock.patch.object(memory_service, "_child_embeddings",
+                                           new=mock.AsyncMock(return_value={
+                                               i: [c, 0.0] for i, c in enumerate(cosines)})):
+                        with mock.patch.object(memory_service, "_expand_to_parents",
+                                               new=mock.AsyncMock(return_value=expanded)):
+                            return await memory_service.recall("q", "42")
         return asyncio.run(run())
 
     def test_high_quality_recalls_five(self):
         expanded = [{"content": f"c{i}", "score": 0.9, "title": "t"} for i in range(5)]
         memories = self._recall([0.9] * 5, expanded)
-        assert len(memories) == 5  # 均值 0.9 > 0.85 → K=5
+        assert len(memories) == 5  # 绝对余弦均值 0.9 > 0.85 → K=5
 
     def test_mid_quality_recalls_three(self):
         expanded = [{"content": f"c{i}", "score": 0.8, "title": "t"} for i in range(5)]
         memories = self._recall([0.8] * 5, expanded)
-        assert len(memories) == 3  # 均值 0.8 ∈ [0.75,0.85] → K=3
+        assert len(memories) == 3  # 绝对余弦均值 0.8 ∈ [0.75,0.85] → K=3
 
     def test_low_quality_recalls_one(self):
         expanded = [{"content": f"c{i}", "score": 0.7, "title": "t"} for i in range(5)]
         memories = self._recall([0.7] * 5, expanded)
-        assert len(memories) == 1  # 均值 0.7 < 0.75 → K=1（宁缺毋滥）
+        assert len(memories) == 1  # 绝对余弦均值 0.7 < 0.75 → K=1（宁缺毋滥）
 
     def test_empty_candidates_returns_empty(self):
         async def run():
