@@ -59,7 +59,7 @@
 
 ## 5. 当前迭代状态
 - 当前迭代版本: v0.35.0
-- 正在进行的模块: **module-035 记忆/检索分数口径校准**（✅ 已由 Tester 验收通过，2026-08-06）
+- 正在进行的模块: module-035 已完成；**golden_retrieval 评估脚本修复（标题层级前缀匹配）**
 - 下一个待开发模块: 待定
 
 ## 7. 关键技术决策记录
@@ -75,6 +75,7 @@
 - ~~Qwen3-Reranker 调用约束~~（module-018 历史记录，module-030 已移除 chat message + `add_generation_prompt=True` 适配；Qwen3 为生成式重排模型需传 user 角色 chat 消息，不可传裸 pair）
 - 技术债务（module-018 验收记录）：① 测试环境缺 `pytest-asyncio`，`tests/test_engine.py` 2 个 async 用例无法在 pytest 下收集运行（既有问题，非 module-018 回归）；② 外部 embedding API（ModelScope）当前返回 502，端到端检索联调受阻（既有问题，含容错降级）
 - 检索基线（module-019 首次评估，2026-08-01）：FTS 通道中文查询 Hit@5=0（PG 'simple' 分词限制，既有问题，module-020 中文FTS修复的量化基线）；graph_only 通道 Hit@5=0.50 / Recall@5=0.4375 / MRR=0.2361；vector_only 因 embedding 502 无法评估；golden 集 30 题中 23 题有 gold 标注，7 题（简历类 5 + HTTP/2 + Docker）知识库无覆盖标注为空并跳过
+- **检索质量最新评估（2026-08-07，分块重建 + 分数校准后）**：hybrid Hit@5=**0.9565** / Recall@5=0.9130 / MRR=0.9130（23 题评估，7 题无 gold 跳过）——**优于 module-024 的 0.9130 基线**，分块重建（module-031）+ 分数校准（module-035）有效。分类：java_gc 1.0 / java_concurrency 1.0 / kafka 1.0 / comprehensive 1.0 / ai_llm 0.8（KV Cache/RAG 有 1 题未进 top5）。**⚠️ 评估脚本修复**：golden_retrieval.py `compute_metrics` 标题匹配由精确等值改为**容忍层级前缀**（golden 文档名 `X` 匹配检索标题 `X > 小节`，split 取最左段）——module-031 分块重建后检索返回父块层级标题，旧精确匹配致 Hit@5 误报 0.13；修复后真实 0.9565
 - 中文 FTS 方案（module-020，2026-08-01）：jieba 预分词 → documents.search_tokens 列（TEXT，空格连接）→ `to_tsvector('simple', search_tokens)`；查询侧同用 jieba（plainto_tsquery）；只对子块分词（检索只查子块，父块不写）；GIN 索引 `idx_documents_search_tokens`；旧文档用 `backfill_search_tokens.py` 回填（幂等，可重跑）。实施后 fts_only Hit@5 从 0.0 → 0.4348
 - 环境注意（module-020）：本机 pip 装 sdist 会因 uv 管理 Python 的 setuptools/_distutils_hack 兼容 bug 失败，需 `cmd /c "set SETUPTOOLS_USE_DISTUTILS=stdlib&& pip install <pkg>"`；Windows ProactorEventLoop 下同一 asyncpg 连接池不可跨 `asyncio.run()` 复用（脚本需单 loop 内完成迁移+回填）
 - 图检索真实分数方案（module-021，2026-08-01）：`graph_store.search_related` 的 `hybrid_score` 由硬编码 0.6 改为「命中实体数」驱动。每篇 doc 的相关度 = 被「查询实体 e ∪ 一跳邻居 related」多少个实体引用（Cypher UNWIND + `count(DISTINCT ename)`），Python 层 min-max 归一化到 [0,1]，全同分/单结果保底 0.6（复用 `retriever._normalize` 范式但保底值不同，故独立实现 `_normalize_graph_scores`）；排序用真实命中数降序取 top_k，Cypher `LIMIT top_k*2`。接口 `search_related(entities, top_k=10)` 不变。候选池由旧 COALESCE（仅 e 无关系时含 e.doc_ids）扩大为同时含 e 与 related 的 doc_ids，召回不降

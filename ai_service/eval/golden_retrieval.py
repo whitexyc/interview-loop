@@ -127,6 +127,11 @@ def compute_metrics(retrieved_titles: list[str], golden_titles: list[str], k: in
         recall_at_k : 命中的 golden doc 数 / golden doc 总数（golden 为空时为 0.0）
         mrr         : 第一个命中 golden doc 的排位倒数（1-based），未命中为 0.0
 
+    标题匹配（module-031 分块重建后）:
+        golden_titles 是文档名（如 "1-G1垃圾收集器..."），而检索返回的是父块
+        层级标题（如 "1-G1垃圾收集器... > 板块3 > 第一步"）。匹配需容忍层级前缀：
+        golden "X" 匹配检索标题 "X" 或 "X > ..."（split 取最左段）。
+
     Args:
         retrieved_titles: 检索返回的文档标题列表（长度 ≤ top_k）
         golden_titles: 该题的 golden doc 标题列表
@@ -136,13 +141,25 @@ def compute_metrics(retrieved_titles: list[str], golden_titles: list[str], k: in
         {"hit_at_k": float, "recall_at_k": float, "mrr": float, "first_hit_rank": int}
         first_hit_rank 为 0 表示未命中。
     """
+
+    def _golden_matches(golden: str, retrieved: str) -> bool:
+        """golden 文档名是否匹配检索标题（容忍 'X > 小节' 层级前缀）"""
+        if retrieved == golden:
+            return True
+        # 检索标题是层级路径时，取最左段（顶层文档名）比对
+        root = retrieved.split(" > ", 1)[0]
+        return root == golden
+
     golden_set = set(golden_titles)
     hits = [
         i for i, title in enumerate(retrieved_titles[:k])
-        if title in golden_set
+        if any(_golden_matches(g, title) for g in golden_set)
     ]
     hit_at_k = 1.0 if hits else 0.0
-    recalled = sum(1 for title in golden_set if title in retrieved_titles[:k])
+    recalled = sum(
+        1 for g in golden_set
+        if any(_golden_matches(g, title) for title in retrieved_titles[:k])
+    )
     recall_at_k = recalled / len(golden_set) if golden_set else 0.0
     mrr = 1.0 / (hits[0] + 1) if hits else 0.0
     return {
