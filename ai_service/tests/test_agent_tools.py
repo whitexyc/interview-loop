@@ -21,7 +21,7 @@ import httpx
 import main
 from llm.client import LLMClient
 from agent.tool_registry import registry, ToolRegistry, register_builtin_tools, _format_docs
-from agent.react import react_agent
+from agent.react import ReactContext, react_agent
 
 
 def _doc(doc_id: int = 1) -> dict:
@@ -460,3 +460,131 @@ class TestAgentEndpoint:
         done = json.loads(events[-1]["data"])
         assert done["tool_count"] == 0
         assert done["budget"] == 4
+
+
+class TestAgentSessionMemory:
+    """module-036: agent/agent-lg 端点会话恢复 + 保存
+
+    覆盖（验收 §1.1/§1.2/§4.1）：
+    - 有持久化会话 → _resolve_session_history 的 history 进入 ctx（SSE 消息历史）
+    - 无持久化会话 → 回退当前请求 history（零回归）
+    - 循环结束后触发 _schedule_session_persist(identity, query, answer)
+    """
+
+    def _post(self, path, llm_path, fake, resolve_history,
+              xff="10.0.0.8", query="线程池", history=None):
+        """POST agent/agent-lg 端点（mock 全链路），返回 (sse_events, status, persist_mock)"""
+        events = []
+        status = 0
+        persist = mock.MagicMock()
+
+        async def run():
+            nonlocal status
+            with mock.patch(llm_path, return_value=fake):
+                with mock.patch("rag.engine.rag_engine._resolve_session_history",
+                                new=resolve_history):
+                    with mock.patch("rag.engine.rag_engine._schedule_session_persist",
+                                    new=persist):
+                        transport = httpx.ASGITransport(
+                            app=main.app, raise_app_exceptions=True)
+                        async with httpx.AsyncClient(
+                                transport=transport, base_url="http://test") as client:
+                            resp = await client.post(
+                                path,
+                                headers={"X-Forwarded-For": xff},
+                                json={"query": query, "history": history or []},
+                            )
+                        status = resp.status_code
+                        events.extend(_parse_sse(resp.content))
+
+        asyncio.run(run())
+        return events, status, persist
+
+    def test_agent_restores_persisted_session(self):
+        """有持久化会话：恢复的 history 进入 ctx（LLM 消息历史含持久化条目）"""
+        persisted = [
+            {"role": "user", "content": "上轮问题"},
+            {"role": "assistant", "content": "上轮回答"},
+        ]
+        fake = _FakeLLM([_answer("直接回答")])
+        events, status, _ = self._post(
+            "/ai/rag/chat/agent", "agent.react.LLMFactory.get_client", fake,
+            resolve_history=mock.AsyncMock(return_value=persisted),
+        )
+        assert status == 200
+        assert events[-1]["event"] == "done"
+        msgs = fake.chat_with_tools_calls[0]["messages"]
+        roles = [(m["role"], m.get("content")) for m in msgs]
+        assert ("user", "上轮问题") in roles
+        assert ("assistant", "上轮回答") in roles
+        assert msgs[-1] == {"role": "user", "content": "线程池"}  # 当前问题最后
+
+    def test_agent_uses_request_history_when_no_persisted(self):
+        """无持久化会话：回退当前请求 history（零回归）"""
+        request_history = [
+            {"role": "user", "content": "请求内历史"},
+            {"role": "assistant", "content": "请求内回答"},
+        ]
+        fake = _FakeLLM([_answer("直接回答")])
+        events, status, _ = self._post(
+            "/ai/rag/chat/agent", "agent.react.LLMFactory.get_client", fake,
+            resolve_history=mock.AsyncMock(side_effect=lambda identity, h: h),
+            history=request_history,
+        )
+        assert status == 200
+        msgs = fake.chat_with_tools_calls[0]["messages"]
+        roles = [(m["role"], m.get("content")) for m in msgs]
+        assert ("user", "请求内历史") in roles
+        assert ("assistant", "请求内回答") in roles
+
+    def test_agent_persists_session_after_loop(self):
+        """Agent 循环结束后触发 _schedule_session_persist(identity, query, answer)"""
+        fake = _FakeLLM([_answer("最终答案")])
+        events, status, persist = self._post(
+            "/ai/rag/chat/agent", "agent.react.LLMFactory.get_client", fake,
+            resolve_history=mock.AsyncMock(side_effect=lambda identity, h: h),
+        )
+        assert status == 200
+        assert json.loads(events[-1]["data"])["answer"] == "最终答案"
+        persist.assert_called_once()
+        args = persist.call_args[0]
+        assert args[0] == "10.0.0.8"   # identity = client_ip（无 JWT 时）
+        assert args[1] == "线程池"      # query
+        assert args[2] == "最终答案"    # answer
+
+    def test_agent_lg_restores_and_persists_session(self):
+        """agent-lg：会话恢复 + 完成后保存（与 agent 一致）"""
+        persisted = [{"role": "user", "content": "上轮问题"}]
+        fake = _FakeLLM([_answer("LG答案")])
+        events, status, persist = self._post(
+            "/ai/rag/chat/agent-lg", "agent.langgraph_react.LLMFactory.get_client", fake,
+            resolve_history=mock.AsyncMock(return_value=persisted),
+        )
+        assert status == 200
+        msgs = fake.chat_with_tools_calls[0]["messages"]
+        assert ("user", "上轮问题") in [(m["role"], m.get("content")) for m in msgs]
+        persist.assert_called_once()
+        args = persist.call_args[0]
+        assert args[0] == "10.0.0.8"
+        assert args[1] == "线程池"
+        assert args[2] == "LG答案"
+
+
+class TestReactContextIdentity:
+    """module-036: ReactContext.client_ip → identity 命名修正（引用一致性）"""
+
+    def test_context_uses_identity_field(self):
+        ctx = ReactContext("q", "user-42", [{"role": "user", "content": "hi"}])
+        assert ctx.identity == "user-42"
+        assert not hasattr(ctx, "client_ip")  # 无遗留 client_ip 记忆用途
+
+    def test_recall_memory_uses_ctx_identity(self):
+        """_recall_memory 工具按 ctx.identity 召回（行为不变，仅命名）"""
+        from agent.tool_registry import _recall_memory
+        ctx = ReactContext("q", "user-42", [])
+        with mock.patch("rag.engine.rag_engine._recall_memory",
+                        new=mock.AsyncMock(return_value="记忆")) as recall:
+            text = asyncio.run(_recall_memory(ctx, {"query": "q"}))
+        assert text == "记忆"
+        args = recall.call_args[0]
+        assert args[1] == "user-42"  # (query, identity)

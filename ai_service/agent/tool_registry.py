@@ -8,7 +8,7 @@ Agent 工具注册表 — ToolRegistry（module-028）
 
 设计要点：
   1. 注册表无状态（只存工具定义），执行时通过 AgentTool.run(args, ctx)
-     注入会话上下文 ctx（query/client_ip/history/累积 docs/记忆），
+     注入会话上下文 ctx（query/identity/history/累积 docs/记忆），
      故全局单例 registry 可被多会话并发复用，无共享可变状态。
   2. 工具失败由 AgentTool.run 统一捕获返回空串（降级哲学），
      LLM 自行判断是继续检索还是如实告知用户。
@@ -183,10 +183,10 @@ async def _extract_entities(ctx, args: dict) -> str:
 
 
 async def _recall_memory(ctx, args: dict) -> str:
-    """召回该用户的跨会话长期记忆（按 IP 隔离；无记忆返回提示）"""
+    """召回该用户的跨会话长期记忆（按身份隔离；无记忆返回提示）"""
     query = args.get("query") or ctx.query
     top_k = int(args.get("top_k", 3))
-    text = await rag_engine._recall_memory(query, ctx.client_ip, top_k=top_k)
+    text = await rag_engine._recall_memory(query, ctx.identity, top_k=top_k)
     if text:
         ctx.memory = text  # 供 generate_answer 工具拼入生成 prompt
     return text or "（无相关历史记忆）"

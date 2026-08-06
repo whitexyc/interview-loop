@@ -312,7 +312,7 @@ async def langgraph_react_loop(
 async def langgraph_react_agent(
     query: str,
     history: Optional[list[dict]] = None,
-    client_ip: str = "unknown",
+    identity: str = "unknown",
     budget: Optional[int] = None,
     tools: Optional[ToolRegistry] = None,
 ) -> dict:
@@ -321,7 +321,7 @@ async def langgraph_react_agent(
     Args:
         query: 用户问题
         history: 历史对话列表
-        client_ip: 用户 IP 标识（记忆隔离）
+        identity: 请求身份标识（user_id 优先，否则 client_ip；记忆按身份隔离）
         budget: 工具总调用次数上限，None 用 settings.max_agent_tools
         tools: 工具注册表，默认全局 registry
 
@@ -329,7 +329,7 @@ async def langgraph_react_agent(
         {"answer": str, "tool_count": int,
          "tool_trace": [{"name", "args", "result"}, ...]}
     """
-    ctx = ReactContext(query, client_ip, history)
+    ctx = ReactContext(query, identity, history)
     budget = int(budget) if budget is not None else settings.max_agent_tools
     answer = ""
     tool_count = 0
