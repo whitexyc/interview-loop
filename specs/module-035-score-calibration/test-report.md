@@ -25,12 +25,12 @@
 | 字段 | 内容 |
 |------|------|
 | 后端框架 | Python FastAPI（ai_service） |
-| 数据库 | PostgreSQL 15+（docker my_postgres:5432，真实库 personal_website，7528 行） |
-| 缓存 | Redis（docker my_redis:6379） |
+| 数据库 | PostgreSQL 15+（真实库 personal_website，5432） |
+| 缓存 | Redis（6379） |
 | 测试框架 | pytest 9.1.1 / Python 3.11.15 |
 | 平台 / OS | Windows 11 |
-| 已知环境坑 | 无新增；3 个既有 Redis `setex` DeprecationWarning 与模块无关 |
-| 依赖前置 | 本地 bge-m3 GGUF（models/bge-m3-gguf/bge-m3-q8_0.gguf，605.2MB） |
+| 已知环境坑 | ① 缺 pytest-asyncio（既有技术债务，module-018 起备案，本模块用例用 asyncio.run 规避）；② Windows ProactorEventLoop 下 asyncpg 连接池不可跨 `asyncio.run()` 复用（E2E 脚本需单 loop）；③ 3 个既有 Redis `setex` DeprecationWarning 与模块无关 |
+| 依赖前置 | 本地 bge-m3 GGUF（models/bge-m3-gguf/bge-m3-q8_0.gguf） |
 | 运行环境 | 本地开发环境（worktree-m8-knowledge-panel） |
 | 测试命令 | `cd ai_service && python -m pytest tests/ -q` |
 | 变更文件 | `rag/memory.py` / `src/config.py` / `main.py` / `tests/test_memory.py` / `tests/test_memory_extractor.py` |
@@ -55,9 +55,9 @@
 
 | 测试类 | 测试方法 | 场景描述 | 结果 |
 |--------|----------|----------|------|
-| `TestRecallDynamicKAbsCosine` | `test_high_quality_recalls_five` | 绝对余弦均值 >0.85 → K=5 真实可达（不再恒 1） | ✅ |
+| `TestRecallDynamicKAbsCosine` | `test_high_quality_recalls_five` | 绝对余弦均值 0.9 > 0.85 → K=5 真实可达（不再恒 1） | ✅ |
 | `TestRecallDynamicKAbsCosine` | `test_mid_quality_recalls_three` | 绝对余弦均值 0.78 ∈ [0.75,0.85) → K=3 | ✅ |
-| `TestRecallDynamicKAbsCosine` | `test_low_quality_recalls_one` | 绝对余弦均值 0.5 <0.75 → K=1（宁缺毋滥） | ✅ |
+| `TestRecallDynamicKAbsCosine` | `test_low_quality_recalls_one` | 绝对余弦均值 0.5 < 0.75 → K=1（宁缺毋滥） | ✅ |
 | `TestRecallDynamicKAbsCosine` | `test_low_score_candidates_filtered_out` | 候选 abs_cosine=0.3 < min_score(0.4) → 丢弃不注入 | ✅ |
 | `TestRecallDynamicKAbsCosine` | `test_all_candidates_low_score_returns_empty` | 全部候选低分 → 返回空（不崩） | ✅ |
 | `TestRecallDynamicKAbsCosine` | `test_empty_candidates_returns_empty` | 无候选 → 返回空，_expand_to_parents 不被调用 | ✅ |
@@ -91,20 +91,27 @@
 
 | 统计项 | 值 |
 |--------|-----|
-| 测试场景数 | 6 |
-| 通过 | 6 |
+| 测试场景数 | 9 |
+| 通过 | 9 |
 | 失败 | 0 |
 
-### 3.2 测试场景明细（下游消费者零回归核对）
+### 3.2 测试场景明细（真实 E2E：真实 HTTP 服务 + 真实 PG + 真实 bge-m3 + JWT）
 
 | 场景 | 描述 | 前置条件 | 预期结果 | 实际结果 | 状态 |
 |------|------|----------|----------|----------|------|
-| 下游引擎 | tests/test_engine.py（chat/_recall_memory 消费） | 真实 DB/Redis | 无回归 | 通过 | ✅ |
-| 流式记忆 | tests/test_stream_memory.py | mock 全链路 | 无回归 | 通过 | ✅ |
-| 会话记忆 | tests/test_session_memory.py | 真实 DB | 无回归 | 通过 | ✅ |
-| 身份隔离 | tests/test_identity.py | 真实 DB | 20/20 无回归 | 20 passed | ✅ |
-| 编译检查 | `python -m py_compile rag/memory.py src/config.py main.py tests/test_memory.py tests/test_memory_extractor.py` | — | OK | OK | ✅ |
-| 无未使用 import | git diff 核对（未新增 import，既有均使用） | — | 通过 | 通过 | ✅ |
+| K=5 多档可达 | 5 条近义候选（dedup=False 构造，绝对余弦均值 0.868 > 0.85） | AI 服务 8001 + 真实 PG/bge-m3 | recall 返回 5 条 | 返回 5 条，scores [1.0, 0.903, 0.867, 0.824, 0.748] | ✅ |
+| K=3 多档可达 | 5 条中质候选（均值 0.776 ∈ [0.75,0.85)，自然 dedup=True 保存） | 同上 | recall 返回 3 条 | 返回 3 条，scores [0.796, 0.791, 0.775] | ✅ |
+| K=1 低质 | 5 条混质候选（均值 0.713 < 0.75） | 同上 | recall 返回 1 条 | 返回 1 条（最高 0.9345），宁缺毋滥 | ✅ |
+| 去重 0.85 同义 | 同义改写（真实 cosine≈0.88） | 同上 | status=updated，条数不涨 | updated，parents 1→1 | ✅ |
+| 去重不误杀 | 不同事实（cosine≈0.80） | 同上 | 正常新增 | saved，parents 1→2 | ✅ |
+| 低分不注入 | 追加无关记忆后 recall 主题 query | 同上 | 低分记忆不出现 | 0 条注入 | ✅ |
+| 登录用户多档 | JWT user_id=9001 保存 5 条同义记忆 + recall | AI 服务 + JWT secret | 去重合并 + 多档召回 | 5 次保存去重合并为 3 父块（不膨胀），recall 返回 3 条多档 | ✅ |
+| 用户隔离 | user 9002 recall 同 query | 同上 | 无跨用户泄漏 | 0 条 | ✅ |
+| chat_stream relevant | 真实 SSE 检索 step 事件 | 真实 LLM 链路 | relevant==count | count=2, relevant=2（MIN_SCORE 失真阈值已移除） | ✅ |
+
+> K=3 档确认是**档位判定**（5 候选均值 0.776 落 [0.75,0.85)），而非候选数截断。
+> 登录用户（dedup=True）下 5 条近义记忆被 0.85 去重合并为 3 父块——这正说明去重生效
+> 防膨胀；幸存的不同事实父块仍触发多档召回（K=3）。
 
 ---
 
@@ -136,47 +143,42 @@
 
 ## 5. 环境性失败归因
 
-> 本模块无失败用例，无需归因。下表为预置矩阵确认状态（供后续模块参考）。
+> 本模块测试过程中无**用例失败**，无环境性失败需要归因。记录以下环境观察（均不阻塞）：
 
-| 现象 | 判断标准 | 归类 | 处理方式 | 本模块状态 |
-|------|----------|------|----------|-----------|
-| 依赖包缺失 | 补依赖后重跑即通过 | 环境性失败 | 修复基建 | 未发生 |
-| mock 缺失 / 依赖服务未启动 | 单独跑该用例失败，基线同模块通过 | 环境性失败 | 补齐后重跑 | 未发生 |
-| 平台差异 | 其他平台通过本平台失败 | 环境性失败 | 记录差异 | 未发生 |
-| 代码行为不符预期 | 环境正常输出不符 | 真实回归 | 反馈 Developer | 未发生 |
-| 无法确定 | 环境与代码均无线索 | 待排查 | 记录现场 | 未发生 |
-
-**E2E 说明**：全栈 HTTP 服务（Java 8081 + AI 8001 uvicorn）未启动，采用**半真实 E2E**
-（真实 PG + 真实本地 bge-m3 + MemoryService 直连，绕过 HTTP 栈），与 module-033/034
-Tester 半真实 E2E 先例一致。chat 路径 `_recall_memory` 仍 `top_k=3`（既有，见 §9 建议），
-故 K=5 档按任务指引直接调 `memory_service.recall(query, identity, top_k=5)` 验证。
+| 现象 | 判断标准 | 归类 | 处理方式 |
+|------|----------|------|----------|
+| E2E 脚本二次 `asyncio.run()` 复用 asyncpg 连接池崩溃（`'NoneType' object has no attribute 'send'`） | Windows ProactorEventLoop 已知问题，module-020 备案 | 环境性（脚本问题） | 改为单 asyncio.run 内完成所有 DB 操作后通过；不影响测试结论 |
+| PowerShell 5.1 将 python stderr（jieba 加载日志）包装为 NativeCommandError | 原生 stderr 重定向已知行为 | 环境性（输出捕获） | 脚本实际正常；用 Select-Object 观察结果 |
 
 ---
 
-## 6. 真实环境冒烟（半真实 E2E）
+## 6. 真实环境冒烟
 
-> 单元 / 回归 / 下游测试全部通过后，使用真实 PG + 真实本地 bge-m3 沿 acceptance 4.3
-> 三条核心路径执行半真实 E2E（服务层直连，真实模型推理）。
+> 单元 / 回归全部通过后，启动真实 AI 服务（uvicorn 8001，真实 PG/Redis/bge-m3/DeepSeek，
+> JWT secret 注入），沿验收核心路径端到端执行。
 
 ### 冒烟环境
 
-- 真实 PG（docker my_postgres，personal_website，7528 行）
-- 真实本地 bge-m3 GGUF（605.2MB）
-- 测试身份使用时间戳唯一标识，结束后全部清理（残留校验 0）
+- 真实 PG + 真实 Redis + 真实本地 bge-m3 GGUF + 真实 DeepSeek（fallback 链）
+- JWT：用与 Java `application.yml` 相同的开发占位 secret 直接签发 HS256 token（AI 侧
+  `parse_jwt` 对称校验，等价于 Java 登录下发），模拟登录用户
+- 测试身份全部结束后清理（`memory:%` 全库残留 0 行）
 
 ### 冒烟结果
 
 | 冒烟项 | 命令/方式 | 结果 | 是否通过 |
 |--------|-----------|------|----------|
-| 4.3-1 高质量记忆多档召回 | save 5 条高相似记忆（dedup=False）→ `memory_service.recall(query, ident, top_k=5)` | **K=5 真实可达**：5 候选 abs_cosine [1.0, 0.9987, 0.9972, 0.9935, 0.9474]，均值 0.987 > 0.85 → K=5 | ✅ |
-| 4.3-1 中质量召回 3 条 | save 5 条中相似记忆 → recall | **K=3 真实可达**：5 候选 abs_cosine [1.0, 0.803, 0.796, 0.735, 0.632]，均值 0.793 ∈ [0.75,0.85) → K=3 | ✅ |
-| 4.3-2 二次同义对话去重不膨胀 | save 首次 → save 同义改写（dedup=True） | 首次 status=saved → 同义 status=**updated**（id 不变），parents 1→1 条数不涨 | ✅ |
-| 4.3-3 低分记忆不注入 | 仅存 1 条无关记忆 → recall 无关 query | **K=0**：实测 abs_cosine=0.3104 < 0.4 → 候选被过滤返回空（旧相对分口径下 min-max 会给该单候选高分而注入） | ✅ |
-| 数据真实落库验证 | 清理前查询父块数 | 高质批 parents=5 / 中质批 parents=5 / 去重批 1→1 / 低分批 parents=1，均与预期一致 | ✅ |
-| AI 真实调用 | bge-m3 真实模型嵌入（非桩数据） | 全部 abs_cosine 为真实推理值（如 0.9474/0.8030/0.3104） | ✅ |
-
-> 注：K=3 档已通过调试输出确认是**档位判定**（5 候选均值 0.793 落 [0.75,0.85)），
-> 而非候选数截断（旧实现恒 K=1 的语义偏差已消除）。
+| 服务健康 | GET /ai/health | status=ok | ✅ |
+| K=5 真实可达 | save 5 条近义记忆（dedup=False）→ recall | 5 候选绝对余弦 [1.0, 0.903, 0.867, 0.824, 0.748] 均值 0.868 > 0.85 → **返回 5 条** | ✅ |
+| K=3 真实可达 | save 5 条中质记忆（dedup=True）→ recall | 5 候选 [0.796, 0.791, 0.775, 0.763, 0.755] 均值 0.776 ∈ [0.75,0.85) → **返回 3 条** | ✅ |
+| K=1 宁缺毋滥 | 5 条混质候选 → recall | 均值 0.713 < 0.75 → 仅返回最高 1 条（0.9345） | ✅ |
+| 去重 0.85 触发 | 原句 save → 同义改写 save | saved → **updated**（id 不变），parents 1→1 不涨 | ✅ |
+| 去重不误杀 | 不同事实 save | **saved**，parents 1→2 正常新增 | ✅ |
+| 低分不注入 | 追加无关记忆（猫咪/爬山）→ recall 主题 query | 0 条低分注入（abs_cosine < 0.4 被过滤） | ✅ |
+| 登录用户多档 | JWT Bearer（user_id=9001）save 5 条同义 → recall | 5 次保存去重合并为 3 父块（不膨胀），recall 返回 3 条多档（不再恒 K=1） | ✅ |
+| 用户隔离 | user 9002 同 query recall | 0 条（无跨用户泄漏） | ✅ |
+| chat_stream 真实链路 | POST /ai/rag/chat/stream（真实检索+真实 LLM） | HTTP 200，事件 step×4/token×N/done；检索 step count=2 relevant=2（相关字段语义正确） | ✅ |
+| 数据真实落库 + 清理 | 清理前查父块数 / 清理后查残留 | 与预期一致；`memory:%` 全库 **0 行** | ✅ |
 
 ---
 
@@ -204,17 +206,17 @@ Tester 半真实 E2E 先例一致。chat 路径 `_recall_memory` 仍 `top_k=3`�
 
 | 验收项 | 测试用例 | 结果 |
 |--------|----------|------|
-| 1.1-1 高质量候选召回多档 | `test_high_quality_recalls_five` + 半真实 E2E K=5 | ✅ |
-| 1.1-2 中质量召回 3 条 | `test_mid_quality_recalls_three` + 半真实 E2E K=3 | ✅ |
-| 1.1-3 低质量召回 1 条 | `test_low_quality_recalls_one` | ✅ |
-| 1.1-4 低分过滤 | `test_low_score_candidates_filtered_out` + E2E（0.31 过滤） | ✅ |
+| 1.1-1 高质量候选召回多档 | `test_high_quality_recalls_five` + 真实 E2E K=5（均值 0.868→5 条） | ✅ |
+| 1.1-2 中质量召回 3 条 | `test_mid_quality_recalls_three` + 真实 E2E K=3（均值 0.776→3 条） | ✅ |
+| 1.1-3 低质量召回 1 条 | `test_low_quality_recalls_one` + 真实 E2E（均值 0.713→1 条） | ✅ |
+| 1.1-4 低分过滤 | `test_low_score_candidates_filtered_out` + `test_all_candidates_low_score_returns_empty` | ✅ |
 | 1.1-5 空候选不崩 | `test_empty_candidates_returns_empty` | ✅ |
-| 1.2-1 同义改写触发去重 | `test_synonym_paraphrase_cosine_088_triggers_dedup` + E2E（updated） | ✅ |
-| 1.2-2 不同事实正常新增 | `test_distinct_fact_cosine_080_no_dedup` | ✅ |
+| 1.2-1 同义改写触发去重 | `test_synonym_paraphrase_cosine_088_triggers_dedup` + 真实 E2E（updated，条数不涨） | ✅ |
+| 1.2-2 不同事实正常新增 | `test_distinct_fact_cosine_080_no_dedup` + 真实 E2E（saved） | ✅ |
 | 1.2-3 阈值可配置 | `TestConfig035`（0.85 默认）+ config.py | ✅ |
-| 1.3-1 chat_stream MIN_SCORE 语义正确 | main.py diff（移除失真阈值） | ✅ |
-| 1.3-2 relevant_count 统计合理 | main.py（relevant_count = retrieval_count） | ✅ |
-| 1.4-1 RRF 融合实现 | ⚠️ 不适用：P3 评估后不采纳 | ⚠️ |
+| 1.3-1 chat_stream MIN_SCORE 语义正确 | 真实 chat_stream SSE：relevant==count（失真阈值已移除，plan 允许） | ✅ |
+| 1.3-2 relevant_count 统计合理 | 同上（count=2 relevant=2，仅供 UI 展示） | ✅ |
+| 1.4-1 RRF 融合实现 | ⚠️ 不适用：P3 评估后不采纳（分数量纲与 engine._retrieve min_score=0.6 硬阻塞，见 changelog 设计决策 5） | ⚠️ |
 | 1.4-2 golden_retrieval A/B | ⚠️ 不适用：同上 | ⚠️ |
 
 ### 接口验收（5 项）— 全部通过
@@ -223,7 +225,7 @@ Tester 半真实 E2E 先例一致。chat 路径 `_recall_memory` 仍 `top_k=3`�
 |--------|----------|------|
 | 2.1-1 save/recall 签名不变 | git diff 核对 + 全量回归 | ✅ |
 | 2.1-2 recall 返回格式不变 | `_expand_to_parents` 结构不变（content/score/title/created_at） | ✅ |
-| 2.1-3 chat/stream 端点不变 | main.py diff 仅内部统计 | ✅ |
+| 2.1-3 chat/stream 端点不变 | main.py diff 仅内部统计 + 真实 SSE 调用 | ✅ |
 | 2.1-4 三层 source 分层不变 | 精确匹配逻辑未动，记忆单测 95 全过 | ✅ |
 | 2.2-1 配置默认值 | config.py（0.85 / 0.4）+ `TestConfig035` | ✅ |
 
@@ -247,9 +249,9 @@ Tester 半真实 E2E 先例一致。chat 路径 `_recall_memory` 仍 `top_k=3`�
 | 4.1-3 RRF 融合单测 | ⚠️ 不适用：P3 未实施 | ⚠️ |
 | 4.2-1 全量 pytest 0 失败 | **292 passed / 0 failed** | ✅ |
 | 4.2-2 身份回归 | **20 passed** | ✅ |
-| 4.3-1 真实 E2E 多档召回 | 半真实 E2E：K=5（均值 0.987）/ K=3（均值 0.793） | ✅ |
-| 4.3-2 真实 E2E 二次同义去重不膨胀 | 半真实 E2E：updated，parents 1→1 | ✅ |
-| 4.3-3 真实 E2E 低分不注入 | 半真实 E2E：K=0，abs_cosine 0.31 < 0.4 | ✅ |
+| 4.3-1 真实 E2E 多档召回 | 真实 E2E：登录用户 K=3 / 独立构造 K=5（0.868）/ K=3（0.776） | ✅ |
+| 4.3-2 真实 E2E 二次同义去重不膨胀 | 真实 E2E：updated，parents 1→1 | ✅ |
+| 4.3-3 真实 E2E 低分不注入 | 真实 E2E：0 条注入 | ✅ |
 
 ### 文档验收（4 项）— 全部通过
 
@@ -269,15 +271,15 @@ Tester 半真实 E2E 先例一致。chat 路径 `_recall_memory` 仍 `top_k=3`�
 | 统计项 | 值 |
 |--------|-----|
 | 单元测试通过率 | 95/95 (100%) |
-| 下游/集成测试通过率 | 44/44 (100%) |
+| 集成测试（真实 E2E）通过率 | 9/9 (100%) |
 | 回归测试通过率 | 292/292 (100%) |
 | 异常兜底测试通过率 | 8/8 (100%) |
-| 真实环境冒烟通过率（半真实 E2E） | 3/3 (100%) |
+| 真实环境冒烟通过率 | 10/10 (100%) |
 | **总体验收结论** | **✅ 通过** |
 
 ### 验收结论
 
-- [x] ✅ **通过** — 所有测试通过，验收标准全部满足，建议合并
+- [x] ✅ **通过** — 所有测试通过，验收标准全部满足（35 项：32 通过 + 3 不适用 P3 可选未采纳），建议合并
 - [ ] ❌ **不通过** — 存在失败用例，需 Developer 修复后重新测试
 - [ ] ⚠️ **有条件通过** — 核心路径通过，非核心问题可后续修复
 
@@ -302,7 +304,7 @@ Tester 半真实 E2E 先例一致。chat 路径 `_recall_memory` 仍 `top_k=3`�
 |------|------|-----------------|
 | #1 | `docs.sort(key=lambda d: d["abs_cosine"], reverse=True)` 硬键访问；min_score≤0 配置下无 abs_cosine 候选会 KeyError | **默认配置下无影响（确认）**：默认 `memory_recall_min_score=0.4`，无 `abs_cosine` 键的候选 `d.get("abs_cosine", 0.0)`=0.0 < 0.4 会在过滤步骤被移除，不可能到达 sort。仅当 `PW_MEMORY_RECALL_MIN_SCORE` 配置 ≤0 时理论可达，属配置护栏问题，非生产默认路径。建议（低优先级）改为 `d.get("abs_cosine", 0.0)` 或对 min_score 做下限校验 |
 | #2 | 无存储 embedding 的候选被静默丢弃（abs_cosine 缺省 0.0 < 0.4） | **确认语义正确**：绝对质量口径下"无法验证质量→丢弃"合理；建议补 debug 日志（非阻塞） |
-| #3 | chat 路径 `engine._recall_memory` 仍 `top_k=3`（engine.py L290），K=5 档 chat 不可达 | **确认既有行为（非本模块回归）**：`engine.py:290` `top_k: int = 3`，chat/stream 调用未传 top_k 用默认 3 → chat 候选池最多 3 条，K=5 档在 chat 路径不可达。直接调 `memory_service.recall(query, identity, top_k=5)` 已真实可达 K=5（半真实 E2E）。属 module-033 review #3 既有观察，建议后续模块评估 `_recall_memory` 默认 top_k 提至 5 |
+| #3 | chat 路径 `engine._recall_memory` 仍 `top_k=3`（engine.py L290），K=5 档 chat 不可达 | **确认既有行为（非本模块回归）**：`engine.py:290` `top_k: int = 3`，chat/stream 调用未传 top_k 用默认 3 → chat 候选池最多 3 条，K=5 档在 chat 路径不可达。直接调 `memory_service.recall(query, identity, top_k=5)` 已真实可达 K=5。属 module-033 review #3 既有观察，建议后续模块评估 `_recall_memory` 默认 top_k 提至 5 |
 | #4 | acceptance 汇总表 33 vs 实际 35（功能 11 vs 12、代码质量 5 vs 6） | **已修正**：汇总表按实际复选框 35 项修正（功能 12 / 接口 5 / 代码质量 6 / 测试 8 / 文档 4），module-033 先例 |
 
 ---
@@ -314,5 +316,7 @@ Tester 半真实 E2E 先例一致。chat 路径 `_recall_memory` 仍 `top_k=3`�
 | `_absolute_cosine_avg` 排序硬键改 `d.get("abs_cosine", 0.0)`（或对 `memory_recall_min_score` 配置加下限校验），消除 min_score≤0 理论 KeyError（Reviewer #1） | 低 | 后续模块 |
 | 低分过滤丢弃候选时补 debug 日志（含 id 数），便于排查静默丢弃（Reviewer #2） | 低 | 后续模块 |
 | `engine._recall_memory` 默认 `top_k` 3→5，使 chat 路径也能多档注入（Reviewer #3） | 中 | 后续模块（记忆体系收尾） |
+| **实测观察**：自然 dedup=True 流程下 5 条近义记忆会被 0.85 去重合并（正是去重目标），故 K=5 档多发生在"不同但均高质量"的候选集——实际对话路径更常触发 K=3/K=1，属 avg 判定预期语义，建议文档说明 K=5 触发场景 | 低 | 后续模块 |
 | P3 三通道 RRF 引入时须联动校准 `engine._retrieve` 的 `min_score=0.6` 过滤语义（与绝对余弦口径同思路），记录 backlog | 低 | 引入 RRF 时 |
-| 测试数据已全部清理（e2e-m035 残留 0）；临时 E2E 脚本已删除 | — | 已完成 |
+| 建议把本模块真实 E2E 场景沉淀为 `tests/` 下可重复的集成测试（当前为一次性脚本，已删除） | 低 | 后续模块 |
+| 测试数据已全部清理（`memory:%` 全库 0 行）；临时 E2E 脚本已删除 | — | 已完成 |
