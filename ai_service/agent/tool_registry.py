@@ -12,9 +12,10 @@ Agent 工具注册表 — ToolRegistry（module-028）
      故全局单例 registry 可被多会话并发复用，无共享可变状态。
   2. 工具失败由 AgentTool.run 统一捕获返回空串（降级哲学），
      LLM 自行判断是继续检索还是如实告知用户。
-  3. 内置 8 个工具：
+  3. 内置 9 个工具：
      search_knowledge / search_fts / search_vector / search_graph /
-     extract_entities / recall_memory / generate_answer / verify_answer
+     extract_entities / recall_memory / generate_answer / verify_answer /
+     re_search
 """
 import json
 import logging
@@ -223,6 +224,34 @@ async def _verify_answer(ctx, args: dict) -> str:
     return "\n".join(lines)
 
 
+async def _re_search(ctx, args: dict) -> str:
+    """检索不足 → 改写 query 重检 → 新结果累积到 ctx.docs（module-040）
+
+    流程：
+      1. check_sufficiency 判断当前 ctx.docs 是否充分
+      2. 不充分 → 用 rewritten_query 重新混合检索
+      3. 新结果按 id 去重累积到 ctx.docs
+
+    降级：
+      - 无 ctx.docs → 提示先检索
+      - check_sufficiency 返回充分 → 提示无需重检
+      - 改写后仍无结果 → 提示知识库无相关内容
+      - check_sufficiency 自身失败（LLM 异常）→ reflector 内部默认充分
+    """
+    if not ctx.docs:
+        return "（尚未检索到文档，请先调用 search_knowledge 等检索工具）"
+    query = args.get("query") or ctx.query
+    result = await reflector.check_sufficiency(query, ctx.docs)
+    if result.get("sufficient"):
+        return "（当前检索结果已充分，无需重检）"
+    rewritten = result.get("rewritten_query", query)
+    docs = await hybrid_retriever.retrieve(rewritten, top_k=5, mode="hybrid")
+    ctx.add_docs(docs)
+    if not docs:
+        return f"改写查询 '{rewritten}' 后仍无结果，知识库可能无相关内容"
+    return f"改写查询 '{rewritten}' → 检索到 {len(docs)} 篇文档：\n" + _format_docs(docs)
+
+
 # ─── 内置工具注册 ───
 
 _SEARCH_SCHEMA = {
@@ -264,9 +293,16 @@ _VERIFY_SCHEMA = {
     "required": ["answer"],
 }
 
+_RE_SEARCH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "query": {"type": "string", "description": "原始用户问题，缺省用 ctx.query"},
+    },
+}
+
 
 def register_builtin_tools(reg: Optional[ToolRegistry] = None) -> ToolRegistry:
-    """注册 8 个内置工具到注册表（默认全局 registry）
+    """注册 9 个内置工具到注册表（默认全局 registry）
 
     Args:
         reg: 目标注册表（测试可传入独立实例），None 用全局 registry
@@ -314,6 +350,11 @@ def register_builtin_tools(reg: Optional[ToolRegistry] = None) -> ToolRegistry:
         "verify_answer",
         "逐句验证已生成的答案是否被检索文档支持，标注每句的可信度（supported/inferred/unsupported），返回置信度。",
         _VERIFY_SCHEMA, _verify_answer,
+    )
+    reg.register(
+        "re_search",
+        "检索不足时自动改写查询重检：检查已有文档是否充分，不充分则用改写后的查询重新混合检索，新结果累积到已有文档。",
+        _RE_SEARCH_SCHEMA, _re_search,
     )
     return reg
 

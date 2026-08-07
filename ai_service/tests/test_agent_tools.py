@@ -1,7 +1,7 @@
 """Module-028 Agent 工具化单元测试
 
 覆盖（验收 §4）：
-- ToolRegistry：7 个内置工具注册 / to_llm_schemas 格式 / 未知工具返回 None / 工具失败返回空
+- ToolRegistry：9 个内置工具注册 / to_llm_schemas 格式 / 未知工具返回 None / 工具失败返回空
 - LLMClient.chat_with_tools：bind_tools 调用 + 返回 {content, tool_calls}（mock _llm）
 - ReAct 循环（react_agent）：工具调用→直接回答 / 预算耗尽兜底 / 预算=0 直接生成 /
   工具失败返回空继续 / 工具调用数 ≤ budget
@@ -86,11 +86,12 @@ class TestToolRegistry:
         assert names == [
             "search_knowledge", "search_fts", "search_vector", "search_graph",
             "extract_entities", "recall_memory", "generate_answer", "verify_answer",
+            "re_search",
         ]
 
     def test_to_llm_schemas_format(self):
         schemas = registry.to_llm_schemas()
-        assert len(schemas) == 8
+        assert len(schemas) == 9
         for s in schemas:
             assert s["type"] == "function"
             fn = s["function"]
@@ -118,7 +119,7 @@ class TestToolRegistry:
     def test_register_builtin_tools_into_custom_registry(self):
         reg = ToolRegistry()
         register_builtin_tools(reg)
-        assert len(reg.list_tools()) == 8
+        assert len(reg.list_tools()) == 9
 
     def test_verify_answer_tool_registered(self):
         """verify_answer 已注册为第 8 个 Agent 工具"""
@@ -190,11 +191,159 @@ class TestToolRegistry:
         result = asyncio.run(run())
         assert "无法验证" in result
 
+    def test_re_search_tool_registered(self):
+        """re_search 已注册为第 9 个 Agent 工具，schema 含 query 属性"""
+        tool = registry.get("re_search")
+        assert tool is not None
+        assert tool.name == "re_search"
+        assert "改写查询重检" in tool.description
+        assert "retrieve" in tool.description or "检索" in tool.description
+        # schema: 无 required 字段（query 可选，缺省用 ctx.query）
+        props = tool.args_schema.get("properties", {})
+        assert "query" in props
+        assert props["query"]["type"] == "string"
+
     def test_format_docs(self):
         text = _format_docs([_doc(1), _doc(2)], limit=1)
         assert "文档1" in text
         assert "共 2 条结果" in text
         assert _format_docs([]) == "（无检索结果）"
+
+
+class TestReSearch:
+    """re_search 工具执行测试（module-040 Adaptive RAG — 检索不足自动改写重查）
+
+    覆盖验收 §4 re_search sufficiency check：
+    - 检索充分 → 跳过
+    - 检索不足 → 改写 query + 重检
+    - 无 ctx.docs 时调用 → 引导提示
+    - 改写后仍无结果 → 空结果提示
+    """
+
+    def test_re_search_sufficient_skips(self):
+        """check_sufficiency 返回 sufficient=true → 返回'已充分'，不调检索"""
+        from agent.react import ReactContext
+
+        async def run():
+            ctx = ReactContext("线程池问题", "user-1", [])
+            ctx.add_docs([_doc(1)])
+            tool = registry.get("re_search")
+            with mock.patch(
+                "agent.tool_registry.reflector.check_sufficiency",
+                new=mock.AsyncMock(return_value={
+                    "sufficient": True,
+                    "reason": "文档覆盖问题关键词",
+                }),
+            ):
+                result = await tool.run({"query": "线程池"}, ctx)
+            return result
+
+        result = asyncio.run(run())
+        assert "已充分" in result
+        assert "无需重检" in result
+
+    def test_re_search_insufficient_rewrites(self):
+        """check_sufficiency 返回 insufficient → 用 rewritten_query 重检（不验证 retrieve 调用细节）"""
+        from agent.react import ReactContext
+
+        async def run():
+            ctx = ReactContext("Java线程池怎么用", "user-1", [])
+            ctx.add_docs([_doc(1)])
+            tool = registry.get("re_search")
+            with mock.patch(
+                "agent.tool_registry.reflector.check_sufficiency",
+                new=mock.AsyncMock(return_value={
+                    "sufficient": False,
+                    "rewritten_query": "Java线程池核心参数配置",
+                }),
+            ):
+                with _patch_retriever([_doc(2)]):
+                    result = await tool.run({"query": "Java线程池"}, ctx)
+            return result
+
+        result = asyncio.run(run())
+        assert "改写查询" in result
+        assert "Java线程池核心参数配置" in result
+        assert "文档2" in result
+
+    def test_re_search_insufficient_rewrites_and_retrieves(self):
+        """check_sufficiency 返回 insufficient + rewritten_query → 用改写 query 检索，结果累积到 ctx"""
+        from agent.react import ReactContext
+
+        async def run():
+            ctx = ReactContext("Java线程池怎么用", "user-1", [])
+            ctx.add_docs([_doc(1)])
+            tool = registry.get("re_search")
+            with mock.patch(
+                "agent.tool_registry.reflector.check_sufficiency",
+                new=mock.AsyncMock(return_value={
+                    "sufficient": False,
+                    "rewritten_query": "Java线程池核心参数配置",
+                }),
+            ):
+                with mock.patch(
+                    "agent.tool_registry.hybrid_retriever.retrieve",
+                    new=mock.AsyncMock(return_value=[_doc(2), _doc(3)]),
+                ) as retrieve:
+                    result = await tool.run({"query": "Java线程池"}, ctx)
+            # 验证检索被调用且使用了改写后的 query
+            retrieve.assert_called_once()
+            # retrieve(query, top_k=5, mode="hybrid") — query 是位置参数
+            assert retrieve.call_args[0][0] == "Java线程池核心参数配置"
+            call_kwargs = retrieve.call_args[1]
+            assert call_kwargs["mode"] == "hybrid"
+            assert call_kwargs["top_k"] == 5
+            # 新结果累积到了 ctx
+            assert len(ctx.docs) == 3  # 去重后：doc1 + doc2 + doc3
+            return result
+
+        result = asyncio.run(run())
+        assert "改写查询" in result
+        assert "Java线程池核心参数配置" in result
+        assert "2 篇文档" in result
+        assert "文档2" in result
+        assert "文档3" in result
+
+    def test_re_search_no_docs_guides(self):
+        """空 ctx.docs → 返回提示引导先调用检索工具"""
+        from agent.react import ReactContext
+
+        async def run():
+            ctx = ReactContext("问题", "user-1", [])
+            # 不添加任何 docs
+            tool = registry.get("re_search")
+            result = await tool.run({"query": "问题"}, ctx)
+            return result
+
+        result = asyncio.run(run())
+        assert "请先调用" in result
+        assert "尚未检索" in result
+
+    def test_re_search_empty_rewrite_results(self):
+        """check_sufficiency 返回 insufficient，改写后检索无结果 → 返回'知识库可能无相关内容'"""
+        from agent.react import ReactContext
+
+        async def run():
+            ctx = ReactContext("不存在的内容", "user-1", [])
+            ctx.add_docs([_doc(1)])
+            tool = registry.get("re_search")
+            with mock.patch(
+                "agent.tool_registry.reflector.check_sufficiency",
+                new=mock.AsyncMock(return_value={
+                    "sufficient": False,
+                    "rewritten_query": "不存在的改写查询",
+                }),
+            ):
+                with mock.patch(
+                    "agent.tool_registry.hybrid_retriever.retrieve",
+                    new=mock.AsyncMock(return_value=[]),
+                ):
+                    result = await tool.run({"query": "不存在的内容"}, ctx)
+            return result
+
+        result = asyncio.run(run())
+        assert "仍无结果" in result
+        assert "知识库可能无相关内容" in result
 
 
 class TestChatWithTools:
