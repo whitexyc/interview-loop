@@ -8,8 +8,9 @@ Chat 对话 Faithfulness 评估 — LLM-as-Judge（module-038）
 - relevancy（答案相关性）：答案是否切合问题（0-1）
 
 用法（ai_service 目录下）:
-    python -m eval.faithfulness                  # 默认抽 50 条
+    python -m eval.faithfulness                  # 默认抽 50 条（优先 session_memory）
     python -m eval.faithfulness --sample 30      # 抽 30 条
+    python -m eval.faithfulness --dataset        # 强制使用 dataset.json 问题（生成新答案）
     python -m eval.faithfulness --no-save        # 不落库
 
 Judge LLM: 使用项目默认 DeepSeek（temperature=0 保证一致性）。
@@ -159,6 +160,44 @@ async def _extract_qa_pairs(limit: int = 100) -> list[dict]:
     return pairs
 
 
+async def _load_dataset_pairs(sample_size: int) -> list[dict]:
+    """降级数据源：从 dataset.json 加载问题，全链路检索+生成答案
+
+    当 session_memory 无数据时使用。对每条 dataset 问题执行
+    _retrieve → generate_answer，产出问答对用于 faithfulness 评估。
+
+    Args:
+        sample_size: 最多使用多少条问题
+
+    Returns:
+        [{"question": str, "answer": str, "source": "dataset"}, ...]
+    """
+    from agent.reflector import reflector
+
+    dataset_path = EVAL_DIR / "dataset.json"
+    if not dataset_path.exists():
+        logger.warning("dataset.json 不存在，无降级数据")
+        return []
+
+    raw = json.loads(dataset_path.read_text(encoding="utf-8"))
+    items = raw[:sample_size]
+    logger.info("降级使用 dataset.json: %d 题", len(items))
+
+    pairs: list[dict] = []
+    for i, item in enumerate(items):
+        question = item["question"]
+        logger.info("[%d/%d] 生成答案: %s", i + 1, len(items), question[:60])
+        try:
+            docs = await rag_engine._retrieve(question)
+            answer = await reflector.generate_answer(question, docs)
+        except Exception as e:
+            logger.warning("生成答案失败: %s", e)
+            answer = "（生成失败）"
+        pairs.append({"question": question, "answer": answer, "source": "dataset"})
+
+    return pairs
+
+
 async def _judge_faithfulness(
     judge: DeepSeekClient,
     question: str,
@@ -195,22 +234,33 @@ async def _judge_relevancy(
         return 0.0
 
 
-async def run_faithfulness_eval(sample_size: int = 50) -> dict:
+async def run_faithfulness_eval(sample_size: int = 50, force_dataset: bool = False) -> dict:
     """执行 faithfulness 评估
 
     Args:
         sample_size: 从候选池随机采样多少条
+        force_dataset: 强制使用 dataset.json（跳过 session_memory）
 
     Returns:
         评估结果 dict（summary + per_question + metadata）
     """
+    data_source = "session_memory"
     all_pairs = await _extract_qa_pairs(limit=max(sample_size * 3, 100))
     if not all_pairs:
-        return {"error": "无会话记忆数据可评估", "summary": {}, "per_question": []}
+        if force_dataset:
+            logger.info("session_memory 无数据，降级使用 dataset.json")
+            all_pairs = await _load_dataset_pairs(sample_size)
+            data_source = "dataset"
+        else:
+            logger.warning(
+                "session_memory 无数据。提示：加 --dataset 可使用 dataset.json "
+                "问题并全链路生成答案进行评估"
+            )
+            return {"error": "无会话记忆数据可评估（加 --dataset 可降级到 dataset.json）", "summary": {}, "per_question": []}
 
     if len(all_pairs) > sample_size:
         all_pairs = random.sample(all_pairs, sample_size)
-    logger.info("采样 %d 条问答对进行评估", len(all_pairs))
+    logger.info("采样 %d 条问答对进行评估 (数据源: %s)", len(all_pairs), data_source)
 
     if not settings.deepseek_api_key:
         logger.warning("DEEPSEEK_API_KEY 未配置，评估可能失败")
@@ -263,6 +313,7 @@ async def run_faithfulness_eval(sample_size: int = 50) -> dict:
     }
     metadata = {
         "eval_type": "faithfulness",
+        "data_source": data_source,
         "judge_llm": f"{settings.deepseek_model} (temperature=0)",
         "timestamp": datetime.now().isoformat(),
     }
@@ -283,7 +334,8 @@ def print_faithfulness_report(report: dict) -> None:
     print("\n" + "=" * 60)
     print("Faithfulness & Relevancy Evaluation")
     print("=" * 60)
-    print(f"Sample: {n} Q&A pairs from session memory")
+    ds = report.get('metadata', {}).get('data_source', 'session_memory')
+    print(f"Sample: {n} Q&A pairs (source: {ds})")
     print(f"Judge:  {report.get('metadata', {}).get('judge_llm', 'N/A')}")
     print("-" * 60)
     print(f"Faithfulness  avg: {summary.get('faithfulness_avg', 0):.4f}")
@@ -321,10 +373,15 @@ async def main() -> None:
         description="Chat 对话 Faithfulness/Relevancy 评估（LLM-as-Judge）",
     )
     parser.add_argument("--sample", type=int, default=50, help="采样问答对数（默认 50）")
+    parser.add_argument("--dataset", action="store_true", dest="force_dataset",
+                        help="强制使用 dataset.json 问题（生成新答案），跳过 session_memory")
     parser.add_argument("--no-save", action="store_true", help="不记录 eval_runs 表")
     args = parser.parse_args()
 
-    report = await run_faithfulness_eval(sample_size=args.sample)
+    report = await run_faithfulness_eval(
+        sample_size=args.sample,
+        force_dataset=args.force_dataset,
+    )
     print_faithfulness_report(report)
 
     if not args.no_save and "error" not in report:

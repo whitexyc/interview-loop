@@ -10,6 +10,7 @@ Golden 检索集评估脚本 — Hit@k / Recall@k / MRR + 单通道消融 + 版�
     python -m eval.golden_retrieval --top-k 10
     python -m eval.golden_retrieval --no-save          # 不写 eval_runs（纯跑分）
     python -m eval.golden_retrieval --compare          # 对比最近两次运行的 delta
+    python -m eval.golden_retrieval --ablate           # 消融对比：graph_only vs hybrid 一键跑两边 + side-by-side delta（图谱贡献量）
 
 指标定义:
     Hit@k      该题检索 top_k 结果中是否命中任意 golden doc（0/1，按题平均）
