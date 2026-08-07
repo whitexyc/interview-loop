@@ -17,6 +17,7 @@ Agent 工具注册表 — ToolRegistry（module-028）
      extract_entities / recall_memory / generate_answer / verify_answer /
      re_search / note_to_self
 """
+import asyncio
 import json
 import logging
 from typing import Callable, Optional
@@ -58,7 +59,10 @@ class AgentTool:
             工具结果文本；执行失败返回 ""
         """
         try:
-            return await self.func(ctx, args)
+            return await asyncio.wait_for(self.func(ctx, args), timeout=15)
+        except asyncio.TimeoutError:
+            logger.warning("工具 %s 超时 (15s)", self.name)
+            return f"(工具 {self.name} 执行超时)"
         except Exception as e:
             logger.warning("工具 %s 执行失败，返回空: %s", self.name, e)
             return ""

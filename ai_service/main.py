@@ -37,6 +37,7 @@ from llm.client import LLMFactory
 # 本内存 dict 保留为会话内即时兜底缓存（/ai/chat/sessions 等端点即时读取）。
 IP_SESSION_MESSAGES: dict[str, list[dict]] = defaultdict(list)
 MAX_MESSAGES_PER_IP = 50
+MAX_ANSWER_LEN = 10000  # module-042: 答案最大长度，超出截断并附加提示
 
 logging.basicConfig(
     level=logging.INFO,
@@ -326,6 +327,9 @@ async def chat(request: ChatRequest, fastapi_req: Request):
     client_ip = getattr(fastapi_req.state, "client_ip", "unknown")
     identity = resolve_identity(fastapi_req)
     result = await rag_engine.chat(request, identity=identity)
+    # module-042: 答案截断保护（不影响 sources）
+    if len(result.answer) > MAX_ANSWER_LEN:
+        result.answer = result.answer[:MAX_ANSWER_LEN] + "\n\n[答案过长，已截断]"
     # 保存消息到 IP 会话缓存（仅知识库路径保存；内存态，module-034 降级为兜底缓存）
     if result.message not in ("casual_chat", "realtime_not_implemented") and result.answer:
         save_messages_to_session(client_ip, request.query, result.answer, result.sources)
@@ -459,9 +463,17 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
             memory = await rag_engine._recall_memory(request.query, identity)
             history = await rag_engine._resolve_session_history(identity, request.history)
             answer_parts = []
+            total_len = 0
             async for token in reflector.generate_answer_stream(request.query, docs, history=history, memory=memory):
                 answer_parts.append(token)
+                total_len += len(token)
                 yield f"event: token\ndata: {json.dumps(token)}\n\n"
+                # module-042: 答案长度保护 — 超出上限停止流式输出并追加截断提示
+                if total_len >= MAX_ANSWER_LEN:
+                    truncation_note = "\n\n[答案过长，已截断]"
+                    answer_parts.append(truncation_note)
+                    yield f"event: token\ndata: {json.dumps(truncation_note)}\n\n"
+                    break
 
             # ====== Step 6: 引用溯源 ======
             sources = []
@@ -481,7 +493,9 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
 
             # ====== Step 7: 证据链验证（module-039） ======
             full_answer = "".join(answer_parts)
-            verified = await reflector.verify_answer(full_answer, docs)
+            # module-042: 剥离截断标记后验证，避免标记文本误导置信度评估
+            clean_answer = full_answer.replace("\n\n[答案过长，已截断]", "")
+            verified = await reflector.verify_answer(clean_answer, docs)
             if verified.get("claims"):
                 yield f"event: verified\ndata: {json.dumps({'claims': verified['claims'], 'overall_confidence': verified['overall_confidence'], 'total_claims': verified['total_claims'], 'supported': verified['supported'], 'inferred': verified['inferred'], 'unsupported': verified['unsupported']}, ensure_ascii=False)}\n\n"
                 yield f"event: done\ndata: {json.dumps({'sources': sources, 'verified': True, 'overall_confidence': verified['overall_confidence']})}\n\n"
@@ -526,7 +540,8 @@ async def chat_agent(request: ChatRequest, fastapi_req: Request):
             budget = settings.max_agent_tools
             answer = ""
             tool_count = 0
-            async for evt in react_loop(ctx, _build_messages(ctx), budget):
+            async for evt in react_loop(ctx, _build_messages(ctx), budget,
+                                        max_answer_len=MAX_ANSWER_LEN):
                 t = evt["type"]
                 if t == "tool_call":
                     yield f"event: tool_call\ndata: {json.dumps({'name': evt['name'], 'args': evt['args'], 'tool_count': evt['tool_count']}, ensure_ascii=False)}\n\n"
@@ -593,7 +608,8 @@ async def chat_agent_langgraph(request: ChatRequest, fastapi_req: Request):
             budget = settings.max_agent_tools
             answer = ""
             tool_count = 0
-            async for evt in langgraph_react_loop(ctx, _build_messages(ctx), budget):
+            async for evt in langgraph_react_loop(ctx, _build_messages(ctx), budget,
+                                                  max_answer_len=MAX_ANSWER_LEN):
                 t = evt["type"]
                 if t == "tool_call":
                     yield f"event: tool_call\ndata: {json.dumps({'name': evt['name'], 'args': evt['args'], 'tool_count': evt['tool_count']}, ensure_ascii=False)}\n\n"

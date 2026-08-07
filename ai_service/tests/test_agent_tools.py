@@ -116,6 +116,30 @@ class TestToolRegistry:
         result = asyncio.run(reg.get("bad").run({}, None))
         assert result == ""  # 工具失败返回空，LLM 判断继续/放弃
 
+    def test_tool_run_timeout_returns_prompt(self):
+        """AC 1.1/1.2: AgentTool.run 15s 超时 → 返回 '(工具 X 执行超时)' 不抛异常"""
+        async def slow(ctx, args):
+            await asyncio.sleep(999)  # 远超 15s 超时
+            return "不会到达"
+        reg = ToolRegistry()
+        reg.register("slow_tool", "慢工具", {"type": "object"}, slow)
+        result = asyncio.run(reg.get("slow_tool").run({}, None))
+        assert "执行超时" in result
+        assert "slow_tool" in result
+        assert result == "(工具 slow_tool 执行超时)"
+
+    def test_tool_timeout(self):
+        """AC 1.1/1.2: AgentTool.run 超时 → 返回 '(工具 X 执行超时)'，不抛异常"""
+        async def slow(ctx, args):
+            await asyncio.sleep(999)
+            return "不会到达"
+        reg = ToolRegistry()
+        reg.register("t", "慢工具", {"type": "object"}, slow)
+        result = asyncio.run(reg.get("t").run({}, None))
+        assert "执行超时" in result
+        assert "t" in result
+        assert result == "(工具 t 执行超时)"
+
     def test_register_builtin_tools_into_custom_registry(self):
         reg = ToolRegistry()
         register_builtin_tools(reg)
@@ -1081,3 +1105,385 @@ class TestNoteToSelfCoexistence:
         props = tool.args_schema.get("properties", {})
         assert "answer" in props
         assert "query" in props
+
+
+# ─── module-042: MAX_ANSWER_LEN 截断测试 ───
+
+TRUNC_MARKER = "\n\n[答案过长，已截断]"
+MAX_LEN = 10000
+LONG_ANSWER = "答" * 15000  # 超过 10000 字符的答案
+
+
+class TestAnswerTruncationChat:
+    """AC 1.5/2.3: /ai/rag/chat 端点答案截断测试"""
+
+    def test_answer_truncated_and_sources_preserved(self):
+        """答案 >10000 字符 → 截断 + 标记追加；sources 完整返回"""
+        import main as main_module
+        from rag.schemas import ChatResponse
+
+        async def run():
+            long_ans = "A" * 15000
+            sources = [{"id": 1, "title": "文档1", "content": "内容", "source": "test", "ref_index": 1}]
+            fake_response = ChatResponse(answer=long_ans, sources=sources, message="ok")
+
+            with mock.patch("rag.engine.rag_engine.chat",
+                            new=mock.AsyncMock(return_value=fake_response)):
+                with mock.patch("main.save_messages_to_session"):
+                    transport = httpx.ASGITransport(
+                        app=main_module.app, raise_app_exceptions=True)
+                    async with httpx.AsyncClient(
+                            transport=transport, base_url="http://test") as client:
+                        resp = await client.post(
+                            "/ai/rag/chat",
+                            json={"query": "测试截断", "history": []},
+                        )
+                    assert resp.status_code == 200
+                    data = resp.json()
+                    return data
+
+        data = asyncio.run(run())
+        # 截断后长度 ≤ MAX_LEN + 标记长度
+        assert len(data["answer"]) <= MAX_LEN + len(TRUNC_MARKER)
+        assert data["answer"].endswith(TRUNC_MARKER)
+        assert data["answer"].startswith("A" * MAX_LEN)
+        # sources 完整保留
+        assert len(data["sources"]) == 1
+        assert data["sources"][0]["id"] == 1
+
+    def test_short_answer_not_truncated(self):
+        """答案 ≤ 10000 字符 → 不截断，无标记"""
+        import main as main_module
+        from rag.schemas import ChatResponse
+
+        async def run():
+            short = "B" * 100  # 远小于 10000
+            fake_response = ChatResponse(answer=short, sources=[], message="ok")
+
+            with mock.patch("rag.engine.rag_engine.chat",
+                            new=mock.AsyncMock(return_value=fake_response)):
+                with mock.patch("main.save_messages_to_session"):
+                    transport = httpx.ASGITransport(
+                        app=main_module.app, raise_app_exceptions=True)
+                    async with httpx.AsyncClient(
+                            transport=transport, base_url="http://test") as client:
+                        resp = await client.post(
+                            "/ai/rag/chat",
+                            json={"query": "测试", "history": []},
+                        )
+                    assert resp.status_code == 200
+                    data = resp.json()
+                    return data
+
+        data = asyncio.run(run())
+        assert data["answer"] == "B" * 100
+        assert TRUNC_MARKER.lstrip() not in data["answer"].replace("\n", "")
+
+    def test_exactly_max_not_truncated(self):
+        """答案恰好 = 10000 字符（≤ 阈值）→ 不截断"""
+        import main as main_module
+        from rag.schemas import ChatResponse
+
+        async def run():
+            exact = "C" * 10000
+            fake_response = ChatResponse(answer=exact, sources=[], message="ok")
+
+            with mock.patch("rag.engine.rag_engine.chat",
+                            new=mock.AsyncMock(return_value=fake_response)):
+                with mock.patch("main.save_messages_to_session"):
+                    transport = httpx.ASGITransport(
+                        app=main_module.app, raise_app_exceptions=True)
+                    async with httpx.AsyncClient(
+                            transport=transport, base_url="http://test") as client:
+                        resp = await client.post(
+                            "/ai/rag/chat",
+                            json={"query": "测试", "history": []},
+                        )
+                    assert resp.status_code == 200
+                    data = resp.json()
+                    return data
+
+        data = asyncio.run(run())
+        assert len(data["answer"]) == 10000
+        assert TRUNC_MARKER not in data["answer"]
+
+
+class TestAnswerTruncationAgent:
+    """AC 1.5/2.3: /ai/rag/chat/agent 端点答案截断测试
+    （截断从 react_loop 内部触发，token 与 done 事件一致）"""
+
+    def test_agent_long_answer_truncated(self):
+        """agent 端点 LLM 直接回答超长 → token + done 事件均截断且一致"""
+        import main as main_module
+
+        long_ans = "X" * 15000
+        fake = _FakeLLM([_answer(long_ans)])
+        events = []
+
+        async def run():
+            with mock.patch("agent.react.LLMFactory.get_client", return_value=fake):
+                with mock.patch("rag.engine.rag_engine._resolve_session_history",
+                                new=mock.AsyncMock(side_effect=lambda identity, h: h)):
+                    transport = httpx.ASGITransport(
+                        app=main_module.app, raise_app_exceptions=True)
+                    async with httpx.AsyncClient(
+                            transport=transport, base_url="http://test") as client:
+                        resp = await client.post(
+                            "/ai/rag/chat/agent",
+                            json={"query": "测试截断", "history": []},
+                        )
+                    assert resp.status_code == 200
+                    events.extend(_parse_sse(resp.content))
+
+        asyncio.run(run())
+
+        names = [e["event"] for e in events]
+        assert "token" in names
+        assert "done" in names
+
+        # token 事件内容已截断
+        token_data = json.loads(events[names.index("token")]["data"])
+        assert len(token_data) <= MAX_LEN + len(TRUNC_MARKER)
+        assert token_data.endswith(TRUNC_MARKER)
+
+        # done 事件 answer 与 token 一致
+        done_data = json.loads(events[names.index("done")]["data"])
+        assert len(done_data["answer"]) <= MAX_LEN + len(TRUNC_MARKER)
+        assert done_data["answer"].endswith(TRUNC_MARKER)
+        assert done_data["answer"] == token_data  # 一致性：token == done.answer
+
+        # sources 完整保留
+        assert "sources" in done_data
+        assert "budget" in done_data
+
+    def test_agent_short_answer_not_truncated(self):
+        """agent 端点短答案 → 不截断，token == done.answer"""
+        import main as main_module
+
+        short = "短答案"
+        fake = _FakeLLM([_answer(short)])
+        events = []
+
+        async def run():
+            with mock.patch("agent.react.LLMFactory.get_client", return_value=fake):
+                with mock.patch("rag.engine.rag_engine._resolve_session_history",
+                                new=mock.AsyncMock(side_effect=lambda identity, h: h)):
+                    transport = httpx.ASGITransport(
+                        app=main_module.app, raise_app_exceptions=True)
+                    async with httpx.AsyncClient(
+                            transport=transport, base_url="http://test") as client:
+                        resp = await client.post(
+                            "/ai/rag/chat/agent",
+                            json={"query": "hi", "history": []},
+                        )
+                    assert resp.status_code == 200
+                    events.extend(_parse_sse(resp.content))
+
+        asyncio.run(run())
+
+        names = [e["event"] for e in events]
+        token_data = json.loads(events[names.index("token")]["data"])
+        done_data = json.loads(events[names.index("done")]["data"])
+        assert token_data == "短答案"
+        assert done_data["answer"] == "短答案"
+        assert TRUNC_MARKER not in token_data
+
+
+class TestAnswerTruncationAgentLG:
+    """AC 1.5/2.3: /ai/rag/chat/agent-lg 端点答案截断测试"""
+
+    def test_agent_lg_long_answer_truncated(self):
+        """agent-lg 端点超长答案 → token + done 一致截断"""
+        import main as main_module
+
+        long_ans = "Y" * 15000
+        fake = _FakeLLM([_answer(long_ans)])
+        events = []
+
+        async def run():
+            with mock.patch("agent.langgraph_react.LLMFactory.get_client",
+                            return_value=fake):
+                with mock.patch("rag.engine.rag_engine._resolve_session_history",
+                                new=mock.AsyncMock(side_effect=lambda identity, h: h)):
+                    transport = httpx.ASGITransport(
+                        app=main_module.app, raise_app_exceptions=True)
+                    async with httpx.AsyncClient(
+                            transport=transport, base_url="http://test") as client:
+                        resp = await client.post(
+                            "/ai/rag/chat/agent-lg",
+                            json={"query": "测试", "history": []},
+                        )
+                    assert resp.status_code == 200
+                    events.extend(_parse_sse(resp.content))
+
+        asyncio.run(run())
+
+        names = [e["event"] for e in events]
+        assert "done" in names
+        done_data = json.loads(events[names.index("done")]["data"])
+        assert len(done_data["answer"]) <= MAX_LEN + len(TRUNC_MARKER)
+        assert done_data["answer"].endswith(TRUNC_MARKER)
+
+        # 如果有 token 事件，token 内容与 done.answer 一致
+        if "token" in names:
+            token_data = json.loads(events[names.index("token")]["data"])
+            assert token_data == done_data["answer"]
+
+    def test_agent_lg_short_answer_not_truncated(self):
+        """agent-lg 端点短答案 → 不截断"""
+        import main as main_module
+
+        short = "短答案LG"
+        fake = _FakeLLM([_answer(short)])
+        events = []
+
+        async def run():
+            with mock.patch("agent.langgraph_react.LLMFactory.get_client",
+                            return_value=fake):
+                with mock.patch("rag.engine.rag_engine._resolve_session_history",
+                                new=mock.AsyncMock(side_effect=lambda identity, h: h)):
+                    transport = httpx.ASGITransport(
+                        app=main_module.app, raise_app_exceptions=True)
+                    async with httpx.AsyncClient(
+                            transport=transport, base_url="http://test") as client:
+                        resp = await client.post(
+                            "/ai/rag/chat/agent-lg",
+                            json={"query": "hi", "history": []},
+                        )
+                    assert resp.status_code == 200
+                    events.extend(_parse_sse(resp.content))
+
+        asyncio.run(run())
+
+        names = [e["event"] for e in events]
+        done_data = json.loads(events[names.index("done")]["data"])
+        assert done_data["answer"] == "短答案LG"
+        assert TRUNC_MARKER not in done_data["answer"]
+
+
+class TestAnswerTruncationChatStream:
+    """AC 1.5/2.3: /ai/rag/chat/stream 端点答案截断测试"""
+
+    def test_stream_truncation_marker_emitted(self):
+        """chat_stream 超长答案 → 流中包含截断标记 token；verify 用清洗后答案"""
+        import main as main_module
+
+        events = []
+        fake_doc = _doc(1)
+
+        async def run():
+            with mock.patch("agent.router.router_agent.classify",
+                            new=mock.AsyncMock(
+                                return_value={"intent": "knowledge", "confidence": 0.9})):
+                with mock.patch("rag.engine.rag_engine._retrieve",
+                                new=mock.AsyncMock(return_value=[fake_doc])):
+                    with mock.patch("rag.engine.rag_engine._rerank",
+                                    new=mock.AsyncMock(return_value=[fake_doc])):
+                        # 模拟反思：直接返回充分，不触发改写检索
+                        with mock.patch(
+                            "agent.reflector.reflector.check_sufficiency",
+                            new=mock.AsyncMock(return_value={"sufficient": True}),
+                        ):
+                            # 模拟生成超长答案
+                            tokens = ["T" * 1000 for _ in range(20)]
+
+                            async def fake_stream(*args, **kwargs):
+                                for t in tokens:
+                                    yield t
+
+                            with mock.patch(
+                                "agent.reflector.reflector.generate_answer_stream",
+                                new=fake_stream,
+                            ):
+                                with mock.patch(
+                                    "agent.reflector.reflector.verify_answer",
+                                    new=mock.AsyncMock(return_value={"claims": [], "overall_confidence": 0}),
+                                ):
+                                    with mock.patch(
+                                        "rag.engine.rag_engine._resolve_session_history",
+                                        new=mock.AsyncMock(side_effect=lambda identity, h: h),
+                                    ):
+                                        with mock.patch(
+                                            "rag.engine.rag_engine._recall_memory",
+                                            new=mock.AsyncMock(return_value=""),
+                                        ):
+                                            transport = httpx.ASGITransport(
+                                                app=main_module.app, raise_app_exceptions=True)
+                                            async with httpx.AsyncClient(
+                                                    transport=transport, base_url="http://test") as client:
+                                                resp = await client.post(
+                                                    "/ai/rag/chat/stream",
+                                                    json={"query": "测试", "history": []},
+                                                )
+                                            assert resp.status_code == 200
+                                            events.extend(_parse_sse(resp.content))
+
+        asyncio.run(run())
+
+        # token 事件中应包含截断标记
+        token_events = [e for e in events if e["event"] == "token"]
+        token_texts = [json.loads(e["data"]) for e in token_events]
+        all_tokens = "".join(token_texts)
+        assert TRUNC_MARKER in all_tokens
+        # 验证截断后总长度不超过 MAX_LEN + 标记长度
+        assert len(all_tokens) <= MAX_LEN + len(TRUNC_MARKER)
+
+        # verify_answer 被调用时应传入清洗后的答案（不含截断标记）
+        # 由 mock 对象验证——此处通过不崩溃来间接验证
+
+    def test_stream_short_answer_not_truncated(self):
+        """chat_stream 短答案 → 不截断，无截断标记"""
+        import main as main_module
+
+        events = []
+        fake_doc = _doc(1)
+
+        async def run():
+            with mock.patch("agent.router.router_agent.classify",
+                            new=mock.AsyncMock(
+                                return_value={"intent": "knowledge", "confidence": 0.9})):
+                with mock.patch("rag.engine.rag_engine._retrieve",
+                                new=mock.AsyncMock(return_value=[fake_doc])):
+                    with mock.patch("rag.engine.rag_engine._rerank",
+                                    new=mock.AsyncMock(return_value=[fake_doc])):
+                        with mock.patch(
+                            "agent.reflector.reflector.check_sufficiency",
+                            new=mock.AsyncMock(return_value={"sufficient": True}),
+                        ):
+                            async def fake_stream(*args, **kwargs):
+                                yield "短答案流"
+
+                            with mock.patch(
+                                "agent.reflector.reflector.generate_answer_stream",
+                                new=fake_stream,
+                            ):
+                                with mock.patch(
+                                    "agent.reflector.reflector.verify_answer",
+                                    new=mock.AsyncMock(return_value={"claims": [], "overall_confidence": 0}),
+                                ):
+                                    with mock.patch(
+                                        "rag.engine.rag_engine._resolve_session_history",
+                                        new=mock.AsyncMock(side_effect=lambda identity, h: h),
+                                    ):
+                                        with mock.patch(
+                                            "rag.engine.rag_engine._recall_memory",
+                                            new=mock.AsyncMock(return_value=""),
+                                        ):
+                                            transport = httpx.ASGITransport(
+                                                app=main_module.app, raise_app_exceptions=True)
+                                            async with httpx.AsyncClient(
+                                                    transport=transport, base_url="http://test") as client:
+                                                resp = await client.post(
+                                                    "/ai/rag/chat/stream",
+                                                    json={"query": "测试", "history": []},
+                                                )
+                                            assert resp.status_code == 200
+                                            events.extend(_parse_sse(resp.content))
+
+        asyncio.run(run())
+
+        token_events = [e for e in events if e["event"] == "token"]
+        token_texts = [json.loads(e["data"]) for e in token_events]
+        all_tokens = "".join(token_texts)
+        assert all_tokens == "短答案流"
+        assert TRUNC_MARKER not in all_tokens

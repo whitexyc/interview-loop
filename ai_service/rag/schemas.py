@@ -1,7 +1,7 @@
 """
 RAG 知识库请求/响应模型
 """
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 
 
@@ -16,8 +16,16 @@ class SearchResponse(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    query: str
-    history: list[dict] = []
+    query: str = Field(..., max_length=2000)
+    history: list[dict] = Field(default_factory=list)
+
+    @field_validator("history", mode="before")
+    @classmethod
+    def truncate_history(cls, v):
+        """AC 1.4: 超条数截断 — 静默保留最近 20 条消息，不返回 422"""
+        if isinstance(v, list) and len(v) > 20:
+            return v[-20:]
+        return v
 
 
 class ChatSteps(BaseModel):
