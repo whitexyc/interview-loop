@@ -511,7 +511,10 @@ async def chat_agent(request: ChatRequest, fastapi_req: Request):
     async def event_stream():
         from agent.react import ReactContext, _build_messages, react_loop
         try:
-            ctx = ReactContext(request.query, identity, request.history)
+            # module-036：会话恢复优先持久化（刷新/换设备不丢）；无持久化会话
+            # 则回退当前请求 history（零回归），与 chat_stream Step 5 一致
+            effective_history = await rag_engine._resolve_session_history(identity, request.history)
+            ctx = ReactContext(request.query, identity, effective_history)
             budget = settings.max_agent_tools
             answer = ""
             tool_count = 0
@@ -538,6 +541,9 @@ async def chat_agent(request: ChatRequest, fastapi_req: Request):
                     "source": doc.get("source", ""),
                     "ref_index": i + 1,
                 })
+            # module-036：Agent 对话完成后异步持久化会话轮次（fire-and-forget，
+            # 不阻塞 SSE；内部 guard 空 answer 不写，与 chat_stream 一致）
+            rag_engine._schedule_session_persist(identity, request.query, answer)
             yield f"event: done\ndata: {json.dumps({'answer': answer, 'sources': sources, 'tool_count': tool_count, 'budget': budget}, ensure_ascii=False)}\n\n"
         except Exception as e:
             logger.error("Agent 问答失败: %s", e, exc_info=True)
@@ -572,7 +578,10 @@ async def chat_agent_langgraph(request: ChatRequest, fastapi_req: Request):
             ReactContext, _build_messages, langgraph_react_loop,
         )
         try:
-            ctx = ReactContext(request.query, identity, request.history)
+            # module-036：会话恢复优先持久化（刷新/换设备不丢）；无持久化会话
+            # 则回退当前请求 history（零回归），与 chat_stream Step 5 一致
+            effective_history = await rag_engine._resolve_session_history(identity, request.history)
+            ctx = ReactContext(request.query, identity, effective_history)
             budget = settings.max_agent_tools
             answer = ""
             tool_count = 0
@@ -599,6 +608,9 @@ async def chat_agent_langgraph(request: ChatRequest, fastapi_req: Request):
                     "source": doc.get("source", ""),
                     "ref_index": i + 1,
                 })
+            # module-036：Agent 对话完成后异步持久化会话轮次（fire-and-forget，
+            # 不阻塞 SSE；内部 guard 空 answer 不写，与 chat_stream 一致）
+            rag_engine._schedule_session_persist(identity, request.query, answer)
             yield f"event: done\ndata: {json.dumps({'answer': answer, 'sources': sources, 'tool_count': tool_count, 'budget': budget}, ensure_ascii=False)}\n\n"
         except Exception as e:
             logger.error("LangGraph Agent 问答失败: %s", e, exc_info=True)

@@ -40,16 +40,20 @@ import {
   saveMessages,
 } from '../services/conversationService';
 
-/** 空状态提示词按钮 */
+/** 空状态提示词按钮
+ * - 技术类：知识库可真实回答（golden 集验证命中）
+ * - 个人类：仅留 2 个展示履历引导（库里无专门文档，走 LLM 兜底）
+ */
 const promptSuggestions = [
-  '我的学习情况',
-  '我的比赛经历',
-  '我在校表现',
-  '我最近在学什么',
   '什么是G1 GC',
   'Java线程池原理',
   '什么是MoE',
   'Kafka为什么快',
+  'Redis持久化RDB和AOF有什么区别',
+  'AQS的工作原理是什么',
+  'KV Cache是什么',
+  '张三的主要技术方向是什么',
+  '张三参加过哪些比赛',
 ];
 
 export default function ChatPage() {
