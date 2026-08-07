@@ -156,6 +156,59 @@ class TestVerifyAnswer:
         assert result["overall_confidence"] == 1.0
 
 
+class TestGenerateAnswerWithScratchpad:
+    """module-041: generate_answer 读取 scratchpad 工作笔记
+
+    覆盖验收 4.1:
+    - scratchpad 非空时 generate_answer prompt 注入工作笔记段
+    - 空 scratchpad 零回归（prompt 不含工作笔记段）
+    """
+
+    @staticmethod
+    def _sample_docs():
+        return [
+            {"id": 1, "title": "线程池基础", "source": "test",
+             "content": "线程池核心参数包括核心线程数、最大线程数、队列容量。"},
+        ]
+
+    def test_generate_answer_includes_scratchpad(self):
+        """scratchpad 非空时 generate_answer prompt 注入工作笔记段"""
+        async def run():
+            r = Reflector()
+            docs = self._sample_docs()
+            client = mock.MagicMock()
+            client.generate = mock.AsyncMock(return_value="含笔记的答案")
+            with mock.patch("llm.client.LLMFactory.get_client", return_value=client):
+                result = await r.generate_answer(
+                    "测试问题", docs,
+                    scratchpad=["发现1", "发现2"],
+                )
+                prompt_arg = client.generate.call_args[0][0]
+            return result, prompt_arg
+
+        result, prompt = asyncio.run(run())
+        assert result == "含笔记的答案"
+        assert "[工作笔记" in prompt
+        assert "发现1" in prompt
+        assert "发现2" in prompt
+
+    def test_generate_answer_no_scratchpad_zero_regression(self):
+        """空 scratchpad 时 generate_answer 零回归（prompt 不含工作笔记段）"""
+        async def run():
+            r = Reflector()
+            docs = self._sample_docs()
+            client = mock.MagicMock()
+            client.generate = mock.AsyncMock(return_value="正常答案")
+            with mock.patch("llm.client.LLMFactory.get_client", return_value=client):
+                result = await r.generate_answer("测试问题", docs)
+                prompt_arg = client.generate.call_args[0][0]
+            return result, prompt_arg
+
+        result, prompt = asyncio.run(run())
+        assert result == "正常答案"
+        assert "[工作笔记" not in prompt
+
+
 class TestParseVerification:
     """_parse_verification JSON 解析健壮性"""
 

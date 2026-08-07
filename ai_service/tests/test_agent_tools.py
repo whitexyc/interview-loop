@@ -1,7 +1,7 @@
 """Module-028 Agent 工具化单元测试
 
 覆盖（验收 §4）：
-- ToolRegistry：9 个内置工具注册 / to_llm_schemas 格式 / 未知工具返回 None / 工具失败返回空
+- ToolRegistry：10 个内置工具注册 / to_llm_schemas 格式 / 未知工具返回 None / 工具失败返回空
 - LLMClient.chat_with_tools：bind_tools 调用 + 返回 {content, tool_calls}（mock _llm）
 - ReAct 循环（react_agent）：工具调用→直接回答 / 预算耗尽兜底 / 预算=0 直接生成 /
   工具失败返回空继续 / 工具调用数 ≤ budget
@@ -86,12 +86,12 @@ class TestToolRegistry:
         assert names == [
             "search_knowledge", "search_fts", "search_vector", "search_graph",
             "extract_entities", "recall_memory", "generate_answer", "verify_answer",
-            "re_search",
+            "re_search", "note_to_self",
         ]
 
     def test_to_llm_schemas_format(self):
         schemas = registry.to_llm_schemas()
-        assert len(schemas) == 9
+        assert len(schemas) == 10
         for s in schemas:
             assert s["type"] == "function"
             fn = s["function"]
@@ -119,7 +119,7 @@ class TestToolRegistry:
     def test_register_builtin_tools_into_custom_registry(self):
         reg = ToolRegistry()
         register_builtin_tools(reg)
-        assert len(reg.list_tools()) == 9
+        assert len(reg.list_tools()) == 10
 
     def test_verify_answer_tool_registered(self):
         """verify_answer 已注册为第 8 个 Agent 工具"""
@@ -807,3 +807,277 @@ class TestReactContextIdentity:
         assert text == "记忆"
         args = recall.call_args[0]
         assert args[1] == "user-42"  # (query, identity)
+
+
+class TestNoteToSelf:
+    """module-041: note_to_self 工具注册 + 执行测试
+
+    覆盖验收 4.1:
+    - note_to_self 注册为第 10 个工具，list_tool_names() 含 "note_to_self"
+    - note_to_self 写入 ctx.scratchpad
+    - 空内容 note 返回提示
+    - note 过长自动截断 500 字
+    - generate_answer 读取 scratchpad，prompt 含"[工作笔记]"段
+    - 空 scratchpad 零回归
+    - 验收 1.6: _SYSTEM_PROMPT 含 note_to_self 工具描述
+    """
+
+    def test_system_prompt_contains_note_to_self(self):
+        """验收 1.6: _SYSTEM_PROMPT 文本包含 note_to_self 工具描述"""
+        from agent.react import _SYSTEM_PROMPT
+        assert "note_to_self" in _SYSTEM_PROMPT
+        assert "工作笔记" in _SYSTEM_PROMPT
+
+    def test_note_to_self_tool_registered(self):
+        """note_to_self 已注册，name/description/schema 均正确"""
+        tool = registry.get("note_to_self")
+        assert tool is not None
+        assert tool.name == "note_to_self"
+        assert "工作笔记" in tool.description or "草稿纸" in tool.description
+        props = tool.args_schema.get("properties", {})
+        assert "note" in props
+        assert props["note"]["type"] == "string"
+        assert "note" in tool.args_schema.get("required", [])
+
+    def test_note_to_self_writes_to_scratchpad(self):
+        """note_to_self 工具执行后 ctx.scratchpad 追加笔记"""
+        from agent.react import ReactContext
+
+        async def run():
+            ctx = ReactContext("测试问题", "user-1", [])
+            tool = registry.get("note_to_self")
+            result = await tool.run({"note": "发现了一个重要线索"}, ctx)
+            return result, ctx
+
+        result, ctx = asyncio.run(run())
+        assert "已记录笔记" in result
+        assert len(ctx.scratchpad) == 1
+        assert ctx.scratchpad[0] == "发现了一个重要线索"
+
+    def test_note_to_self_empty_note(self):
+        """空内容 note — 返回提示信息"""
+        from agent.react import ReactContext
+
+        async def run():
+            ctx = ReactContext("测试问题", "user-1", [])
+            tool = registry.get("note_to_self")
+            result = await tool.run({}, ctx)
+            return result, ctx
+
+        result, ctx = asyncio.run(run())
+        assert "未提供笔记内容" in result
+        assert len(ctx.scratchpad) == 0
+
+    def test_note_to_self_whitespace_only_note(self):
+        """纯空白 note — 返回提示信息"""
+        from agent.react import ReactContext
+
+        async def run():
+            ctx = ReactContext("测试问题", "user-1", [])
+            tool = registry.get("note_to_self")
+            result = await tool.run({"note": "   "}, ctx)
+            return result, ctx
+
+        result, ctx = asyncio.run(run())
+        assert "未提供笔记内容" in result
+        assert len(ctx.scratchpad) == 0
+
+    def test_note_to_self_truncates_long_note(self):
+        """note 超过 500 字自动截断"""
+        from agent.react import ReactContext
+
+        async def run():
+            ctx = ReactContext("测试问题", "user-1", [])
+            tool = registry.get("note_to_self")
+            long_note = "A" * 1000
+            result = await tool.run({"note": long_note}, ctx)
+            return result, ctx
+
+        result, ctx = asyncio.run(run())
+        assert "已记录笔记" in result
+        assert len(ctx.scratchpad) == 1
+        assert len(ctx.scratchpad[0]) <= 500  # 截断到 <= 500
+        # 确认是原始内容的前缀
+        assert ctx.scratchpad[0] == "A" * 500
+
+    def test_note_to_self_multi_note_accumulates(self):
+        """多次调用 note_to_self 累积多条笔记"""
+        from agent.react import ReactContext
+
+        async def run():
+            ctx = ReactContext("测试问题", "user-1", [])
+            tool = registry.get("note_to_self")
+            await tool.run({"note": "笔记1"}, ctx)
+            await tool.run({"note": "笔记2"}, ctx)
+            await tool.run({"note": "笔记3"}, ctx)
+            result = await tool.run({"note": "笔记4"}, ctx)
+            return result, ctx
+
+        result, ctx = asyncio.run(run())
+        assert len(ctx.scratchpad) == 4
+        assert ctx.scratchpad == ["笔记1", "笔记2", "笔记3", "笔记4"]
+        assert "已记录笔记 (4)" in result
+
+    def test_generate_answer_reads_scratchpad(self):
+        """_generate_answer 工具调用 reflector.generate_answer 时传入 scratchpad"""
+        from agent.react import ReactContext
+
+        async def run():
+            ctx = ReactContext("测试问题", "user-1", [])
+            ctx.add_docs([_doc(1)])
+            ctx.add_note("工作笔记内容")
+            with mock.patch(
+                "agent.reflector.reflector.generate_answer",
+                new=mock.AsyncMock(return_value="生成答案"),
+            ) as gen:
+                tool = registry.get("generate_answer")
+                # _generate_answer 内部调 reflector.generate_answer(query, ctx.docs, ...)
+                # 间接验证：patch reflector.method，检查参数
+                result = await tool.run({"query": "测试问题"}, ctx)
+            return result, gen
+
+        result, gen = asyncio.run(run())
+        assert result == "生成答案"
+        gen.assert_called_once()
+        # 验证 scratchpad 参数被传入
+        call_kwargs = gen.call_args[1]
+        assert call_kwargs.get("scratchpad") == ["工作笔记内容"]
+
+    def test_generate_answer_empty_scratchpad_zero_regression(self):
+        """空 scratchpad 时 generate_answer 行为不变，不注入 scratchpad 段"""
+        from agent.react import ReactContext
+
+        async def run():
+            ctx = ReactContext("测试问题", "user-1", [])
+            ctx.add_docs([_doc(1)])
+            # 不写任何 note — scratchpad 为空列表
+            with mock.patch(
+                "agent.reflector.reflector.generate_answer",
+                new=mock.AsyncMock(return_value="生成答案"),
+            ) as gen:
+                tool = registry.get("generate_answer")
+                result = await tool.run({"query": "测试问题"}, ctx)
+            return result, gen
+
+        result, gen = asyncio.run(run())
+        assert result == "生成答案"
+        call_kwargs = gen.call_args[1]
+        # 空列表也传入但 reflector 内 if scratchpad: 分支不会注入
+        assert call_kwargs.get("scratchpad") == []
+
+    def test_scratchpad_injection_in_reflector_generate_answer(self):
+        """reflector.generate_answer 直接调用时，scratchpad 注入到 prompt"""
+        async def run():
+            gen_result = None
+            with mock.patch(
+                "agent.reflector.LLMFactory.get_client",
+                new=mock.MagicMock(),
+            ) as factory:
+                mock_client = mock.MagicMock()
+                mock_client.generate = mock.AsyncMock(return_value="含笔记的答案")
+                factory.return_value = mock_client
+
+                from agent.reflector import reflector
+                result = await reflector.generate_answer(
+                    "测试问题",
+                    [_doc(1)],
+                    scratchpad=["笔记1", "笔记2"],
+                )
+                gen_result = result
+                # 验证 prompt 包含工作笔记段落
+                prompt_arg = mock_client.generate.call_args[0][0]
+            return gen_result, prompt_arg
+
+        result, prompt = asyncio.run(run())
+        assert result == "含笔记的答案"
+        assert "[工作笔记" in prompt
+        assert "笔记1" in prompt
+        assert "笔记2" in prompt
+
+    def test_scratchpad_none_zero_regression(self):
+        """scratchpad=None 时 reflector.generate_answer 零回归"""
+        async def run():
+            with mock.patch(
+                "agent.reflector.LLMFactory.get_client",
+                new=mock.MagicMock(),
+            ) as factory:
+                mock_client = mock.MagicMock()
+                mock_client.generate = mock.AsyncMock(return_value="正常答案")
+                factory.return_value = mock_client
+
+                from agent.reflector import reflector
+                result = await reflector.generate_answer(
+                    "测试问题",
+                    [_doc(1)],
+                    scratchpad=None,
+                )
+                prompt_arg = mock_client.generate.call_args[0][0]
+            return result, prompt_arg
+
+        result, prompt = asyncio.run(run())
+        assert result == "正常答案"
+        assert "[工作笔记" not in prompt
+
+
+class TestNoteToSelfCoexistence:
+    """module-041 与 module-039 verify_answer 共存测试
+
+    覆盖验收 4.2:
+    - note_to_self 和 verify_answer 可在同一 ReAct 循环中先后调用
+    - verify_answer 的注册和执行不受 note_to_self 影响
+    """
+
+    def test_both_tools_registered(self):
+        """note_to_self 和 verify_answer 均在 registry 中注册"""
+        assert registry.get("note_to_self") is not None
+        assert registry.get("verify_answer") is not None
+        names = registry.list_tool_names()
+        assert "note_to_self" in names
+        assert "verify_answer" in names
+
+    def test_note_to_self_then_verify_answer_in_react_loop(self):
+        """ReAct 循环中先调 note_to_self 记录发现，再调 verify_answer 验证"""
+        from agent.react import ReactContext
+
+        async def run():
+            ctx = ReactContext("线程池问题", "user-1", [])
+            ctx.add_docs([_doc(1), _doc(2)])
+
+            # 先记录笔记
+            note_tool = registry.get("note_to_self")
+            note_result = await note_tool.run({"note": "文档1提到核心线程数"}, ctx)
+
+            # 再验证答案
+            verify_tool = registry.get("verify_answer")
+            with mock.patch(
+                "agent.tool_registry.reflector.verify_answer",
+                new=mock.AsyncMock(return_value={
+                    "claims": [
+                        {"claim": "核心线程数", "verdict": "supported",
+                         "evidence": "[1]"},
+                    ],
+                    "overall_confidence": 1.0,
+                    "total_claims": 1, "supported": 1,
+                    "inferred": 0, "unsupported": 0,
+                }),
+            ):
+                verify_result = await verify_tool.run(
+                    {"answer": "核心线程数在文档1中提到", "query": "线程池"},
+                    ctx,
+                )
+            return note_result, verify_result, ctx
+
+        note_result, verify_result, ctx = asyncio.run(run())
+        assert "已记录笔记" in note_result
+        assert ctx.scratchpad == ["文档1提到核心线程数"]
+        assert "[✓]" in verify_result
+
+    def test_verify_answer_register_unchanged(self):
+        """verify_answer 工具注册不受 note_to_self 新增影响"""
+        tool = registry.get("verify_answer")
+        assert tool is not None
+        assert tool.name == "verify_answer"
+        assert "逐句验证" in tool.description
+        props = tool.args_schema.get("properties", {})
+        assert "answer" in props
+        assert "query" in props

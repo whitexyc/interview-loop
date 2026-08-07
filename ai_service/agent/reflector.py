@@ -170,6 +170,7 @@ class Reflector:
         documents: list[dict],
         history: Optional[list[dict]] = None,
         memory: str = "",
+        scratchpad: Optional[list[str]] = None,
     ) -> str:
         """基于文档生成带引用的回答
 
@@ -180,11 +181,15 @@ class Reflector:
         memory（module-023）：跨会话长期记忆片段，命中时以"历史记忆: ..."
         拼入生成 prompt；为空时不生成记忆段，行为与之前完全一致（零回归）。
 
+        scratchpad（module-041）：Agent note_to_self 工具记录的工作笔记列表，
+        非空时以"[工作笔记]"段拼入 prompt；为空时零回归。
+
         Args:
             query: 用户当前问题
             documents: 检索到的文档列表
             history: 历史对话列表，每项 {"role": str, "content": str}
             memory: 长期记忆文本片段（无记忆时为空字符串）
+            scratchpad: Agent 工作笔记列表（无笔记时为 None 或空列表）
         """
         if not documents:
             return "抱歉，未检索到相关信息。"
@@ -209,8 +214,13 @@ class Reflector:
             client = LLMFactory.get_client(
                 self._provider, temperature=self._generation_temperature,
             )
-            # 合并历史段与记忆段：两者为空时 sections=""，prompt 与旧版逐字节一致
-            sections = history_section + (f"{memory}\n" if memory else "")
+            # module-041: 构造 scratchpad 段落（Agent 工作笔记）
+            scratchpad_section = ""
+            if scratchpad:
+                lines = [f"  {i+1}. {n}" for i, n in enumerate(scratchpad)]
+                scratchpad_section = f"\n[工作笔记 - Agent 推理过程中的关键发现]\n" + "\n".join(lines) + "\n"
+            # 合并历史段、scratchpad 段与记忆段：三者为空时 sections=""，prompt 与旧版逐字节一致
+            sections = history_section + scratchpad_section + (f"{memory}\n" if memory else "")
             prompt = _GENERATE_PROMPT.format(
                 query=query,
                 docs_detail=docs_detail,
@@ -228,12 +238,16 @@ class Reflector:
         documents: list[dict],
         history: Optional[list[dict]] = None,
         memory: str = "",
+        scratchpad: Optional[list[str]] = None,
     ) -> AsyncGenerator[str, None]:
         """流式生成答案，逐 token 产出
 
         与 generate_answer 逻辑相同，但使用 astream 替代 ainvoke。
         前置步骤（检索、反思）已完成，只流式传输 LLM 生成部分。
         memory（module-023）默认空串，不改变流式路径原有行为（零回归）。
+
+        scratchpad（module-041）：Agent note_to_self 工具记录的工作笔记列表，
+        非空时以"[工作笔记]"段拼入 prompt；为空时零回归。
         """
         if not documents:
             yield "抱歉，未检索到相关信息。"
@@ -257,8 +271,13 @@ class Reflector:
             client = LLMFactory.get_client(
                 self._provider, temperature=self._generation_temperature,
             )
-            # 合并历史段与记忆段：两者为空时 sections=""，prompt 与旧版逐字节一致
-            sections = history_section + (f"{memory}\n" if memory else "")
+            # module-041: 构造 scratchpad 段落（Agent 工作笔记）
+            scratchpad_section = ""
+            if scratchpad:
+                lines = [f"  {i+1}. {n}" for i, n in enumerate(scratchpad)]
+                scratchpad_section = f"\n[工作笔记 - Agent 推理过程中的关键发现]\n" + "\n".join(lines) + "\n"
+            # 合并历史段、scratchpad 段与记忆段：三者为空时 sections=""，prompt 与旧版逐字节一致
+            sections = history_section + scratchpad_section + (f"{memory}\n" if memory else "")
             prompt = _GENERATE_PROMPT.format(
                 query=query,
                 docs_detail=docs_detail,

@@ -50,7 +50,9 @@ _SYSTEM_PROMPT = """你是张三个人网站的 Agentic RAG 问答助手。用�
 - extract_entities: 从查询/文本中提取技术实体
 - recall_memory: 召回该用户的跨会话长期记忆
 - generate_answer: 基于已检索到的全部文档生成带引用标注的最终答案
+- verify_answer: 逐句验证已生成答案是否被检索文档支持，标注可信度
 - re_search: 检索不足时自动改写查询重检
+- note_to_self: 记录中间发现或推理结论到工作笔记，后续轮次可参考
 
 使用规则：
 1. 优先用 search_knowledge 做一次检索；结果不足时再换 search_fts / search_vector /
@@ -73,6 +75,7 @@ class ReactContext:
         history: 历史对话列表 [{"role", "content"}, ...]
         docs: 检索工具累积的文档（按 doc id 去重）
         memory: recall_memory 工具召回的记忆文本（供 generate_answer 使用）
+        scratchpad: note_to_self 工具记录的工作笔记列表，按写入序（module-041）
     """
 
     def __init__(self, query: str, identity: str = "unknown",
@@ -83,6 +86,11 @@ class ReactContext:
         self.docs: list[dict] = []
         self._seen_ids: set = set()
         self.memory = ""
+        self.scratchpad: list[str] = []  # module-041: Agent 工作笔记，按写入序
+
+    def add_note(self, note: str) -> None:
+        """记录一条工作笔记到 scratchpad（module-041）"""
+        self.scratchpad.append(note.strip())
 
     def add_docs(self, docs: list[dict]) -> None:
         """按 doc id 去重累积检索文档（供 generate_answer / 兜底生成使用）"""
@@ -247,6 +255,7 @@ async def react_loop(
                    budget, len(ctx.docs))
     answer = await reflector.generate_answer(
         ctx.query, ctx.docs, history=ctx.history, memory=ctx.memory,
+        scratchpad=ctx.scratchpad,
     )
     if answer:
         yield {"type": "token", "content": answer}

@@ -12,10 +12,10 @@ Agent 工具注册表 — ToolRegistry（module-028）
      故全局单例 registry 可被多会话并发复用，无共享可变状态。
   2. 工具失败由 AgentTool.run 统一捕获返回空串（降级哲学），
      LLM 自行判断是继续检索还是如实告知用户。
-  3. 内置 9 个工具：
+  3. 内置 10 个工具：
      search_knowledge / search_fts / search_vector / search_graph /
      extract_entities / recall_memory / generate_answer / verify_answer /
-     re_search
+     re_search / note_to_self
 """
 import json
 import logging
@@ -200,6 +200,7 @@ async def _generate_answer(ctx, args: dict) -> str:
     query = args.get("query") or ctx.query
     return await reflector.generate_answer(
         query, ctx.docs, history=ctx.history, memory=ctx.memory,
+        scratchpad=ctx.scratchpad,
     )
 
 
@@ -252,6 +253,16 @@ async def _re_search(ctx, args: dict) -> str:
     return f"改写查询 '{rewritten}' → 检索到 {len(docs)} 篇文档：\n" + _format_docs(docs)
 
 
+async def _note_to_self(ctx, args: dict) -> str:
+    """记录中间发现或推理结论到工作笔记（module-041）"""
+    note = args.get("note", "")
+    if not note or not note.strip():
+        return "（未提供笔记内容）"
+    note = note.strip()[:500]  # 截断过长笔记
+    ctx.add_note(note)
+    return f"已记录笔记 ({len(ctx.scratchpad)}): {note[:200]}"
+
+
 # ─── 内置工具注册 ───
 
 _SEARCH_SCHEMA = {
@@ -300,9 +311,17 @@ _RE_SEARCH_SCHEMA = {
     },
 }
 
+_NOTE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "note": {"type": "string", "description": "要记录的笔记内容"},
+    },
+    "required": ["note"],
+}
+
 
 def register_builtin_tools(reg: Optional[ToolRegistry] = None) -> ToolRegistry:
-    """注册 9 个内置工具到注册表（默认全局 registry）
+    """注册 10 个内置工具到注册表（默认全局 registry）
 
     Args:
         reg: 目标注册表（测试可传入独立实例），None 用全局 registry
@@ -355,6 +374,11 @@ def register_builtin_tools(reg: Optional[ToolRegistry] = None) -> ToolRegistry:
         "re_search",
         "检索不足时自动改写查询重检：检查已有文档是否充分，不充分则用改写后的查询重新混合检索，新结果累积到已有文档。",
         _RE_SEARCH_SCHEMA, _re_search,
+    )
+    reg.register(
+        "note_to_self",
+        "记录中间发现或推理结论到工作笔记（草稿纸），后续轮次可参考。",
+        _NOTE_SCHEMA, _note_to_self,
     )
     return reg
 

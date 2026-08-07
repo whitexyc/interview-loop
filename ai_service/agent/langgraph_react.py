@@ -179,6 +179,7 @@ async def fallback(state: ReActGraphState) -> dict:
                    state["budget"], len(ctx.docs))
     answer = await reflector.generate_answer(
         ctx.query, ctx.docs, history=ctx.history, memory=ctx.memory,
+        scratchpad=ctx.scratchpad,
     )
     if answer:
         events.append({"type": "token", "content": answer})
