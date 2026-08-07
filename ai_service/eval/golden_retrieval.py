@@ -427,6 +427,53 @@ def print_report(mode: str, top_k: int, scores: dict, per_question: list[dict], 
     print()
 
 
+async def ablate(top_k: int) -> None:
+    """消融实验：graph_only vs hybrid 对比，输出 side-by-side delta
+
+    分别以 graph_only 和 hybrid 模式运行 golden 检索评估，
+    对比两个模式的 Hit@k / Recall@k / MRR 及按类别的差值。
+    """
+    print("\n" + "=" * 60)
+    print("Ablation: graph_only vs hybrid")
+    print("=" * 60)
+
+    # 校验 golden 集
+    load_golden()
+
+    results: dict[str, dict] = {}
+    for mode in ("graph_only", "hybrid"):
+        print(f"Running {mode}...")
+        scores, _, _ = await run_eval(mode, top_k)
+        results[mode] = scores
+        print(f"  {mode}: Hit@{top_k}={scores['hit_at_k']:.4f}  "
+              f"Recall@{top_k}={scores['recall_at_k']:.4f}  MRR={scores['mrr']:.4f}")
+
+    graph = results["graph_only"]
+    hybrid = results["hybrid"]
+
+    print("\n" + "-" * 60)
+    print(f"{'Metric':<16} {'graph_only':>12} {'hybrid':>12} {'delta':>12}")
+    print("-" * 60)
+    for key in ("hit_at_k", "recall_at_k", "mrr"):
+        gv = graph[key]
+        hv = hybrid[key]
+        delta = hv - gv
+        print(f"{key:<16} {gv:>12.4f} {hv:>12.4f} {delta:>+12.4f}")
+
+    print("-" * 60)
+    print("Per-Category Delta (hybrid - graph_only):")
+    gcat = graph.get("per_category", {})
+    hcat = hybrid.get("per_category", {})
+    all_cats = sorted(set(gcat) | set(hcat))
+    for cat in all_cats:
+        gv = gcat.get(cat, {}).get("hit_at_k", 0.0)
+        hv = hcat.get(cat, {}).get("hit_at_k", 0.0)
+        print(f"  {cat:<18} Hit@{top_k}: {gv:.4f} → {hv:.4f}  ({hv-gv:+.4f})")
+    print("=" * 60)
+    print("  正 delta 表示 hybrid 优于 graph_only（图谱贡献量）。")
+    print()
+
+
 async def main() -> None:
     """评估脚本入口"""
     parser = argparse.ArgumentParser(description="Golden 检索集召回评估")
@@ -436,6 +483,8 @@ async def main() -> None:
     parser.add_argument("--top-k", type=int, default=5, help="检索深度 k（默认 5，0/负数自动回退 5）")
     parser.add_argument("--no-save", action="store_true", help="不记录 eval_runs 表")
     parser.add_argument("--compare", action="store_true", help="对比最近两次运行")
+    parser.add_argument("--ablate", action="store_true",
+                        help="消融实验：graph_only vs hybrid side-by-side 对比")
     args = parser.parse_args()
 
     if args.compare:
@@ -443,6 +492,10 @@ async def main() -> None:
         return
 
     top_k = args.top_k if args.top_k and args.top_k > 0 else 5
+
+    if args.ablate:
+        await ablate(top_k)
+        return
 
     # 先校验 golden 集（文件缺失/结构非法时立即报错退出）
     load_golden()
