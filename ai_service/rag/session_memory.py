@@ -73,35 +73,8 @@ class SessionMemoryService:
             return 0
         identity = _normalize_identity(identity)
         source = _session_source(identity)
-        new_count = 0
         async with async_session_factory() as session:
-            # 查现有 content_hash，完全重复跳过（幂等，防重复保存堆积）
-            existing_hashes = set()
-            try:
-                rows = await session.execute(
-                    select(Document.content_hash).where(Document.source == source)
-                )
-                existing_hashes = {r[0] for r in rows.all() if r[0]}
-            except Exception as e:
-                logger.warning("会话去重检索失败，忽略幂等: %s", e)
-            for msg in messages:
-                role = str(msg.get("role") or "").strip()
-                content = str(msg.get("content") or "").strip()
-                if not content:
-                    continue
-                digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-                if digest in existing_hashes:
-                    continue
-                session.add(Document(
-                    title=f"session:{role}" if role else "session",
-                    content=content,
-                    source=source,
-                    embedding=None,
-                    parent_id=None,
-                    content_hash=digest,
-                ))
-                existing_hashes.add(digest)
-                new_count += 1
+            new_count = await self._ingest_messages(session, source, messages)
             if new_count:
                 try:
                     await session.commit()
@@ -114,6 +87,51 @@ class SessionMemoryService:
             except Exception as e:
                 logger.warning("会话上限清理失败（降级）: %s", e)
         logger.info("会话持久化: identity=%s, new=%d", identity, new_count)
+        return new_count
+
+    async def _ingest_messages(
+        self, session, source: str, messages: list[dict],
+    ) -> int:
+        """查重后写入会话消息到 session，返回新写入条数
+
+        content_hash 去重：先查当前 source 下已有 hash，完全重复跳过（幂等）。
+        每消息构造 Document（无 embedding，id 升序恢复）。
+
+        Args:
+            session: 数据库会话
+            source: 会话记忆 source 字符串
+            messages: 会话消息列表 [{"role": "user"|"assistant", "content": str}, ...]
+
+        Returns:
+            新写入的消息条数
+        """
+        existing_hashes = set()
+        try:
+            rows = await session.execute(
+                select(Document.content_hash).where(Document.source == source)
+            )
+            existing_hashes = {r[0] for r in rows.all() if r[0]}
+        except Exception as e:
+            logger.warning("会话去重检索失败，忽略幂等: %s", e)
+        new_count = 0
+        for msg in messages:
+            role = str(msg.get("role") or "").strip()
+            content = str(msg.get("content") or "").strip()
+            if not content:
+                continue
+            digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            if digest in existing_hashes:
+                continue
+            session.add(Document(
+                title=f"session:{role}" if role else "session",
+                content=content,
+                source=source,
+                embedding=None,
+                parent_id=None,
+                content_hash=digest,
+            ))
+            existing_hashes.add(digest)
+            new_count += 1
         return new_count
 
     async def _trim(self, session, source: str) -> None:

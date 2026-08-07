@@ -667,8 +667,8 @@ class MemoryService:
             ]
             if not docs:
                 return 0.0
-            docs.sort(key=lambda d: d["abs_cosine"], reverse=True)
-            return sum(d["abs_cosine"] for d in docs) / len(docs)
+            docs.sort(key=lambda d: d.get("abs_cosine", 0.0), reverse=True)
+            return sum(d.get("abs_cosine", 0.0) for d in docs) / len(docs)
         return sum(
             d.get("hybrid_score", d.get("score", 0.0)) for d in docs
         ) / len(docs)

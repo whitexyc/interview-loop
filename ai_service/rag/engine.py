@@ -287,7 +287,7 @@ class RAGEngine:
                 message="internal_error" if not settings.debug else f"error: {e}",
             )
 
-    async def _recall_memory(self, query: str, identity: str, top_k: int = 3) -> str:
+    async def _recall_memory(self, query: str, identity: str, top_k: int = 5) -> str:
         """召回长期记忆 + 短期记忆并格式化为生成 prompt 片段
 
         module-023/033：长期记忆（"历史记忆"段，'[长期记忆 - YYYY-MM-DD]：内容'）。
