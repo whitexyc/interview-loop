@@ -113,17 +113,29 @@ def _hit_stream(gen_capture, memory_text="", recall_calls=None, classify_intent=
                                                     side_effect=lambda identity, h: h)):
                                     with mock.patch("rag.engine.rag_engine._schedule_session_persist",
                                                     new=mock.MagicMock()):
-                                        transport = httpx.ASGITransport(
-                                            app=main.app, raise_app_exceptions=True)
-                                        async with httpx.AsyncClient(
-                                                transport=transport, base_url="http://test") as client:
-                                            resp = await client.post(
-                                                "/ai/rag/chat/stream",
-                                                headers={"X-Forwarded-For": xff} if xff else {},
-                                                json={"query": "回答风格", "history": []},
-                                            )
-                                        events.extend(_parse_sse(resp.content))
-                                        status = resp.status_code
+                                        with mock.patch("agent.reflector.reflector.verify_answer",
+                                                        new=mock.AsyncMock(return_value={
+                                                            "claims": [
+                                                                {"claim": "测试", "verdict": "supported",
+                                                                 "evidence": "[1]"},
+                                                            ],
+                                                            "overall_confidence": 1.0,
+                                                            "total_claims": 1,
+                                                            "supported": 1,
+                                                            "inferred": 0,
+                                                            "unsupported": 0,
+                                                        })):
+                                            transport = httpx.ASGITransport(
+                                                app=main.app, raise_app_exceptions=True)
+                                            async with httpx.AsyncClient(
+                                                    transport=transport, base_url="http://test") as client:
+                                                resp = await client.post(
+                                                    "/ai/rag/chat/stream",
+                                                    headers={"X-Forwarded-For": xff} if xff else {},
+                                                    json={"query": "回答风格", "history": []},
+                                                )
+                                            events.extend(_parse_sse(resp.content))
+                                            status = resp.status_code
         if recall_calls is not None:
             recall_calls.extend(recall.call_args_list)
     # module-033：mock 后台记忆自动写入（fire-and-forget 任务），避免真实 LLM 提取
@@ -144,8 +156,8 @@ class TestChatStreamMemoryInjection:
         assert gen.calls, "generate_answer_stream 应被调用"
         assert gen.calls[0]["memory"] == memory_text
         assert gen.calls[0]["query"] == "回答风格"
-        # SSE 事件格式不变：step/token/done 完整
-        assert [e["event"] for e in events] == ["step", "step", "step", "step", "token", "token", "done"]
+        # SSE 事件格式：step/token/verified/done 完整（module-039: 新增 verified 事件）
+        assert [e["event"] for e in events] == ["step", "step", "step", "step", "token", "token", "verified", "done"]
 
     def test_empty_memory_zero_regression(self):
         """无记忆：memory 为空串，生成照常（零回归）"""

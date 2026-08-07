@@ -30,6 +30,7 @@ import type {
   DocumentListResponse,
   ToolCallEvent,
   ToolResultEvent,
+  VerifiedClaim,
 } from '../types/rag';
 import type { ApiResponse } from '../types/api';
 
@@ -90,6 +91,7 @@ export async function chatStream(
   let buffer = '';
   let answer = '';
   let sources: { id: number; title: string; content: string; source: string; ref_index: number }[] = [];
+  let verifiedClaims: { claims: VerifiedClaim[]; overall_confidence: number; total_claims: number; supported: number; inferred: number; unsupported: number } | null = null;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -128,6 +130,19 @@ export async function chatStream(
             continue;
           }
 
+          // verified event: claims + overall_confidence + counts (module-039)
+          if (Array.isArray(parsed.claims)) {
+            verifiedClaims = {
+              claims: parsed.claims,
+              overall_confidence: parsed.overall_confidence ?? 0,
+              total_claims: parsed.total_claims ?? 0,
+              supported: parsed.supported ?? 0,
+              inferred: parsed.inferred ?? 0,
+              unsupported: parsed.unsupported ?? 0,
+            };
+            continue;
+          }
+
           // error event
           if (parsed.message && !parsed.step) {
             throw new Error(parsed.message);
@@ -143,6 +158,7 @@ export async function chatStream(
     answer,
     sources,
     message: 'ok',
+    verified_claims: verifiedClaims,
   } as ChatResponse;
 }
 

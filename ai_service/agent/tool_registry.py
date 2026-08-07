@@ -12,9 +12,9 @@ Agent 工具注册表 — ToolRegistry（module-028）
      故全局单例 registry 可被多会话并发复用，无共享可变状态。
   2. 工具失败由 AgentTool.run 统一捕获返回空串（降级哲学），
      LLM 自行判断是继续检索还是如实告知用户。
-  3. 内置 7 个工具：
+  3. 内置 8 个工具：
      search_knowledge / search_fts / search_vector / search_graph /
-     extract_entities / recall_memory / generate_answer
+     extract_entities / recall_memory / generate_answer / verify_answer
 """
 import json
 import logging
@@ -202,6 +202,27 @@ async def _generate_answer(ctx, args: dict) -> str:
     )
 
 
+async def _verify_answer(ctx, args: dict) -> str:
+    """逐句验证已生成答案是否被检索文档支持，标注可信度（module-039）"""
+    answer = args.get("answer")
+    if not answer:
+        return "（未提供答案文本，无法验证）"
+    if not ctx.docs:
+        return "（无检索文档，无法验证答案可信度；请先检索）"
+    result = await reflector.verify_answer(answer, ctx.docs)
+    if not result.get("claims"):
+        return "（验证失败，无法判定答案可信度）"
+    lines = []
+    for c in result["claims"]:
+        verdict_icon = {"supported": "✓", "inferred": "~", "unsupported": "✗"}.get(
+            c.get("verdict", ""), "?"
+        )
+        lines.append(f"[{verdict_icon}] {c.get('verdict')}: {c.get('claim')} (证据: {c.get('evidence')})")
+    lines.append(f"\n整体置信度: {result.get('overall_confidence', 0):.0%}")
+    lines.append(f"supported={result.get('supported', 0)} inferred={result.get('inferred', 0)} unsupported={result.get('unsupported', 0)}")
+    return "\n".join(lines)
+
+
 # ─── 内置工具注册 ───
 
 _SEARCH_SCHEMA = {
@@ -234,9 +255,18 @@ _ANSWER_SCHEMA = {
     "required": ["query"],
 }
 
+_VERIFY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "query": {"type": "string", "description": "原始用户问题"},
+        "answer": {"type": "string", "description": "待验证的答案文本（通常由 generate_answer 产出）"},
+    },
+    "required": ["answer"],
+}
+
 
 def register_builtin_tools(reg: Optional[ToolRegistry] = None) -> ToolRegistry:
-    """注册 7 个内置工具到注册表（默认全局 registry）
+    """注册 8 个内置工具到注册表（默认全局 registry）
 
     Args:
         reg: 目标注册表（测试可传入独立实例），None 用全局 registry
@@ -279,6 +309,11 @@ def register_builtin_tools(reg: Optional[ToolRegistry] = None) -> ToolRegistry:
         "generate_answer",
         "基于本次已检索到的全部文档生成带引用标注的最终答案。",
         _ANSWER_SCHEMA, _generate_answer,
+    )
+    reg.register(
+        "verify_answer",
+        "逐句验证已生成的答案是否被检索文档支持，标注每句的可信度（supported/inferred/unsupported），返回置信度。",
+        _VERIFY_SCHEMA, _verify_answer,
     )
     return reg
 

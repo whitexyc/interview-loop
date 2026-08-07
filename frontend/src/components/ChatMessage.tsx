@@ -24,7 +24,7 @@
  */
 import { Typography } from 'antd';
 import { LikeOutlined, DislikeOutlined } from '@ant-design/icons';
-import type { SourceItem } from '../types/rag';
+import type { SourceItem, VerifiedClaim } from '../types/rag';
 
 interface ChatMessageProps {
   role: 'user' | 'assistant';
@@ -39,6 +39,15 @@ interface ChatMessageProps {
   feedbackRating?: 'up' | 'down' | null;
   /** 反馈回调 */
   onFeedback?: (messageIndex: number, rating: 'up' | 'down') => void;
+  /** 证据链验证结果（module-039；无验证数据时退化纯文本） */
+  verifiedClaims?: {
+    claims: VerifiedClaim[];
+    overall_confidence: number;
+    total_claims: number;
+    supported: number;
+    inferred: number;
+    unsupported: number;
+  } | null;
 }
 
 /**
@@ -85,6 +94,12 @@ function parseCitations(
   return parts;
 }
 
+/** 从 evidence 字段提取引用编号（如 "[1]" → 1） */
+function parseEvidenceRef(evidence: string): number | null {
+  const m = evidence.match(/^\[(\d+)\]$/);
+  return m ? Number.parseInt(m[1], 10) : null;
+}
+
 export default function ChatMessage({
   role,
   content,
@@ -94,6 +109,7 @@ export default function ChatMessage({
   isStreaming,
   feedbackRating,
   onFeedback,
+  verifiedClaims,
 }: ChatMessageProps) {
   const isUser = role === 'user';
 
@@ -220,6 +236,128 @@ export default function ChatMessage({
                   animation: 'blink-cursor 0.8s infinite',
                 }}
               />
+            )}
+            {/* 证据链验证面板（module-039：逐句可信度 + 整体置信度进度条） */}
+            {!isUser && !isStreaming && verifiedClaims && verifiedClaims.claims.length > 0 && (
+              <div
+                style={{
+                  marginTop: 12,
+                  paddingTop: 10,
+                  borderTop: '1px solid #e2e8f0',
+                }}
+              >
+                <Typography.Text
+                  style={{ fontSize: 12, fontWeight: 600, color: '#64748b', display: 'block', marginBottom: 6 }}
+                >
+                  可信度验证
+                </Typography.Text>
+                {verifiedClaims.claims.map((claim, i) => {
+                  const isSupported = claim.verdict === 'supported';
+                  const isInferred = claim.verdict === 'inferred';
+                  const color = isSupported ? '#16a34a' : isInferred ? '#ca8a04' : '#dc2626';
+                  const badge = isSupported ? '✓' : isInferred ? '~' : '✗';
+                  const bg = isSupported ? '#f0fdf4' : isInferred ? '#fefce8' : '#fef2f2';
+                  const refNum = parseEvidenceRef(claim.evidence);
+                  return (
+                    <div
+                      key={i}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'baseline',
+                        gap: 6,
+                        marginBottom: 3,
+                        fontSize: 13,
+                        lineHeight: 1.6,
+                        padding: '2px 6px',
+                        borderRadius: 4,
+                        background: bg,
+                      }}
+                    >
+                      <span
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          width: 18,
+                          height: 18,
+                          borderRadius: 9,
+                          background: color,
+                          color: '#fff',
+                          fontSize: 11,
+                          fontWeight: 700,
+                          flexShrink: 0,
+                        }}
+                        title={claim.verdict}
+                      >
+                        {badge}
+                      </span>
+                      <span style={{ color: '#0f172a' }}>{claim.claim}</span>
+                      {refNum !== null && onCitationClick && (
+                        <span
+                          style={{
+                            display: 'inline-block',
+                            padding: '0 4px',
+                            fontSize: 11,
+                            background: '#dbeafe',
+                            color: '#1e40af',
+                            border: '1px solid #93c5fd',
+                            borderRadius: 3,
+                            cursor: 'pointer',
+                            lineHeight: '16px',
+                            flexShrink: 0,
+                            transition: 'all 0.15s ease',
+                          }}
+                          onClick={(e) => { e.stopPropagation(); onCitationClick(refNum); }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.background = '#bfdbfe';
+                            e.currentTarget.style.borderColor = '#60a5fa';
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.background = '#dbeafe';
+                            e.currentTarget.style.borderColor = '#93c5fd';
+                          }}
+                        >
+                          [{refNum}]
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+                {/* 整体置信度进度条 */}
+                <div style={{ marginTop: 8 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
+                    <Typography.Text style={{ fontSize: 11, color: '#94a3b8' }}>
+                      supported={verifiedClaims.supported} inferred={verifiedClaims.inferred} unsupported={verifiedClaims.unsupported}
+                    </Typography.Text>
+                    <Typography.Text style={{ fontSize: 11, fontWeight: 600, color: '#0f172a' }}>
+                      {Math.round(verifiedClaims.overall_confidence * 100)}% 可信
+                    </Typography.Text>
+                  </div>
+                  <div
+                    style={{
+                      width: '100%',
+                      height: 5,
+                      background: '#f1f5f9',
+                      borderRadius: 3,
+                      overflow: 'hidden',
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: `${Math.round(verifiedClaims.overall_confidence * 100)}%`,
+                        height: '100%',
+                        background: verifiedClaims.overall_confidence >= 0.8
+                          ? 'linear-gradient(90deg, #16a34a, #22c55e)'
+                          : verifiedClaims.overall_confidence >= 0.5
+                            ? 'linear-gradient(90deg, #ca8a04, #eab308)'
+                            : 'linear-gradient(90deg, #dc2626, #ef4444)',
+                        borderRadius: 3,
+                        transition: 'width 0.3s ease',
+                      }}
+                    />
+                  </div>
+                </div>
+              </div>
             )}
             {/* 引用来源列表（气泡底部） */}
             {sources && sources.length > 0 && (

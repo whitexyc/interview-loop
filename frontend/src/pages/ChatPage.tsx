@@ -249,7 +249,7 @@ export default function ChatPage() {
         const updated = [...prev];
         const lastIdx = updated.length - 1;
         if (lastIdx >= 0 && updated[lastIdx].role === 'assistant') {
-          updated[lastIdx] = { ...updated[lastIdx], sources: data.sources };
+          updated[lastIdx] = { ...updated[lastIdx], sources: data.sources, verifiedClaims: data.verified_claims };
         }
         return updated;
       });
@@ -325,7 +325,7 @@ export default function ChatPage() {
         const updated = [...prev];
         const lastIdx = updated.length - 1;
         if (lastIdx >= 0 && updated[lastIdx].role === 'assistant') {
-          updated[lastIdx] = { ...updated[lastIdx], sources: data.sources };
+          updated[lastIdx] = { ...updated[lastIdx], sources: data.sources, verifiedClaims: data.verified_claims };
         }
         return updated;
       });
@@ -551,6 +551,7 @@ export default function ChatPage() {
                 role={msg.role}
                 content={msg.content}
                 sources={msg.sources}
+                verifiedClaims={msg.verifiedClaims}
                 onCitationClick={handleCitationClick}
                 messageIndex={i}
                 isStreaming={isStreaming}

@@ -30,6 +30,7 @@
   4. 生成 prompt 包含历史对话（history 参数），支持多轮追问。
      这是后来加的特性，最初 generate_answer 只接受当前 query。
 """
+import asyncio
 import json
 import logging
 from typing import AsyncGenerator, Optional
@@ -59,6 +60,29 @@ _CHECK_PROMPT = """你是一个严格的答案质量检查员，倾向于使用�
 如果文档信息不充分，返回: {{"sufficient": false, "reason": "...", "rewritten_query": "改写的搜索关键词"}}
 
 只返回 JSON，不要其他文字。"""
+
+# 验证 prompt：逐句检查答案是否被检索文档支持
+# 要求 LLM 拆解答案→逐条标注 supported/inferred/unsupported→返回 JSON 数组。
+# 用于模块 module-039 证据链幻觉检测。
+_VERIFY_PROMPT = """你是 RAG 系统的答案验证专家。检查以下答案是否被检索文档支持。
+
+## 检索文档
+{docs_text}
+
+## 待验证答案
+{answer}
+
+## 任务
+1. 把答案拆成独立的陈述句（claims），每条 1-2 句话
+2. 对每条陈述判断：
+   - "supported": 文档中有直接文字依据
+   - "inferred": 没有直接文字，但可以从文档合理推断
+   - "unsupported": 文档中找不到依据
+3. 对 supported/inferred，填写 evidence 字段（关联文档编号，如 "[1]"）
+4. unsupported 的 evidence 填 "N/A"
+5. 只返回 JSON 数组，不要其他文字
+
+格式：[{{"claim": "...", "verdict": "supported|inferred|unsupported", "evidence": "[1]"}}]"""
 
 # 生成 prompt：基于检索文档生成回答
 # 要求 LLM 用 [1][2] 格式标注引用来源，这是 RAG 答案"可溯源"的关键。
@@ -245,6 +269,114 @@ class Reflector:
         except Exception as e:
             logger.error("流式答案生成失败: %s", e)
             yield "抱歉，回答生成时遇到问题，请稍后重试。"
+
+    async def verify_answer(self, answer: str, docs: list[dict]) -> dict:
+        """逐句验证答案是否被检索文档支持（证据链幻觉检测，module-039）
+
+        把 LLM 生成的答案拆成逐条陈述（claims），标注每条的
+        supported/inferred/unsupported 判定，计算整体置信度。
+
+        Args:
+            answer: LLM 生成的答案文本（含 [N] 引用标记）
+            docs: 检索到的文档列表（含 id/title/content）
+
+        Returns:
+            {
+                "claims": [{"claim": str, "verdict": str, "evidence": str}, ...],
+                "overall_confidence": float (0.0-1.0),
+                "total_claims": int,
+                "supported": int, "inferred": int, "unsupported": int,
+            }
+            验证失败或无文档时返回空 claims（claims=[], overall_confidence=0.0,
+            total_claims=0, supported=0, inferred=0, unsupported=0）
+        """
+        empty_result = {
+            "claims": [],
+            "overall_confidence": 0.0,
+            "total_claims": 0,
+            "supported": 0,
+            "inferred": 0,
+            "unsupported": 0,
+        }
+        if not docs:
+            return empty_result
+        if not answer or not answer.strip():
+            return empty_result
+
+        try:
+            # 组装完整文档内容（非截断——验证需要全文上下文判断依据）
+            docs_text = "\n\n".join(
+                f"[{i + 1}] {d.get('title', '')}\n来源: {d.get('source', '')}\n内容: {d.get('content', '')}"
+                for i, d in enumerate(docs)
+            )
+            client = LLMFactory.get_client(self._provider, temperature=0)
+            prompt = _VERIFY_PROMPT.format(docs_text=docs_text, answer=answer)
+            response = await asyncio.wait_for(client.generate(prompt), timeout=15)
+            claims = self._parse_verification(response)
+
+            # 校验 evidence 引用号：越界则降级为 unsupported
+            doc_count = len(docs)
+            for c in claims:
+                evidence = c.get("evidence", "")
+                ref_match = None
+                if evidence and evidence.startswith("[") and evidence.endswith("]"):
+                    try:
+                        ref_match = int(evidence[1:-1])
+                    except ValueError:
+                        pass
+                if ref_match is not None and (ref_match < 1 or ref_match > doc_count):
+                    c["verdict"] = "unsupported"
+                    c["evidence"] = "N/A"
+
+            supported = sum(1 for c in claims if c.get("verdict") == "supported")
+            inferred = sum(1 for c in claims if c.get("verdict") == "inferred")
+            unsupported = sum(1 for c in claims if c.get("verdict") == "unsupported")
+            total = len(claims)
+            overall_confidence = 1.0 - (unsupported / total) if total > 0 else 0.0
+
+            logger.info(
+                "验证完成: total=%d, supported=%d, inferred=%d, unsupported=%d, confidence=%.2f",
+                total, supported, inferred, unsupported, overall_confidence,
+            )
+            return {
+                "claims": claims,
+                "overall_confidence": round(overall_confidence, 4),
+                "total_claims": total,
+                "supported": supported,
+                "inferred": inferred,
+                "unsupported": unsupported,
+            }
+        except asyncio.TimeoutError:
+            logger.warning("verify_answer 超时 (15s)，返回空 claims")
+            return empty_result
+        except Exception as e:
+            logger.warning("verify_answer 失败，返回空 claims: %s", e)
+            return empty_result
+
+    @staticmethod
+    def _parse_verification(response: str) -> list[dict]:
+        """解析 LLM 返回的验证 JSON 数组
+
+        与 _parse_check 类似，处理 LLM 输出中的非 JSON 杂质。
+        """
+        try:
+            start = response.find("[")
+            end = response.rfind("]")
+            if start != -1 and end != -1 and end > start:
+                parsed = json.loads(response[start:end + 1])
+                if isinstance(parsed, list):
+                    return [
+                        {
+                            "claim": item.get("claim", ""),
+                            "verdict": item.get("verdict", "unsupported"),
+                            "evidence": item.get("evidence", "N/A"),
+                        }
+                        for item in parsed
+                        if isinstance(item, dict) and item.get("claim")
+                    ]
+        except (json.JSONDecodeError, ValueError, TypeError) as e:
+            logger.warning("解析验证结果失败: %s", e)
+        return []
 
     @staticmethod
     def _parse_check(response: str) -> dict:

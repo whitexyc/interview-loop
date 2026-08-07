@@ -261,6 +261,8 @@ class RAGEngine:
             answer = await reflector.generate_answer(
                 request.query, docs, history=effective_history, memory=memory_text,
             )
+            # module-039：证据链验证——逐句检查答案是否被检索文档支持
+            verified = await reflector.verify_answer(answer, docs)
             # module-033：knowledge 路径生成答案后异步触发长期记忆自动写入
             #（fire-and-forget，不阻塞响应；casual_chat/realtime 已在分支提前返回）
             self._schedule_persist(request, answer, identity)
@@ -277,13 +279,14 @@ class RAGEngine:
                     "ref_index": i + 1,
                 })
 
-            return ChatResponse(answer=answer, sources=sources, message="ok")
+            return ChatResponse(answer=answer, sources=sources, verified_claims=verified, message="ok")
 
         except Exception as e:
             logger.error("RAG chat 失败: %s", e, exc_info=True)
             return ChatResponse(
                 answer="抱歉，我暂时无法回答这个问题，请稍后重试。",
                 sources=[],
+                verified_claims=None,
                 message="internal_error" if not settings.debug else f"error: {e}",
             )
 

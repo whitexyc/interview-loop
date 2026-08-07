@@ -85,12 +85,12 @@ class TestToolRegistry:
         names = registry.list_tool_names()
         assert names == [
             "search_knowledge", "search_fts", "search_vector", "search_graph",
-            "extract_entities", "recall_memory", "generate_answer",
+            "extract_entities", "recall_memory", "generate_answer", "verify_answer",
         ]
 
     def test_to_llm_schemas_format(self):
         schemas = registry.to_llm_schemas()
-        assert len(schemas) == 7
+        assert len(schemas) == 8
         for s in schemas:
             assert s["type"] == "function"
             fn = s["function"]
@@ -118,7 +118,77 @@ class TestToolRegistry:
     def test_register_builtin_tools_into_custom_registry(self):
         reg = ToolRegistry()
         register_builtin_tools(reg)
-        assert len(reg.list_tools()) == 7
+        assert len(reg.list_tools()) == 8
+
+    def test_verify_answer_tool_registered(self):
+        """verify_answer 已注册为第 8 个 Agent 工具"""
+        tool = registry.get("verify_answer")
+        assert tool is not None
+        assert tool.name == "verify_answer"
+        assert "逐句验证" in tool.description
+        # _VERIFY_SCHEMA 含 query + answer
+        props = tool.args_schema.get("properties", {})
+        assert "answer" in props
+        assert "query" in props
+
+    def test_verify_answer_tool_executes(self):
+        """verify_answer 工具执行：传入 ctx.docs + answer → 返回格式化可信度文本"""
+        from agent.react import ReactContext
+
+        async def run():
+            ctx = ReactContext("线程池问题", "user-1", [])
+            ctx.add_docs([_doc(1), _doc(2)])
+            tool = registry.get("verify_answer")
+            with mock.patch(
+                "agent.tool_registry.reflector.verify_answer",
+                new=mock.AsyncMock(return_value={
+                    "claims": [
+                        {"claim": "c1", "verdict": "supported", "evidence": "[1]"},
+                        {"claim": "c2", "verdict": "unsupported", "evidence": "N/A"},
+                    ],
+                    "overall_confidence": 0.5,
+                    "total_claims": 2,
+                    "supported": 1,
+                    "inferred": 0,
+                    "unsupported": 1,
+                }),
+            ):
+                result = await tool.run({"answer": "答案文本", "query": "线程池"}, ctx)
+            return result
+
+        result = asyncio.run(run())
+        assert "[✓]" in result
+        assert "[✗]" in result
+        assert "50%" in result
+        assert "supported=1" in result
+        assert "unsupported=1" in result
+
+    def test_verify_answer_tool_no_docs(self):
+        """verify_answer 工具无 ctx.docs → 返回提示信息"""
+        from agent.react import ReactContext
+
+        async def run():
+            ctx = ReactContext("无文档问题", "user-1", [])
+            tool = registry.get("verify_answer")
+            result = await tool.run({"answer": "答案", "query": "问题"}, ctx)
+            return result
+
+        result = asyncio.run(run())
+        assert "无法验证" in result
+
+    def test_verify_answer_tool_no_answer(self):
+        """verify_answer 工具未提供 answer → 返回提示信息"""
+        from agent.react import ReactContext
+
+        async def run():
+            ctx = ReactContext("问题", "user-1", [])
+            ctx.add_docs([_doc(1)])
+            tool = registry.get("verify_answer")
+            result = await tool.run({}, ctx)
+            return result
+
+        result = asyncio.run(run())
+        assert "无法验证" in result
 
     def test_format_docs(self):
         text = _format_docs([_doc(1), _doc(2)], limit=1)

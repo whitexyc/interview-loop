@@ -43,6 +43,7 @@ class ChatResponse(BaseModel):
     sources: list[dict] = []
     message: str = ""
     steps: Optional[ChatSteps] = None
+    verified_claims: Optional[dict] = None  # module-039: 证据链验证结果
 
 
 class MemorySaveRequest(BaseModel):

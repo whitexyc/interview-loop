@@ -478,7 +478,15 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
             schedule_stream_persist(intent, request.query, "".join(answer_parts), identity, request.history)
             # module-034：会话持久化为主（异步写库，不阻塞 SSE 响应）
             rag_engine._schedule_session_persist(identity, request.query, "".join(answer_parts))
-            yield f"event: done\ndata: {json.dumps({'sources': sources})}\n\n"
+
+            # ====== Step 7: 证据链验证（module-039） ======
+            full_answer = "".join(answer_parts)
+            verified = await reflector.verify_answer(full_answer, docs)
+            if verified.get("claims"):
+                yield f"event: verified\ndata: {json.dumps({'claims': verified['claims'], 'overall_confidence': verified['overall_confidence'], 'total_claims': verified['total_claims'], 'supported': verified['supported'], 'inferred': verified['inferred'], 'unsupported': verified['unsupported']}, ensure_ascii=False)}\n\n"
+                yield f"event: done\ndata: {json.dumps({'sources': sources, 'verified': True, 'overall_confidence': verified['overall_confidence']})}\n\n"
+            else:
+                yield f"event: done\ndata: {json.dumps({'sources': sources, 'verified': False})}\n\n"
 
         except Exception as e:
             logger.error("流式问答失败: %s", e, exc_info=True)
