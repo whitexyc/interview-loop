@@ -252,11 +252,13 @@ async def run_faithfulness_eval(sample_size: int = 50, force_dataset: bool = Fal
             all_pairs = await _load_dataset_pairs(sample_size)
             data_source = "dataset"
         else:
-            logger.warning(
-                "session_memory 无数据。提示：加 --dataset 可使用 dataset.json "
-                "问题并全链路生成答案进行评估"
+            print(
+                "\n⚠️  session_memory 中无聊天数据，无法抽取问答对。\n"
+                "   原因：还没有通过 Chat 页面产生过对话记录（module-034 会话持久化）。\n"
+                "   解决：加 --dataset 可从 dataset.json 加载问题并实时生成答案评估：\n"
+                "     python -m eval.faithfulness --sample 5 --dataset\n"
             )
-            return {"error": "无会话记忆数据可评估（加 --dataset 可降级到 dataset.json）", "summary": {}, "per_question": []}
+            return {"error": "无会话记忆数据（加 --dataset 降级）", "summary": {}, "per_question": []}
 
     if len(all_pairs) > sample_size:
         all_pairs = random.sample(all_pairs, sample_size)
@@ -327,6 +329,8 @@ async def run_faithfulness_eval(sample_size: int = 50, force_dataset: bool = Fal
 
 def print_faithfulness_report(report: dict) -> None:
     """打印 faithfulness 评估报告到控制台"""
+    if report.get("error") and not report.get("per_question"):
+        return  # 报错信息已在 run_faithfulness_eval 中输出，跳过空表
     summary = report.get("summary", {})
     results = report.get("per_question", [])
     n = len(results)
