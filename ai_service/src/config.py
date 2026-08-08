@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     memory_session_max_messages: int = 50       # 每 identity 会话持久化消息上限（超限滚动删除最旧）
     memory_session_history_limit: int = 20      # 会话恢复注入生成的最近消息数
 
+    # 意图分类（module-043 L4）：true 时 router 尝试加载 bge-m3+逻辑回归分类器
+    #（模型缺失/加载失败自动回退 LLM 分类，零影响）；默认 false = 保持 LLM
+    intent_classifier_enabled: bool = False
+
     model_config = {"env_prefix": "PW_", "env_file": ".env"}
 
 

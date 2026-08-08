@@ -82,6 +82,10 @@ _RETRIEVE_BUDGET_SECONDS = 30.0  # 整链路检索总预算（秒），超预算
 _MIN_DOCS_SKIP_REFLECT = 3       # round 0 已收集文档数达到该值，跳过反思与后续轮次
 _HYDE_CACHE_TTL = 300            # HyDE 缓存 TTL（秒），与检索结果缓存一致
 
+# ── L3 后置校验（module-043 / ADR-0003）配置 ──
+_L3_ABS_COSINE_THRESHOLD = 0.3   # 精排 top-1 绝对余弦低于该值 → 疑似误判标记
+                                 #（复用 module-037 的 abs_cosine 字段口径）
+
 
 def _hyde_cache_key(query: str) -> str:
     """生成 HyDE 缓存键：仅由 query 决定，与检索结果缓存 key 独立
@@ -110,6 +114,27 @@ class RAGEngine:
     注意：本类不持有状态，所有请求都是独立的（无状态设计），
     方便横向扩展和测试。
     """
+
+    @staticmethod
+    def _check_suspected_misclassify(
+        docs: list[dict], threshold: float = _L3_ABS_COSINE_THRESHOLD,
+    ) -> bool:
+        """L3 后置校验：精排 top-1 绝对余弦 < 阈值 → 疑似误判
+
+        复用 module-037 的 abs_cosine 字段（d.get("abs_cosine", 0.0)）：
+        缺字段视为 0.0（无绝对语义匹配证据 → 保守标记）。
+        只度量不打干预：标记写入 ChatSteps，不改回答路径（先度量后干预）。
+
+        Args:
+            docs: 精排后的文档列表（首项为 top-1）
+            threshold: 绝对余弦阈值（默认 0.3）
+
+        Returns:
+            top-1 绝对余弦 < 阈值 → True；空列表 → False
+        """
+        if not docs:
+            return False
+        return (docs[0].get("abs_cosine") or 0.0) < threshold
 
     async def search(self, request: SearchRequest) -> SearchResponse:
         """知识库检索：混合检索 → Rerank
@@ -211,6 +236,9 @@ class RAGEngine:
             current_query = request.query
             all_docs: list[dict] = []
             seen_ids: set[int] = set()
+            # module-043 L3 后置校验：精排 top-1 绝对余弦 < 0.3 → 疑似误判标记
+            #（先度量后干预：只写入 ChatSteps 可观测，不阻塞、不改回答路径）
+            suspected_misclassify = False
 
             for round_num in range(3):
                 docs = await asyncio.wait_for(
@@ -218,6 +246,14 @@ class RAGEngine:
                     timeout=15,
                 )
                 docs = await reranker.rerank(current_query, docs, top_k=5)
+                if round_num == 0 and docs:
+                    top1_abs = docs[0].get("abs_cosine") or 0.0
+                    if top1_abs < _L3_ABS_COSINE_THRESHOLD:
+                        suspected_misclassify = True
+                        logger.info(
+                            "L3 反证: top-1 abs_cosine=%.3f < %.1f → suspected_misclassify, query=%s",
+                            top1_abs, _L3_ABS_COSINE_THRESHOLD, request.query[:50],
+                        )
                 for d in docs:
                     doc_id = d.get("id")
                     if doc_id and doc_id not in seen_ids:
@@ -279,7 +315,24 @@ class RAGEngine:
                     "ref_index": i + 1,
                 })
 
-            return ChatResponse(answer=answer, sources=sources, verified_claims=verified, message="ok")
+            # module-043 L3 后置校验：疑似误判标记写入 ChatSteps（可观测）。
+            # intent 段展示 L2 修正后的最终意图；retrieval 段带 top-1 绝对
+            # 余弦与疑似误判标记。旧字段不变，仅新增键（前端管线面板可见）。
+            steps = ChatSteps(
+                intent={
+                    "label": intent,
+                    "confidence": intent_result.get("confidence", 0.0),
+                },
+                retrieval={
+                    "count": len(docs),
+                    "top_abs_cosine": round(
+                        (docs[0].get("abs_cosine") or 0.0), 4) if docs else None,
+                    "suspected_misclassify": suspected_misclassify,
+                },
+            )
+
+            return ChatResponse(answer=answer, sources=sources, verified_claims=verified,
+                                message="ok", steps=steps)
 
         except Exception as e:
             logger.error("RAG chat 失败: %s", e, exc_info=True)

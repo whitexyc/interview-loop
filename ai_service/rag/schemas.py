@@ -6,7 +6,7 @@ from typing import Optional
 
 
 class SearchRequest(BaseModel):
-    query: str
+    query: str = Field(..., max_length=2000)
     top_k: int = 5
 
 
@@ -56,11 +56,11 @@ class ChatResponse(BaseModel):
 
 class MemorySaveRequest(BaseModel):
     """保存长期记忆请求体（module-023）"""
-    content: str
+    content: str = Field(..., max_length=2000)
     ip: str = "unknown"
 
 
 class MemoryRecallRequest(BaseModel):
     """检索长期记忆请求体（module-023）"""
-    query: str
+    query: str = Field(..., max_length=2000)
     ip: str = "unknown"

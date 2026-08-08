@@ -318,6 +318,15 @@ class HybridRetriever:
         if not fts_results and not vector_results:
             return []
 
+        # module-043 L3 后置校验数据：归一化前保存向量通道原始绝对余弦。
+        # pgvector 的 score = 1 - (embedding <=> query) = 绝对语义相似度；
+        # _normalize 会原地覆盖 score（min-max 相对分，跨查询不可比），
+        # 故先存档到 abs_cosine（module-037 同名字段口径，
+        # 下游 d.get("abs_cosine", 0.0) 读取）。仅 FTS 命中的文档无该字段，
+        # 由 L3 侧按 0.0 处理（无语义匹配证据 → 保守标记）。
+        for r in vector_results:
+            r["abs_cosine"] = r.get("score", 0.0)
+
         # Step 3: 分数归一化
         # FTS 的 ts_rank 分数和向量检索的 cosine 距离不在同一个量纲。
         # 直接加权平均没有意义，所以先各自归一化到 [0, 1]。
