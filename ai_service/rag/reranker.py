@@ -44,7 +44,10 @@ _DEFAULT_MODEL = _LOCAL_MODEL_DIR
 # 判断相关度，截断到前 500 字符即可（实测 2 pair ~2.1s，6 pair ~6s，
 # 分数与 1000 字符几乎一致：0.991 vs 0.989）。截断阈值越小，候选多时
 # 整体越快，代价是丢失文档中后段的匹配信号（对已检索候选的重排影响小）。
-_MAX_PAIR_CHARS = 500
+# 2026-08-09 调为 250（module-044 WP1 实测：250 vs 500 相关文档分数
+# 0.9907~0.9988 vs 0.9904~0.9993（差值 ≤0.002，噪声级）、6 pair 排序
+# 6/6 一致、耗时 5.455s vs 9.900s 降 45%——拐点比 500 更早，见 ADR-0004）。
+_MAX_PAIR_CHARS = 250
 
 
 class RerankerException(Exception):
@@ -136,7 +139,8 @@ class CrossEncoderReranker(Reranker):
         try:
             # 截断超长文档内容（性能修复）：CrossEncoder 按 batch 最长序列填充，
             # 超长父块（数千~数万字符）会把单次 rerank 拖到 ~200s。重排只需
-            # 判断相关度，前 1000 字符已含主要语义，截断后约 3.4s。
+            # 判断相关度，截断到 _MAX_PAIR_CHARS（module-044 实测采纳 250，
+            # 分数与 500 差 ≤0.002 噪声级、6 pair 耗时降 44.9%）。
             pairs = [
                 (query, (d.get("content") or "")[:_MAX_PAIR_CHARS])
                 for d in documents

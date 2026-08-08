@@ -209,6 +209,185 @@ class TestGenerateAnswerWithScratchpad:
         assert "[工作笔记" not in prompt
 
 
+class TestCheckSufficiencyGates:
+    """module-044: check_sufficiency 层 1 分数/数量硬闸门 + 层 2 prompt 强化 + 层 3 多信号融合
+
+    覆盖（验收 §1/§2/§5/§7，ADR-0005 层 1-3）：
+    - 分数闸门：top-1 abs_cosine < 0.4 → 直接不充分 + rewritten_query，零 LLM 调用
+    - 数量闸门：文档数 < 2 → 直接不充分 + rewritten_query，零 LLM 调用
+    - 达标走 LLM：≥0.4 → 才进 LLM 判模糊地带；LLM 判不充分 → 尊重语义走 rewritten_query
+    - prompt 结构：_CHECK_PROMPT 含 few-shot 正反例 + CoT 信息点比对步骤
+    - 自洽性检查：默认关（单次调用，零额外）；开启时两温度各判一次、不一致 → 保守充分
+    - 降级：abs_cosine 缺失 → 走 LLM（不误杀）；LLM 异常 → 默认充分（防死循环）
+
+    实现说明：与既有用例同风格——mock 打桩 LLMFactory.get_client，
+    asyncio.run 执行，不依赖 pytest-asyncio。
+    """
+
+    @staticmethod
+    def _sample_docs(top1_abs: float = 0.7):
+        """两篇带 abs_cosine 的文档（与 retriever 归一化前存档口径一致）"""
+        return [
+            {"id": 1, "title": "线程池基础",
+             "content": "线程池核心参数包括核心线程数、最大线程数、队列容量。",
+             "abs_cosine": top1_abs},
+            {"id": 2, "title": "线程池配置",
+             "content": "最大线程数根据CPU密集型任务设置为核心数的2倍。",
+             "abs_cosine": top1_abs - 0.1},
+        ]
+
+    def test_gate_top1_score_below_threshold_no_llm(self):
+        """层 1 分数闸门：top-1 abs_cosine=0.25 < 0.4 → 直接不充分，零 LLM 调用"""
+        async def run():
+            r = Reflector()
+            docs = self._sample_docs(top1_abs=0.25)
+            with mock.patch("llm.client.LLMFactory.get_client") as mock_get:
+                result = await r.check_sufficiency("线程池参数", docs)
+            return result, mock_get
+
+        result, mock_get = asyncio.run(run())
+        assert result["sufficient"] is False
+        assert result["rewritten_query"] == "线程池参数"
+        assert "0.4" in result["reason"]
+        mock_get.assert_not_called()  # 零 LLM 调用断言
+
+    def test_gate_fewer_than_two_docs_no_llm(self):
+        """层 1 数量闸门：只有 1 篇文档 → 直接不充分，零 LLM 调用"""
+        async def run():
+            r = Reflector()
+            docs = [self._sample_docs()[0]]
+            with mock.patch("llm.client.LLMFactory.get_client") as mock_get:
+                result = await r.check_sufficiency("线程池参数", docs)
+            return result, mock_get
+
+        result, mock_get = asyncio.run(run())
+        assert result["sufficient"] is False
+        assert result["rewritten_query"] == "线程池参数"
+        mock_get.assert_not_called()
+
+    def test_score_passes_gate_goes_llm(self):
+        """分数达标（0.7 ≥ 0.4）→ 才进 LLM 判模糊地带；LLM 判充分 → sufficient=true（零回归）"""
+        async def run():
+            r = Reflector()
+            docs = self._sample_docs(top1_abs=0.7)
+            client = mock.MagicMock()
+            client.generate = mock.AsyncMock(
+                return_value='{"sufficient": true, "reason": "文档覆盖核心参数"}')
+            with mock.patch("llm.client.LLMFactory.get_client",
+                            return_value=client) as mock_get:
+                result = await r.check_sufficiency("线程池参数", docs)
+            return result, mock_get, client
+
+        result, mock_get, client = asyncio.run(run())
+        assert result["sufficient"] is True
+        mock_get.assert_called_once()  # 自洽性默认关：恰好一次 LLM 调用（零额外）
+        client.generate.assert_called_once()
+
+    def test_llm_insufficient_respected_high_score(self):
+        """层 3 语义尊重：分数高但 LLM 判不充分 → 尊重语义走 rewritten_query（不强制充分）"""
+        async def run():
+            r = Reflector()
+            docs = self._sample_docs(top1_abs=0.7)
+            client = mock.MagicMock()
+            client.generate = mock.AsyncMock(return_value=json.dumps(
+                {"sufficient": False, "reason": "缺停顿时间预测模型",
+                 "rewritten_query": "G1 GC 停顿时间预测模型"}, ensure_ascii=False))
+            with mock.patch("llm.client.LLMFactory.get_client", return_value=client):
+                result = await r.check_sufficiency("G1 GC 停顿时间模型", docs)
+            return result
+
+        result = asyncio.run(run())
+        assert result["sufficient"] is False
+        assert result["rewritten_query"] == "G1 GC 停顿时间预测模型"
+
+    def test_prompt_has_few_shot_and_cot(self):
+        """层 2 prompt 强化：_CHECK_PROMPT 含 few-shot 正反例 + CoT 信息点比对步骤"""
+        from agent.reflector import _CHECK_PROMPT
+        # few-shot：充分/不充分正反例各 ≥1
+        assert "示例 1" in _CHECK_PROMPT and "示例 2" in _CHECK_PROMPT
+        # CoT：先列所需信息点，再逐点比对文档覆盖，再下结论
+        assert "信息点" in _CHECK_PROMPT
+        assert "判断步骤" in _CHECK_PROMPT
+        # 返回 JSON 结构不变（向后兼容）
+        assert '"sufficient": true' in _CHECK_PROMPT
+        assert '"sufficient": false' in _CHECK_PROMPT
+
+    def test_self_check_enabled_consistent_uses_result(self):
+        """自洽性开启：两次判断一致 → 采用判断结果（两温度各判一次）"""
+        async def run():
+            r = Reflector()
+            docs = self._sample_docs(top1_abs=0.7)
+            client = mock.MagicMock()
+            client.generate = mock.AsyncMock(
+                side_effect=['{"sufficient": true, "reason": "ok"}',
+                             '{"sufficient": true, "reason": "ok2"}'])
+            with mock.patch("llm.client.LLMFactory.get_client", return_value=client):
+                with mock.patch(
+                        "agent.reflector.settings.sufficiency_self_check_enabled",
+                        True):
+                    result = await r.check_sufficiency("线程池参数", docs)
+            return result, client
+
+        result, client = asyncio.run(run())
+        assert result["sufficient"] is True
+        assert client.generate.call_count == 2  # 两温度各判一次
+
+    def test_self_check_enabled_disagree_conservative_sufficient(self):
+        """自洽性开启：两次判断不一致 → 保守判充分（防漏检，防死循环哲学）"""
+        async def run():
+            r = Reflector()
+            docs = self._sample_docs(top1_abs=0.7)
+            client = mock.MagicMock()
+            client.generate = mock.AsyncMock(
+                side_effect=['{"sufficient": true, "reason": "ok"}',
+                             '{"sufficient": false, "reason": "no", "rewritten_query": "q"}'])
+            with mock.patch("llm.client.LLMFactory.get_client", return_value=client):
+                with mock.patch(
+                        "agent.reflector.settings.sufficiency_self_check_enabled",
+                        True):
+                    result = await r.check_sufficiency("线程池参数", docs)
+            return result, client
+
+        result, client = asyncio.run(run())
+        assert result["sufficient"] is True
+        assert client.generate.call_count == 2
+
+    def test_degrade_missing_abs_cosine_goes_llm(self):
+        """降级：abs_cosine 字段缺失（如仅 FTS 命中）→ 不误杀，继续走 LLM"""
+        async def run():
+            r = Reflector()
+            docs = [
+                {"id": 1, "title": "T1", "content": "内容1"},
+                {"id": 2, "title": "T2", "content": "内容2"},
+            ]  # 无 abs_cosine 字段
+            client = mock.MagicMock()
+            client.generate = mock.AsyncMock(
+                return_value='{"sufficient": true, "reason": "ok"}')
+            with mock.patch("llm.client.LLMFactory.get_client",
+                            return_value=client) as mock_get:
+                result = await r.check_sufficiency("线程池参数", docs)
+            return result, mock_get
+
+        result, mock_get = asyncio.run(run())
+        assert result["sufficient"] is True
+        mock_get.assert_called_once()
+
+    def test_degrade_llm_exception_conservative_sufficient(self):
+        """降级：LLM 异常 → 默认充分（防死循环，现有行为保留）"""
+        async def run():
+            r = Reflector()
+            docs = self._sample_docs(top1_abs=0.7)
+            client = mock.MagicMock()
+            client.generate = mock.AsyncMock(side_effect=RuntimeError("LLM 不可用"))
+            with mock.patch("llm.client.LLMFactory.get_client", return_value=client):
+                result = await r.check_sufficiency("线程池参数", docs)
+            return result
+
+        result = asyncio.run(run())
+        assert result["sufficient"] is True
+        assert "默认通过" in result["reason"]
+
+
 class TestParseVerification:
     """_parse_verification JSON 解析健壮性"""
 

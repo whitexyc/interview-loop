@@ -36,12 +36,19 @@ import logging
 from typing import AsyncGenerator, Optional
 
 from llm.client import LLMFactory
+from src.config import settings
 
 logger = logging.getLogger(__name__)
+
+# ── 层 1 分数/数量硬闸门阈值（ADR-0005，module-044）──
+_SUFFICIENCY_MIN_DOCS = 2          # 文档数 < 2 → 直接判不充分（零 LLM）
+_SUFFICIENCY_MIN_ABS_COSINE = 0.4  # top-1 绝对余弦 < 0.4 → 直接判不充分（零 LLM）
 
 # 反思 prompt：判断检索结果是否充分
 # 要求 LLM 输出 JSON，包含 sufficient（是否充分）和 rewritten_query（改写后的查询）。
 # 如果不充分，rewritten_query 会被用于二次检索。
+# module-044（ADR-0005 层 2）强化：CoT 信息点比对（先列所需信息点，再逐点比对
+# 文档覆盖，再下结论）+ few-shot 充分/不充分正反例。返回 JSON 结构不变（向后兼容）。
 _CHECK_PROMPT = """你是一个严格的答案质量检查员，倾向于使用已有文档。
 只有在现有文档完全无法回答问题时才判定不充分。
 
@@ -50,11 +57,28 @@ _CHECK_PROMPT = """你是一个严格的答案质量检查员，倾向于使用�
 检索到的文档摘要:
 {docs_summary}
 
+判断步骤（严格按顺序执行，先比对后下结论）：
+1. 列出回答该问题需要的信息点（如关键概念、原理、数据、对比维度等），至少 2 个
+2. 逐点比对上面对应的文档编号，标记"已覆盖 / 部分覆盖 / 未覆盖"
+3. 根据覆盖情况综合下结论：关键信息点缺失或文档与问题完全不相关 → 不充分；否则充分
+
 规则（严格遵守）：
 1. 如果文档内容与问题部分相关、间接相关、或能提供部分信息 → sufficient=true
 2. 即使文档没有直接给出答案，但只要包含相关的背景知识 → sufficient=true
 3. 只有文档内容与问题完全无关（完全不沾边）才 → sufficient=false
 4. 默认倾向 sufficient=true，宁可使用不完美的文档也不要空跑二次检索
+
+示例 1（充分）：
+用户问题: "Java 线程池的核心参数有哪些？"
+文档摘要: "[1] 线程池核心参数包括核心线程数、最大线程数、队列容量等"
+信息点比对: "核心参数列举" → [1] 已覆盖 → 可直接回答
+返回: {{"sufficient": true, "reason": "文档[1]直接覆盖线程池核心参数信息点"}}
+
+示例 2（不充分）：
+用户问题: "G1 GC 的停顿时间预测模型是怎样的？"
+文档摘要: "[1] G1 GC 是面向服务端应用的垃圾回收器，基于 Region 划分堆内存"
+信息点比对: "停顿时间预测模型" → [1] 未覆盖（仅介绍 G1 基本概念）→ 无法回答
+返回: {{"sufficient": false, "reason": "文档仅介绍 G1 基本概念，未覆盖停顿时间预测模型", "rewritten_query": "G1 GC 停顿时间预测模型"}}
 
 如果文档信息充分，返回: {{"sufficient": true, "reason": "..."}}
 如果文档信息不充分，返回: {{"sufficient": false, "reason": "...", "rewritten_query": "改写的搜索关键词"}}
@@ -124,12 +148,24 @@ class Reflector:
         self._provider = provider or "fallback"
         self._reflection_temperature = 0.1  # 结构化 JSON 判断需确定性
         self._generation_temperature = 0.7  # 生成保持创造性
+        # module-044 自洽性检查第二温度：与反思温度 0.1 不同（结果多样化的依据）
+        self._self_check_temperature = 0.7
 
     async def check_sufficiency(self, query: str, documents: list[dict]) -> dict:
         """检查检索结果是否充分
 
         如果 LLM 判断检索结果不够回答问题，会返回一个 rewritten_query，
         这个 query 会被 engine.py 用于二次检索。
+
+        module-044（ADR-0005 层 1+2+3）重构：
+        - 层 1 分数/数量硬闸门（零 LLM）：文档数 < 2 或 top-1 abs_cosine < 0.4
+          → 直接判不充分 + rewritten_query=query，不调 LLM
+        - 层 2 prompt 强化：CoT 信息点比对 + few-shot 正反例（见 _CHECK_PROMPT）
+        - 层 3 多信号融合：分数达标（或字段缺失）才问 LLM 判模糊地带；
+          LLM 判不充分 → 尊重语义走 rewritten_query（不因分数高强制充分）
+        - 自洽性检查（配置开关 PW_SUFFICIENCY_SELF_CHECK_ENABLED，默认关）：
+          开启时同 query 两温度各判一次，不一致 → 保守判充分（防漏检）
+        - 闸门/LLM 异常 → 默认充分（防死循环，保持"默认充分"哲学）
 
         Args:
             query: 原始查询
@@ -143,6 +179,29 @@ class Reflector:
             return {"sufficient": False, "reason": "未检索到任何文档",
                      "rewritten_query": query}
 
+        # ── 层 1 数量闸门（零 LLM）──
+        if len(documents) < _SUFFICIENCY_MIN_DOCS:
+            return {"sufficient": False,
+                    "reason": f"文档数不足 {_SUFFICIENCY_MIN_DOCS}",
+                    "rewritten_query": query}
+
+        # ── 层 1 分数闸门（零 LLM）──
+        # abs_cosine：module-043 在 retriever 归一化前存档，engine 精排后 docs
+        # 仍含该字段（rerank 不删字段）；仅 FTS 命中文档无该字段 → None 跳过
+        # 闸门走 LLM（不误杀）。
+        top1_abs = documents[0].get("abs_cosine", None)
+        if top1_abs is not None:
+            try:
+                if float(top1_abs) < _SUFFICIENCY_MIN_ABS_COSINE:
+                    return {"sufficient": False,
+                            "reason": f"top-1 绝对余弦 {float(top1_abs):.3f} < "
+                                      f"{_SUFFICIENCY_MIN_ABS_COSINE}",
+                            "rewritten_query": query}
+            except (TypeError, ValueError):
+                # 异常值不误杀：跳过闸门走 LLM 判断
+                logger.warning("abs_cosine 异常值 %r，跳过分数闸门走 LLM", top1_abs)
+
+        # ── 层 3 多信号融合：分数达标（或字段缺失）→ LLM 判模糊地带 ──
         try:
             # 只传前 5 个文档摘要给 LLM 检查，避免超出上下文窗口
             docs_summary = "\n".join(
@@ -155,6 +214,23 @@ class Reflector:
             prompt = _CHECK_PROMPT.format(query=query, docs_summary=docs_summary)
             response = await client.generate(prompt)
             result = self._parse_check(response)
+
+            # ── 层 2 自洽性检查（配置开关，默认关 → 零额外调用）──
+            if settings.sufficiency_self_check_enabled:
+                second_client = LLMFactory.get_client(
+                    self._provider, temperature=self._self_check_temperature,
+                )
+                response2 = await second_client.generate(prompt)
+                result2 = self._parse_check(response2)
+                if result.get("sufficient") != result2.get("sufficient"):
+                    logger.warning(
+                        "自洽性检查不一致（温度 %.1f vs %.1f），保守判充分",
+                        self._reflection_temperature,
+                        self._self_check_temperature,
+                    )
+                    return {"sufficient": True,
+                            "reason": "自洽性检查两次判断不一致，保守判充分"}
+
             logger.info("反思结果: sufficient=%s, rewritten=%s",
                         result.get("sufficient"),
                         result.get("rewritten_query", "无"))

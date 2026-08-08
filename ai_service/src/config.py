@@ -79,6 +79,11 @@ class Settings(BaseSettings):
     #（模型缺失/加载失败自动回退 LLM 分类，零影响）；默认 false = 保持 LLM
     intent_classifier_enabled: bool = False
 
+    # 反思充分性自洽性检查（module-044 层 2）：true 时 check_sufficiency 对
+    # 同一 query 用两个不同温度各判一次，两次不一致 → 保守判充分（防漏检）；
+    # 默认 false = 零额外 LLM 调用（成本翻倍，按需开启）
+    sufficiency_self_check_enabled: bool = False
+
     model_config = {"env_prefix": "PW_", "env_file": ".env"}
 
 
