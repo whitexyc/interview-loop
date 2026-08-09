@@ -7,9 +7,9 @@
 无新表，复用分块（chunker）/向量化（本地 bge-m3）/检索（hybrid_retriever）全链路。
 
 - save(content, identity): 长期记忆，分块 → 向量化 → 写 documents（父块无向量 + 子块含向量）
-- save_short(content, identity): 短期记忆（source='memory:<identity>:short:'，TTL 7 天）
+- save_short(content, identity): 短期记忆（source='memory:<identity>:short:'，去重命中刷新提及）
 - recall(query, identity): 长期记忆检索（source 精确匹配，动态 K）
-- recall_short(query, identity): 短期记忆检索（动态 K + TTL 过滤）
+- recall_short(query, identity): 短期记忆检索（动态 K + module-046 进化：衰减/加权/升级）
 
 module-035 分数口径（相对分 vs 绝对分）：
   - 动态 K / 低分过滤 / 去重统一用**绝对 embedding 余弦**（候选子块 embedding 存库已 L2
@@ -41,12 +41,13 @@ module-034 三层 source 分层：
 - 普通知识库检索默认排除 'memory:%' 前缀（见 retriever._source_condition），
   保证记忆不污染知识库检索结果
 """
+import asyncio
 import hashlib
 import logging
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, update
 
 from src.config import settings
 from src.database import async_session_factory
@@ -194,9 +195,9 @@ class MemoryService:
 
     职责：
     - save: 保存一条长期记忆到 documents（source='memory:<identity>:'，module-023/033）
-    - save_short: 保存一条短期记忆（source='memory:<identity>:short:'，module-034）
+    - save_short: 保存一条短期记忆（source='memory:<identity>:short:'，module-034/046）
     - recall: 检索与身份相关的长期记忆（source 精确过滤，按身份隔离）
-    - recall_short: 检索与身份相关的短期记忆（动态 K + TTL 过滤，module-034）
+    - recall_short: 检索与身份相关的短期记忆（动态 K + 进化：衰减/加权/升级，module-034/046）
 
     module-034 三层 source 分层（长期/短期/会话）：
       - 长期 memory:<identity>:
@@ -233,8 +234,9 @@ class MemoryService:
 
         复用 _save 的分块/嵌入/入库全链路；语义去重仅在短期层内
         （_find_duplicate layer='short'），与长期记忆互不混淆。短期记忆带
-        created_at，TTL 由 recall_short 召回时按 settings.memory_short_ttl_days
-        （默认 7 天）过滤（惰性过期，不参与召回）。
+        created_at；去重命中（status="updated"）时刷新 last_mentioned_at +
+        mention_count+1（module-046 写入侧提及强化）。过期处理由 recall_short
+        的进化逻辑负责（硬上限 + 平滑衰减，替代旧 7 天一刀切 TTL）。
 
         Args:
             content: 短期记忆内容（不能为空）
@@ -292,7 +294,7 @@ class MemoryService:
             try:
                 duplicate = await self._find_duplicate(content, identity, layer=layer)
                 if duplicate is not None:
-                    merged = await self._merge_duplicate(duplicate, content)
+                    merged = await self._merge_duplicate(duplicate, content, layer=layer)
                     if merged is not None:
                         return merged
             except Exception as e:
@@ -383,16 +385,22 @@ class MemoryService:
             return best
         return None
 
-    async def _merge_duplicate(self, duplicate, content: str) -> dict | None:
+    async def _merge_duplicate(self, duplicate, content: str, layer: str = "") -> dict | None:
         """语义重复记忆：更新既有父块（追加内容）而非新增，返回 status='updated'
 
         不新增任何行（库内条数不涨）；把新内容追加到既有父块 content，
         父块 id/title 保持不变，召回仍按既有子块向量命中映射回父块。
         父块缺失/更新失败 → 返回 None（由调用方 save 兜底为正常新增）。
 
+        module-046：短期层（layer='short'）去重命中 = 再次提及 → 写入侧提及
+        刷新（mention_count+1 + last_mentioned_at=now）；长期层（layer=''）
+        行为不变（进化只作用于短期层）。存量行 mention_count 为 NULL 时
+        视为 0 再 +1（零迁移 fail-open）。
+
         Args:
             duplicate: _find_duplicate 命中的子块 Document（含 parent_id）
             content: 新记忆内容
+            layer: 层标识（""=长期 / "short"=短期）
 
         Returns:
             {"id": int, "title": str, "status": "updated"}；失败返回 None
@@ -406,6 +414,9 @@ class MemoryService:
                     return None
                 if content not in parent.content:
                     parent.content = f"{parent.content}\n{content}"
+                if layer == "short":
+                    parent.mention_count = (parent.mention_count or 0) + 1
+                    parent.last_mentioned_at = datetime.now(timezone.utc)
                 await session.commit()
                 logger.info("记忆去重更新旧记忆: id=%d, title=%s", parent.id, parent.title)
                 return {"id": parent.id, "title": parent.title, "status": "updated"}
@@ -524,16 +535,21 @@ class MemoryService:
     async def recall_short(
         self, query: str, identity: str = DEFAULT_IDENTITY, top_k: int = 5,
     ) -> list[dict]:
-        """检索与 query 相关的短期记忆（module-034：按身份隔离；动态 K + TTL 过滤）
+        """检索与 query 相关的短期记忆（module-034：按身份隔离；动态 K + module-046 进化）
 
         复用 hybrid_retriever（source_pattern 精确匹配 'memory:<identity>:short:'，
         只查短期层，与长期/会话互不混淆），命中子块映射回父块（_expand_to_parents）。
 
         动态 K：与长期 recall 一致（module-035 绝对余弦口径——候选平均绝对余弦
         >0.85→5 / 0.75-0.85→3 / <0.75→1，宁缺毋滥；低分过滤 + 嵌入失败降级同 recall）。
-        TTL：created_at 早于 today - settings.memory_short_ttl_days（默认 7 天）的
-        短期记忆召回时过滤（惰性过期，不参与召回）；无 created_at 的记录保留
-        （fail-open，无法判断年龄不误删）。
+        module-046 进化（替代 module-034 的 7 天一刀切 TTL，见 _evolve_recall）：
+          ① 硬上限：参考时间（last_mentioned_at or created_at）超 memory_short_max_days
+             （默认 30 天）→ 不参与召回
+          ② 平滑衰减 + 提及加权：最终分 = 语义分 × 0.5**(age/half_life) × (1 + α×mention_count)
+          ③ 召回命中刷新提及（fire-and-forget）
+          ④ 短期→长期升级（mention_count ≥ 阈值 且 最近提及在窗口内；幂等）
+        兼容性：存量短期记忆无 last_mentioned_at/mention_count（NULL/0）→ 按
+        created_at 衰减、count=0 加权（零迁移 fail-open）；两者皆无 → 保留原样。
 
         Args:
             query: 检索查询
@@ -560,13 +576,211 @@ class MemoryService:
         avg_score = await self._absolute_cosine_avg(query, docs)
         dynamic_k = self._dynamic_k(avg_score)
         memories = await self._expand_to_parents(docs)
-        # TTL 惰性过滤：'YYYY-MM-DD' 零填充字符串字典序 == 时间序，直接比较
-        cutoff = (date.today() - timedelta(days=settings.memory_short_ttl_days)).isoformat()
-        memories = [
-            m for m in memories
-            if not m.get("created_at") or m["created_at"] >= cutoff
-        ]
+        if not memories:
+            return []
+        # module-046：短期记忆进化（硬上限/衰减/加权/提及刷新/升级）
+        memories = await self._evolve_recall(memories, docs, identity)
         return memories[:dynamic_k]
+
+    async def _evolve_recall(
+        self, memories: list[dict], child_docs: list[dict], identity: str,
+    ) -> list[dict]:
+        """module-046 短期记忆进化：硬上限 + 平滑衰减 + 提及加权 + 升级（替代一刀切 TTL）
+
+        流程（plan 3.2 召回侧）：
+          ① 硬上限：参考时间（last_mentioned_at or created_at）超
+             settings.memory_short_max_days（默认 30 天）→ 不参与召回
+          ② 平滑衰减 + 提及加权：age_days = now - 参考时间；
+             decay = 0.5**(age_days/half_life)（半衰期默认 3 天）；
+             最终分 = 语义分 × decay × (1 + α×mention_count)（α 默认 0.2）
+          ③ 提及刷新：召回命中 = 再次提及 → fire-and-forget 更新
+             last_mentioned_at=now + mention_count+1（不阻塞召回；**仅刷新通过
+             硬上限过滤的项**——超硬上限不参与召回也不刷新，避免"检索一次即复活"）
+          ④ 升级检测：mention_count ≥ settings.memory_promote_mentions 且最近提及在
+             settings.memory_promote_window_days 内 → _promote_memory（幂等）
+          ⑤ 重排：最终分与原始语义分排序可能不一致 → 按新 score 降序重排
+             （plan 场景 1 加权排前 / 场景 2 衰减排后；stable 排序，同分保持
+             语义分先后），由调用方按此顺序截断 dynamic_k
+
+        兼容性（零迁移 fail-open）：无 last_mentioned_at/mention_count 的存量行
+        （NULL）→ 按 created_at 衰减、count=0 加权；参考时间缺失 → 保留原样；
+        参考文档加载失败/异常 → 返回原 memories（plan 3.3：异常走原逻辑不抛）。
+
+        Args:
+            memories: _expand_to_parents 输出的父块记忆列表（原地改 score）
+            child_docs: 检索命中的短期子块列表（含 id / parent_id）
+            identity: 已规范化的身份标识（供升级写入长期 source）
+
+        Returns:
+            过滤 + 加权后的记忆列表（按新 score 降序重排，调用方按此截断 dynamic_k）
+        """
+        try:
+            ref_ids = {d.get("parent_id") for d in child_docs if d.get("parent_id")}
+            ref_ids |= {d.get("id") for d in child_docs
+                        if not d.get("parent_id") and d.get("id")}
+            if not ref_ids:
+                return memories
+            async with async_session_factory() as session:
+                rows = await session.execute(
+                    select(Document).where(Document.id.in_(ref_ids))
+                )
+                refs = {d.id: d for d in rows.scalars().all()}
+        except Exception as e:
+            logger.warning("短期记忆进化失败，走原逻辑: %s", e)
+            return memories
+
+        by_content: dict[str, Document] = {}
+        for d in refs.values():
+            if d.content and d.content not in by_content:
+                by_content[d.content] = d
+
+        now = datetime.now(timezone.utc)
+        result: list[dict] = []
+        to_promote: list[Document] = []
+        refreshed_ids: list[int] = []  # 仅收集通过硬上限过滤（参与召回）的参考文档
+        for m in memories:
+            doc = by_content.get(m.get("content"))
+            if doc is None:
+                result.append(m)  # 参考文档缺失 → 保留原样（fail-open）
+                continue
+            # ① 硬上限 + ② 衰减：参考时间 = last_mentioned_at or created_at
+            ref = doc.last_mentioned_at or doc.created_at
+            age_days = 0.0
+            if ref is not None:
+                if ref.tzinfo is None:
+                    ref = ref.replace(tzinfo=timezone.utc)  # 存量 naive 按 UTC 解释
+                age_days = (now - ref).total_seconds() / 86400.0
+                if age_days > settings.memory_short_max_days:
+                    continue  # 超硬上限：不参与召回（也不刷新提及，避免"检索一次即复活"）
+            count = doc.mention_count or 0
+            half_life = settings.memory_short_half_life or 3.0
+            if half_life <= 0:
+                half_life = 3.0  # 配置防御：半衰期非正数回退默认
+            decay = 0.5 ** (age_days / half_life)
+            m["score"] = round(
+                m["score"] * decay * (1 + settings.memory_mention_boost_alpha * count), 4,
+            )
+            result.append(m)
+            refreshed_ids.append(doc.id)  # 通过硬上限 → 参与召回 → 提及刷新
+            # ④ 升级检测：count ≥ 阈值 且 最近提及在窗口内
+            if count >= settings.memory_promote_mentions:
+                last_ref = doc.last_mentioned_at or doc.created_at
+                if last_ref is not None:
+                    if last_ref.tzinfo is None:
+                        last_ref = last_ref.replace(tzinfo=timezone.utc)
+                    if (now - last_ref).total_seconds() <= settings.memory_promote_window_days * 86400.0:
+                        to_promote.append(doc)
+
+        # ③ 提及刷新（fire-and-forget，不阻塞召回；只刷新通过硬上限过滤的项，
+        #    超硬上限的记忆不"复活"；刷新任务内部降级）
+        if refreshed_ids:
+            asyncio.create_task(self._refresh_mentions(refreshed_ids))
+        # ④ 升级执行（幂等；异常已在 _promote_memory 内降级）
+        for doc in to_promote:
+            await self._promote_memory(identity, doc)
+        # ⑤ 重排：衰减+加权后的最终分与原始语义分排序可能不一致，按新 score
+        #    降序（stable：同分保持语义分先后）——新分数驱动召回排序与截取
+        result.sort(key=lambda m: m["score"], reverse=True)
+        return result
+
+    async def _refresh_mentions(self, doc_ids: list[int]) -> None:
+        """召回命中刷新提及（fire-and-forget）：last_mentioned_at=now + mention_count+1
+
+        只更新参考文档（短期父块或旧格式单文档）本身；存量行 mention_count 为
+        NULL 时视为 0 再 +1（coalesce，零迁移 fail-open）。失败仅日志降级，
+        不影响召回结果。
+
+        Args:
+            doc_ids: 召回命中的参考文档 id 列表
+        """
+        if not doc_ids:
+            return
+        try:
+            async with async_session_factory() as session:
+                await session.execute(
+                    update(Document)
+                    .where(Document.id.in_(doc_ids))
+                    .values(
+                        last_mentioned_at=datetime.now(timezone.utc),
+                        mention_count=func.coalesce(Document.mention_count, 0) + 1,
+                    )
+                )
+                await session.commit()
+        except Exception as e:
+            logger.warning("短期记忆提及刷新失败（降级）: %s", e)
+
+    async def _promote_memory(self, identity: str, doc: Document) -> None:
+        """短期→长期升级：复制到长期层 + 删除短期副本（幂等，plan 3.3 异常降级）
+
+        复制：父块（无向量）+ 子块（含向量）→ source 改为长期 'memory:<identity>:'
+        （长期/短期隔离由 source 前缀 + _layer_pattern 精确匹配保证）。
+        幂等：长期层已存在同 content_hash 的父块（历史升级/长期层已写入同内容）
+        → 不重复复制，仅清理残留短期副本。content_hash 缺失（存量脏行）时跳过
+        幂等检查（极端边角，容忍重复）。
+        旧格式单文档（parent_id=None 且无子块，自身即完整记忆）→ 整体复制
+        （保留向量，parent_id=None）。
+        复制在删除之前执行：复制失败 → 短期副本保留（不丢数据）。
+
+        Args:
+            identity: 已规范化的身份标识
+            doc: 待升级的短期参考文档（父块或旧格式单文档）
+        """
+        if doc.parent_id is not None:
+            logger.warning("升级跳过：参考文档为子块（id=%d），仅父块参与升级", doc.id)
+            return
+        try:
+            async with async_session_factory() as session:
+                # 子块（父块模式下复制子块；旧格式单文档无子块）
+                rows = await session.execute(
+                    select(Document).where(Document.parent_id == doc.id)
+                )
+                children = rows.scalars().all()
+                # 幂等检查：长期层是否已有同 content_hash 的父块
+                hashes = [h for h in [doc.content_hash] + [c.content_hash for c in children] if h]
+                dup = None
+                if hashes:
+                    dup = (await session.execute(
+                        select(Document.id).where(
+                            Document.source.like(_layer_pattern(_escape_like(identity))),
+                            Document.parent_id.is_(None),
+                            Document.content_hash.in_(hashes),
+                        ).limit(1)
+                    )).scalar()
+                if dup is None:
+                    # 复制到长期层（先复制后删除：复制失败不丢短期数据）
+                    long_source = _memory_source(identity)
+                    if children:
+                        new_parent = Document(
+                            title=doc.title, content=doc.content, source=long_source,
+                            embedding=None, parent_id=None, content_hash=doc.content_hash,
+                        )
+                        session.add(new_parent)
+                        await session.flush()
+                        for c in children:
+                            session.add(Document(
+                                title=c.title, content=c.content, source=long_source,
+                                embedding=c.embedding, parent_id=new_parent.id,
+                                content_hash=c.content_hash, search_tokens=c.search_tokens,
+                            ))
+                    else:
+                        # 旧格式单文档：整体复制（保留向量）
+                        session.add(Document(
+                            title=doc.title, content=doc.content, source=long_source,
+                            embedding=doc.embedding, parent_id=None,
+                            content_hash=doc.content_hash, search_tokens=doc.search_tokens,
+                        ))
+                    logger.info("短期记忆升级长期: identity=%s, source=%s, content=%.20s",
+                                identity, long_source, doc.content[:20])
+                else:
+                    logger.info("短期记忆升级跳过（长期层已存在）: identity=%s, dup_id=%d",
+                                identity, dup)
+                # 删除短期副本（父块 + 子块；已升级时同样清理残留副本）
+                del_ids = [doc.id] + [c.id for c in children]
+                if del_ids:
+                    await session.execute(delete(Document).where(Document.id.in_(del_ids)))
+                await session.commit()
+        except Exception as e:
+            logger.warning("短期→长期升级失败（降级，不影响召回）: %s", e)
 
     @staticmethod
     def _dynamic_k(avg_score: float) -> int:

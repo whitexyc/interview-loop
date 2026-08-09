@@ -20,6 +20,7 @@ RAG 知识库引擎 — 核心编排层
 import asyncio
 import hashlib
 import logging
+import re
 
 from sqlalchemy import select
 
@@ -85,6 +86,11 @@ _HYDE_CACHE_TTL = 300            # HyDE 缓存 TTL（秒），与检索结果缓
 # ── L3 后置校验（module-043 / ADR-0003）配置 ──
 _L3_ABS_COSINE_THRESHOLD = 0.3   # 精排 top-1 绝对余弦低于该值 → 疑似误判标记
                                  #（复用 module-037 的 abs_cosine 字段口径）
+
+# ── 记忆进化（module-046 / ADR-0007 问题 2 ③）：用户明确"记住" → 强制沉淀长期层 ──
+# 正则匹配"记住""记住这个""记住一下"前缀 + 内容（plan 3.2；用 (?:这个|一下)?
+# 分组替代规格中的字符类写法，语义一致且避免吞掉内容首字）
+_REMEMBER_RE = re.compile(r"记住(?:这个|一下)?\s*(.+?)\s*$")
 
 
 def _hyde_cache_key(query: str) -> str:
@@ -384,6 +390,9 @@ class RAGEngine:
             logger.warning("长期记忆召回失败，跳过注入: %s", e)
         short_text = ""
         try:
+            # module-046：短期→长期升级触发接线——升级检测内嵌于 recall_short
+            #（plan 3.2 召回侧 ③，mention_count≥2 且最近提及 7 天内 → 复制长期 +
+            # 删短期副本，幂等），本调用即触发点；提及刷新/衰减加权同样在内部完成
             short_memories = await asyncio.wait_for(
                 memory_service.recall_short(query, identity, top_k=top_k),
                 timeout=5,
@@ -432,6 +441,20 @@ class RAGEngine:
         """
         if not answer or not answer.strip():
             return  # 空答案不提取（防御：调用方已按 answer 非空触发）
+        # module-046：用户明确"记住" → 直接沉淀长期层（跳过短期与 LLM 提取）。
+        # 正则命中即内容为事实本身（"记住我喜欢吃辣" → 存"我喜欢吃辣"）；
+        # 保存失败仅日志降级；无有效内容（纯"记住"）→ 落回正常提取路径
+        remember = _REMEMBER_RE.search(query or "")
+        if remember:
+            remember_content = remember.group(1).strip()
+            if remember_content:
+                try:
+                    await memory_service.save(remember_content, identity, dedup=True)
+                    logger.info("记住检测命中，直接写入长期记忆: identity=%s, content=%.20s",
+                                identity, remember_content[:20])
+                except Exception as e:
+                    logger.warning("记住记忆写入失败（降级）: %s", e)
+                return
         try:
             facts = await extract_facts(query, answer, history or [])
         except Exception as e:
@@ -467,12 +490,20 @@ class RAGEngine:
         存在 → 用它作生成历史（刷新/换设备不丢）；否则回退当前请求 history（与
         module-034 之前行为完全一致）。恢复失败/超时/身份为空 → 回退当前请求。
 
+        module-046 WP2 分层注入：持久化会话存在且有早期会话摘要（仅当会话曾
+        超过 memory_session_max_messages 触发滚动删除时才有）→ 摘要段前置注入
+        （history = 早期摘要段 + 最近 20 条原样）。无摘要/摘要读取失败 → 跳过
+        摘要段，返回持久化会话原样（会话 ≤20 条时无摘要行，与旧行为逐字节一致，
+        零回归）。摘要段 role='assistant'（API 兼容：ReAct 路径会把 history 原样
+        透传 LLM，system 角色中断列表会被部分供应商拒绝）+ content 自带
+        '[早期会话摘要]' 前缀自描述。
+
         Args:
             identity: 请求身份（user_id 优先，否则 client_ip）
             request_history: 当前请求携带的历史
 
         Returns:
-            用于生成的有效历史列表（持久化会话优先）
+            用于生成的有效历史列表（持久化会话优先；有摘要时 = 摘要段 + 最近 N 条）
         """
         if not identity:
             return request_history or []
@@ -486,6 +517,19 @@ class RAGEngine:
             logger.warning("会话恢复失败，使用当前请求 history: %s", e)
             persisted = []
         if persisted:
+            summary = ""
+            try:
+                summary = await asyncio.wait_for(
+                    session_memory_service.get_session_summary(identity),
+                    timeout=3,
+                )
+            except Exception as e:
+                logger.warning("会话摘要读取失败，跳过摘要段: %s", e)
+            if summary:
+                return [
+                    {"role": "assistant", "content": f"[早期会话摘要]\n{summary}"},
+                    *persisted,
+                ]
             return persisted
         return request_history or []
 

@@ -71,9 +71,16 @@ class Settings(BaseSettings):
     memory_recall_min_score: float = 0.4
 
     # 短期记忆 + 会话记忆（module-034）
-    memory_short_ttl_days: int = 7              # 短期记忆 TTL（天）：recall_short 召回时按 created_at 过滤过期
+    memory_short_ttl_days: int = 7              # 短期记忆 TTL（天）：module-046 起由衰减+硬上限替代，保留兼容
     memory_session_max_messages: int = 50       # 每 identity 会话持久化消息上限（超限滚动删除最旧）
     memory_session_history_limit: int = 20      # 会话恢复注入生成的最近消息数
+
+    # 短期记忆进化（module-046 / ADR-0007 问题 2）：强化/衰减/升级可配
+    memory_short_half_life: float = 3.0         # 平滑衰减半衰期（天）：decay = 0.5**(age_days/half_life)
+    memory_short_max_days: int = 30             # 硬上限（天）：last_mentioned_at/created_at 超上限不参与召回
+    memory_mention_boost_alpha: float = 0.2     # 提及加权系数：最终分 = 语义分×decay×(1+α×mention_count)
+    memory_promote_mentions: int = 2            # 短期→长期升级：mention_count ≥ 该值
+    memory_promote_window_days: int = 7         # 升级窗口（天）：最近提及在窗口内才升级
 
     # 意图分类（module-043 L4）：true 时 router 尝试加载 bge-m3+逻辑回归分类器
     #（模型缺失/加载失败自动回退 LLM 分类，零影响）；默认 false = 保持 LLM

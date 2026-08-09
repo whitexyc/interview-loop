@@ -38,6 +38,15 @@ class Document(Base):
     created_at = Column(
         DateTime(timezone=True), server_default=func.now(), comment="创建时间"
     )
+    # module-046 记忆进化：仅短期层使用（last_mentioned_at 提及刷新 / mention_count
+    # 召回加权 + 升级阈值）。存量行字段为 NULL/0 时按 created_at 衰减、count=0 加权
+    #（零迁移 fail-open，不写迁移脚本）
+    last_mentioned_at = Column(
+        DateTime(timezone=True), nullable=True, comment="最近提及时间（module-046 仅短期层使用）"
+    )
+    mention_count = Column(
+        Integer, nullable=False, default=0, comment="提及次数（module-046 仅短期层使用）"
+    )
 
     def __repr__(self) -> str:
         return f"<Document id={self.id} title={self.title!r} source={self.source!r}>"
