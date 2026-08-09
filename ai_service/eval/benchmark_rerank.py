@@ -26,6 +26,7 @@ import argparse
 import logging
 import time
 from pathlib import Path
+from typing import Optional
 
 from sentence_transformers import CrossEncoder
 
@@ -159,20 +160,26 @@ def build_pairs(max_chars: int, pair_count: int) -> tuple[list[tuple[str, str]],
     return pairs, labels
 
 
-def run_benchmark(max_chars: int, pairs_2: bool, pairs_6: bool) -> None:
+def run_benchmark(max_chars: int, pairs_2: bool, pairs_6: bool,
+                  model: Optional[CrossEncoder] = None,
+                  warmup: bool = True) -> None:
     """执行截断基准：2 pair 与 6 pair 各计时打分
 
     Args:
         max_chars: 截断字符数
         pairs_2: 是否跑 2 pair
         pairs_6: 是否跑 6 pair
+        model: 已加载模型（sweep 模式复用，避免重复加载 2.17GB）
+        warmup: 是否预热 1 对（sweep 模式下后续档位跳过）
     """
-    model = CrossEncoder(str(MODEL_DIR))
-    logger.info("模型加载完成: %s", MODEL_DIR.name)
+    if model is None:
+        model = CrossEncoder(str(MODEL_DIR))
+        logger.info("模型加载完成: %s", MODEL_DIR.name)
 
-    # 预热 1 对（排除模型首次推理的缓存/线程池初始化影响）
-    warmup = [("预热query", "预热文档内容" * 40)]
-    model.predict(warmup)
+    if warmup:
+        # 预热 1 对（排除模型首次推理的缓存/线程池初始化影响）
+        warmup_pairs = [("预热query", "预热文档内容" * 40)]
+        model.predict(warmup_pairs)
 
     print("\n" + "=" * 64)
     print(f"Rerank Truncation Benchmark — max_chars={max_chars}")
@@ -200,11 +207,21 @@ def main() -> None:
     """基准测试入口"""
     parser = argparse.ArgumentParser(description="Rerank 截断基准：分数与耗时（ADR-0004 TODO 验证）")
     parser.add_argument("--max-chars", type=int, default=500,
-                        choices=[250, 500, 1000, 2000],
-                        help="截断字符数（250/500/1000/2000，默认 500）")
+                        choices=[50, 75, 100, 150, 200, 250, 500, 1000, 2000],
+                        help="截断字符数（默认 500）")
     parser.add_argument("--pairs", type=int, default=2,
                         choices=[2, 6], help="6 pair 规模（默认仅 2 pair）")
+    parser.add_argument("--sweep", action="store_true",
+                        help="拐点扫描：一次加载模型跑 2000/1000/500/250/200/150/100/75/50 全档（6 pair）")
     args = parser.parse_args()
+
+    if args.sweep:
+        logger.info("sweep 模式：一次加载模型，全档位 6 pair")
+        model = CrossEncoder(str(MODEL_DIR))
+        model.predict([("预热query", "预热文档内容" * 40)])
+        for mc in (2000, 1000, 500, 250, 200, 150, 100, 75, 50):
+            run_benchmark(mc, pairs_2=False, pairs_6=True, model=model, warmup=False)
+        return
 
     run_benchmark(args.max_chars, pairs_2=True, pairs_6=(args.pairs == 6))
 
