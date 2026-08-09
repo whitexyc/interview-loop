@@ -349,6 +349,11 @@ class HybridRetriever:
             doc_id = doc["id"]
             if doc_id in merged:
                 merged[doc_id]["vector_score"] = doc["score"]
+                # module-045 WP1: 双命中透传 abs_cosine（原始绝对余弦）。
+                # vec_normalized 的 doc 源自 vector_results，已在上方存档
+                # abs_cosine（module-043）；fts-only 文档保持无该字段，
+                # 由下游按 0.0 保守处理（d.get("abs_cosine", 0.0)）。
+                merged[doc_id]["abs_cosine"] = doc["abs_cosine"]
             else:
                 doc["fts_score"] = 0.0
                 doc["vector_score"] = doc["score"]

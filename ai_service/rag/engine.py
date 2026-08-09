@@ -118,23 +118,28 @@ class RAGEngine:
     @staticmethod
     def _check_suspected_misclassify(
         docs: list[dict], threshold: float = _L3_ABS_COSINE_THRESHOLD,
-    ) -> bool:
+    ) -> tuple[bool, float]:
         """L3 后置校验：精排 top-1 绝对余弦 < 阈值 → 疑似误判
 
         复用 module-037 的 abs_cosine 字段（d.get("abs_cosine", 0.0)）：
         缺字段视为 0.0（无绝对语义匹配证据 → 保守标记）。
         只度量不打干预：标记写入 ChatSteps，不改回答路径（先度量后干预）。
+        module-045 WP2c: 返回 (flag, top1_abs) 二元组——top1_abs 与判定同源，
+        供 chat 在父块映射前存档（WP2b：映射重建 dict 会丢 abs_cosine，
+        同源存档保证 ChatSteps 展示真实值而非恒 0.0）。
 
         Args:
             docs: 精排后的文档列表（首项为 top-1）
             threshold: 绝对余弦阈值（默认 0.3）
 
         Returns:
-            top-1 绝对余弦 < 阈值 → True；空列表 → False
+            (flag, top1_abs)：flag 为疑似误判标记；top1_abs 为 top-1 绝对
+            余弦（空列表返回 (False, 0.0)）
         """
         if not docs:
-            return False
-        return (docs[0].get("abs_cosine") or 0.0) < threshold
+            return False, 0.0
+        top1_abs = docs[0].get("abs_cosine") or 0.0
+        return top1_abs < threshold, top1_abs
 
     async def search(self, request: SearchRequest) -> SearchResponse:
         """知识库检索：混合检索 → Rerank
@@ -238,7 +243,12 @@ class RAGEngine:
             seen_ids: set[int] = set()
             # module-043 L3 后置校验：精排 top-1 绝对余弦 < 0.3 → 疑似误判标记
             #（先度量后干预：只写入 ChatSteps 可观测，不阻塞、不改回答路径）
+            # module-045 WP2b/c：判定与展示同源——round 0 判定处由
+            # _check_suspected_misclassify 返回 (flag, top1_abs)，top1_abs
+            # 先存档（_expand_to_parents 重建 dict 会丢 abs_cosine），
+            # ChatSteps 展示存档值，父块映射后不丢真实值
             suspected_misclassify = False
+            top1_abs = 0.0
 
             for round_num in range(3):
                 docs = await asyncio.wait_for(
@@ -246,10 +256,9 @@ class RAGEngine:
                     timeout=15,
                 )
                 docs = await reranker.rerank(current_query, docs, top_k=5)
-                if round_num == 0 and docs:
-                    top1_abs = docs[0].get("abs_cosine") or 0.0
-                    if top1_abs < _L3_ABS_COSINE_THRESHOLD:
-                        suspected_misclassify = True
+                if round_num == 0:
+                    suspected_misclassify, top1_abs = self._check_suspected_misclassify(docs)
+                    if suspected_misclassify:
                         logger.info(
                             "L3 反证: top-1 abs_cosine=%.3f < %.1f → suspected_misclassify, query=%s",
                             top1_abs, _L3_ABS_COSINE_THRESHOLD, request.query[:50],
@@ -325,8 +334,7 @@ class RAGEngine:
                 },
                 retrieval={
                     "count": len(docs),
-                    "top_abs_cosine": round(
-                        (docs[0].get("abs_cosine") or 0.0), 4) if docs else None,
+                    "top_abs_cosine": round(top1_abs, 4) if docs else None,
                     "suspected_misclassify": suspected_misclassify,
                 },
             )
@@ -740,8 +748,9 @@ class RAGEngine:
             child_docs: 子块检索结果列表，每项必须包含 parent_id 字段
 
         Returns:
-            去重父块列表，字段包含 id, title, content, source, hybrid_score
-            按 hybrid_score 降序排列
+            去重父块列表，字段包含 id, title, content, source, hybrid_score,
+            abs_cosine（module-045 WP2b 透传，子块最大值）；按 hybrid_score
+            降序排列
         """
         if not child_docs:
             return []
@@ -750,6 +759,10 @@ class RAGEngine:
         # 子块文档（parent_id=NOT NULL）映射到父块，去重后取最佳分数
         output: list[dict] = []
         parent_scores: dict[int, float] = {}
+        # module-045 WP2b: 父块重建 dict 原本丢 abs_cosine（L3 绝对余弦），
+        # 此处与 hybrid_score 同策略保留子块最大值——跨父块映射透传，
+        # chat/_retrieve 的 ChatSteps 展示值不恒 0.0
+        parent_abs_cosines: dict[int, float] = {}
         for doc in child_docs:
             pid = doc.get("parent_id")
             if pid is None:
@@ -760,6 +773,9 @@ class RAGEngine:
                 score = doc.get("hybrid_score", doc.get("score", 0.0))
                 if pid not in parent_scores or score > parent_scores[pid]:
                     parent_scores[pid] = score
+                abs_cosine = doc.get("abs_cosine") or 0.0
+                if pid not in parent_abs_cosines or abs_cosine > parent_abs_cosines[pid]:
+                    parent_abs_cosines[pid] = abs_cosine
 
         if not parent_scores:
             return output  # 没有子块需要展开，直接返回旧格式文档
@@ -779,6 +795,8 @@ class RAGEngine:
                 "content": p.content,
                 "source": p.source,
                 "hybrid_score": parent_scores.get(p.id, 0.0),
+                # module-045 WP2b: abs_cosine 跨父块映射透传（子块最大值）
+                "abs_cosine": parent_abs_cosines.get(p.id, 0.0),
             })
 
         # 按 ID 去重 + 按分数降序

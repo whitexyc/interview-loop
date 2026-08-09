@@ -63,7 +63,10 @@ _RULE_TABLE = (
     # 实时：天气类
     "天气", "气温", "下雨", "下雪", "晴天", "阴天", "台风", "刮风",
     # 闲聊：身份/问候/寒暄
-    "你是谁", "你叫什么", "你多大了", "介绍一下你自己", "你能做什么", "你会什么",
+    # module-045 WP2a: 移除"你能做什么/你会什么"——golden 边界样本
+    # "你能做什么？这个系统能帮我解决什么问题？" 标注 knowledge（问系统能力
+    # 而非闲聊），规则表命中会否决 FTS/图谱确认信号（rule_veto），误伤边界样本
+    "你是谁", "你叫什么", "你多大了", "介绍一下你自己",
     "你好", "您好", "嗨", "哈喽", "hello", "hi ", "在吗", "在不在", "再见", "拜拜",
     "谢谢", "感谢", "晚安", "早安", "辛苦了", "哈哈", "嗯嗯", "好的好的",
 )
@@ -162,6 +165,11 @@ class RouterAgent:
             try:
                 probs = await classifier.predict_proba(query.strip())
                 intent = max(probs, key=probs.get)
+                # module-045 WP2d: L4 分类器返回的 intent 过白名单——非法值
+                # 归 knowledge（与 LLM 路径 _parse_response 口径一致，防模型
+                # 类别外漂移导致路由落入未知分支）
+                if intent not in ("knowledge", "casual_chat", "realtime"):
+                    intent = "knowledge"
                 confidence = probs[intent]
                 logger.info("意图识别(L4): query=%s, intent=%s, confidence=%.2f",
                             query[:50], intent, confidence)

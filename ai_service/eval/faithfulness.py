@@ -11,8 +11,9 @@ Chat 对话 Faithfulness 评估 — LLM-as-Judge（module-038）
     python -m eval.faithfulness                  # 默认抽 50 条（优先 session_memory）
     python -m eval.faithfulness --sample 30      # 抽 30 条
     python -m eval.faithfulness --dataset        # 强制使用 dataset.json 问题（生成新答案）
-    python -m eval.faithfulness --no-save        # 不落库
 
+    python -m eval.faithfulness --no-save        # 不落库
+    python -m eval.faithfulness --sample 5 --dataset --no-save # 仅抽 5 条，降级 dataset.json，且不落库
 Judge LLM: 使用项目默认 DeepSeek（temperature=0 保证一致性）。
 """
 import argparse

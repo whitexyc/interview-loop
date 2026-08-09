@@ -249,39 +249,75 @@ class TestL2DeterministicConfirm:
             assert any(word in rule for rule in _RULE_TABLE), word
 
     def test_rule_table_keeps_kb_boundary_samples(self):
-        """规则表不误伤边界易混样本（"你们网站有哪些功能"→ 应能走 FTS 确认）"""
+        """规则表不误伤边界易混样本（module-045 WP2a）
+
+        golden 边界样本"你能做什么？这个系统能帮我解决什么问题？"标注 knowledge
+        （问系统能力）：移除"你能做什么/你会什么"后 _rule_hits 返回 False，
+        不再被规则表否决 → L2 可走 FTS/图谱信号确认。
+        """
+        assert not RouterAgent._rule_hits("你能做什么？这个系统能帮我解决什么问题？")
         assert not RouterAgent._rule_hits("你们网站有哪些功能")
         assert not RouterAgent._rule_hits("你知道 GC 是什么吗")
+        # 移除确认：规则表不再含"你能做什么/你会什么"
+        assert not any("你能做什么" in rule for rule in _RULE_TABLE)
+        assert not any("你会什么" in rule for rule in _RULE_TABLE)
+
+    def test_boundary_sample_not_vetoed_when_fts_hit(self):
+        """边界样本 FTS 命中 → 确认成功（规则词移除后不再被否决）"""
+        agent = RouterAgent()
+        with mock.patch.object(agent, "_fts_term_hit",
+                               new=mock.AsyncMock(return_value=True)):
+            confirmed, signal = asyncio.run(
+                agent._deterministic_confirm("你能做什么？这个系统能帮我解决什么问题？"))
+        assert confirmed is True
+        assert signal == "fts_term"
 
 
 # ─── L3 后置校验（AC §3 / §5） ───
 
 
 class TestL3PostValidation:
-    """精排 top-1 abs_cosine < 0.3 → suspected_misclassify（先度量后干预）"""
+    """精排 top-1 abs_cosine < 0.3 → suspected_misclassify（先度量后干预）
+
+    module-045 WP2c: 返回 (flag, top1_abs) 二元组（判定与展示同源存档）。
+    """
 
     def test_flag_when_top1_abs_below_threshold(self):
-        assert RAGEngine._check_suspected_misclassify([{"abs_cosine": 0.29}]) is True
+        flag, top1_abs = RAGEngine._check_suspected_misclassify([{"abs_cosine": 0.29}])
+        assert flag is True
+        assert top1_abs == 0.29
 
     def test_no_flag_when_abs_above_threshold(self):
-        assert RAGEngine._check_suspected_misclassify([{"abs_cosine": 0.5}]) is False
+        flag, top1_abs = RAGEngine._check_suspected_misclassify([{"abs_cosine": 0.5}])
+        assert flag is False
+        assert top1_abs == 0.5
 
     def test_no_flag_when_boundary_equal(self):
         # 阈值 0.3：等于阈值不算疑似误判（保守标记而非激进标记）
-        assert RAGEngine._check_suspected_misclassify([{"abs_cosine": 0.3}]) is False
+        flag, top1_abs = RAGEngine._check_suspected_misclassify([{"abs_cosine": 0.3}])
+        assert flag is False
+        assert top1_abs == 0.3
 
     def test_no_docs_no_flag(self):
-        assert RAGEngine._check_suspected_misclassify([]) is False
+        flag, top1_abs = RAGEngine._check_suspected_misclassify([])
+        assert flag is False
+        assert top1_abs == 0.0
 
     def test_missing_abs_cosine_defaults_zero_flagged(self):
         """复用 module-037 口径 d.get("abs_cosine", 0.0)：缺字段 → 0.0 → 标记"""
-        assert RAGEngine._check_suspected_misclassify([{"hybrid_score": 0.9}]) is True
+        flag, top1_abs = RAGEngine._check_suspected_misclassify([{"hybrid_score": 0.9}])
+        assert flag is True
+        assert top1_abs == 0.0
 
     def test_multiple_docs_uses_top1_only(self):
         docs = [{"abs_cosine": 0.2}, {"abs_cosine": 0.9}]
-        assert RAGEngine._check_suspected_misclassify(docs) is True
+        flag, top1_abs = RAGEngine._check_suspected_misclassify(docs)
+        assert flag is True
+        assert top1_abs == 0.2
         docs = [{"abs_cosine": 0.5}, {"abs_cosine": 0.1}]
-        assert RAGEngine._check_suspected_misclassify(docs) is False
+        flag, top1_abs = RAGEngine._check_suspected_misclassify(docs)
+        assert flag is False
+        assert top1_abs == 0.5
 
 
 class TestL3ChatStepsObservable:
@@ -327,8 +363,59 @@ class TestL3ChatStepsObservable:
         result = asyncio.run(run())
         assert result.steps is not None
         assert result.steps.retrieval.get("suspected_misclassify") is True
+        assert result.steps.retrieval.get("top_abs_cosine") == 0.1
         assert result.message == "ok"  # 不阻塞、不改回答路径
         assert result.answer == "答案"
+
+    def test_top_abs_cosine_archived_before_parent_mapping(self):
+        """module-045 WP2b: steps.top_abs_cosine 用 round 0 存档值（判定同源），
+        父块映射重建 dict 丢 abs_cosine 后展示值不恒 0.0"""
+        from rag.engine import rag_engine
+
+        fake_doc = {"id": 1, "title": "t", "content": "c", "source": "s",
+                    "parent_id": None}
+
+        async def run():
+            with mock.patch("rag.engine.router_agent.classify",
+                            new=mock.AsyncMock(
+                                return_value={"intent": "knowledge", "confidence": 0.9})):
+                with mock.patch("rag.retriever.hybrid_retriever.retrieve",
+                                new=mock.AsyncMock(return_value=[fake_doc])):
+                    with mock.patch("rag.reranker.reranker.rerank",
+                                    new=mock.AsyncMock(side_effect=lambda q, d, top_k: d)):
+                        with mock.patch("agent.reflector.reflector.check_sufficiency",
+                                        new=mock.AsyncMock(
+                                            return_value={"sufficient": True})):
+                            with mock.patch("agent.reflector.reflector.generate_answer",
+                                            new=mock.AsyncMock(return_value="答案")):
+                                with mock.patch("agent.reflector.reflector.verify_answer",
+                                                new=mock.AsyncMock(return_value=None)):
+                                    with mock.patch("rag.engine.rag_engine._recall_memory",
+                                                    new=mock.AsyncMock(return_value="")):
+                                        with mock.patch(
+                                            "rag.engine.rag_engine._resolve_session_history",
+                                            new=mock.AsyncMock(side_effect=lambda i, h: h)):
+                                            with mock.patch.object(
+                                                rag_engine, "_persist_memory",
+                                                new=mock.AsyncMock()):
+                                                with mock.patch.object(
+                                                    rag_engine, "_persist_session",
+                                                    new=mock.AsyncMock()):
+                                                    # 模拟 round 0 判定返回存档值：
+                                                    # 即使最终 docs 无 abs_cosine 字段
+                                                    # （父块映射后），steps 仍展示真实值
+                                                    with mock.patch(
+                                                        "rag.engine.RAGEngine._check_suspected_misclassify",
+                                                        return_value=(True, 0.42)):
+                                                        result = await rag_engine.chat(
+                                                            ChatRequest(query="什么是GC"),
+                                                            identity="x")
+            return result
+
+        result = asyncio.run(run())
+        assert result.steps is not None
+        assert result.steps.retrieval.get("suspected_misclassify") is True
+        assert result.steps.retrieval.get("top_abs_cosine") == 0.42
 
     def test_high_similarity_no_flag_in_steps(self):
         from rag.engine import rag_engine
@@ -370,6 +457,63 @@ class TestL3ChatStepsObservable:
         result = asyncio.run(run())
         assert result.steps is not None
         assert result.steps.retrieval.get("suspected_misclassify") is False
+
+
+class TestExpandToParentsAbsCosine:
+    """module-045 WP2b: 父块映射保留 abs_cosine（子块最大值，与 hybrid_score 同策略）
+
+    根因修复：_expand_to_parents 重建 dict 丢 abs_cosine → chat/_retrieve 的
+    ChatSteps.top_abs_cosine 恒 0.0（失真）。存档方案（round 0 判定处同源存档）
+    之外，父块映射层同步透传字段，流式路径（_retrieve）同样不丢。
+    """
+
+    @staticmethod
+    def _run_expand(child_docs):
+        from rag.engine import rag_engine
+
+        class _Parent:
+            def __init__(self, pid):
+                self.id = pid
+                self.title = "父块"
+                self.content = "父块内容"
+                self.source = "s"
+
+        async def run():
+            session = mock.AsyncMock()
+            result_mock = mock.MagicMock()
+            result_mock.scalars.return_value.all.return_value = [_Parent(10), _Parent(20)]
+            session.execute = mock.AsyncMock(return_value=result_mock)
+            cm = mock.MagicMock()
+            cm.__aenter__ = mock.AsyncMock(return_value=session)
+            cm.__aexit__ = mock.AsyncMock(return_value=False)
+            factory = mock.MagicMock(return_value=cm)
+            with mock.patch("rag.engine.async_session_factory", factory):
+                return await rag_engine._expand_to_parents(child_docs)
+
+        return asyncio.run(run())
+
+    def test_parent_mapping_preserves_max_abs_cosine(self):
+        docs = self._run_expand([
+            {"id": 1, "title": "c1", "content": "c1", "source": "s",
+             "parent_id": 10, "hybrid_score": 0.6, "abs_cosine": 0.35},
+            {"id": 2, "title": "c2", "content": "c2", "source": "s",
+             "parent_id": 10, "hybrid_score": 0.8, "abs_cosine": 0.55},
+            {"id": 3, "title": "c3", "content": "c3", "source": "s",
+             "parent_id": 20, "hybrid_score": 0.5, "abs_cosine": 0.2},
+        ])
+        by_id = {d["id"]: d for d in docs}
+        assert by_id[10]["abs_cosine"] == 0.55  # 子块最大值透传
+        assert by_id[10]["hybrid_score"] == 0.8
+        assert by_id[20]["abs_cosine"] == 0.2
+
+    def test_parent_without_abs_cosine_defaults_zero(self):
+        """子块无 abs_cosine（fts-only 命中）→ 父块按 0.0 保守处理"""
+        docs = self._run_expand([
+            {"id": 1, "title": "c1", "content": "c1", "source": "s",
+             "parent_id": 10, "hybrid_score": 0.7},
+        ])
+        assert docs[0]["id"] == 10
+        assert docs[0]["abs_cosine"] == 0.0
 
 
 # ─── L4 分类器（AC §4 / §5） ───
@@ -472,6 +616,17 @@ class TestL4RouterInjection:
         assert clf.calls == 1
         assert result["intent"] == "knowledge"
         assert result["confidence"] == 0.8
+
+    def test_classifier_bogus_intent_whitelisted_to_knowledge(self):
+        """module-045 WP2d: L4 返回非法 intent → 白名单归 knowledge（与 LLM 路径一致）"""
+        clf = _FakeClassifier(
+            probs={"knowledge": 0.1, "casual_chat": 0.2, "realtime": 0.1,
+                   "bogus": 0.9},
+        )
+        agent = RouterAgent(intent_classifier=clf)
+        result = asyncio.run(agent.classify("什么是GC"))
+        assert result["intent"] == "knowledge"  # bogus 最高分被白名单拦截
+        assert result["confidence"] == 0.1  # 置信度取白名单后 intent 的概率
 
     def test_default_llm_when_not_injected(self):
         agent = RouterAgent()

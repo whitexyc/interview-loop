@@ -1,5 +1,5 @@
 """
-AI 推理服务入口 — 张三个人网站
+AI 推理服务入口
 FastAPI + pgvector + LangChain 多供应商 LLM
 """
 import logging
@@ -319,7 +319,7 @@ async def search(request: SearchRequest):
 
 @app.post("/ai/rag/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, fastapi_req: Request):
-    """RAG 知识库问答（自动保存会话到 IP 缓存）
+    """RAG 知识库问答
 
     将请求身份（user_id 优先，否则 client_ip）传给 rag_engine.chat，
     用于按身份隔离检索长期记忆（module-032；匿名降级 client_ip，零回归）。
@@ -380,7 +380,7 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
                 from llm.client import LLMFactory
                 client = LLMFactory.get_client()
                 async for token in client.generate_stream(
-                    f"你是张三个人网站的 AI 助手。\n用户: {request.query}"
+                    f"你是个人网站的 AI 助手。\n用户: {request.query}"
                 ):
                     yield f"event: token\ndata: {json.dumps(token)}\n\n"
                 yield "event: done\ndata: {}\n\n"
@@ -390,6 +390,11 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
             t0 = _t()
             docs = await rag_engine._retrieve(request.query, top_k=20)
             retrieval_count = len(docs)
+            # module-045 WP3: L3 标记接入流式路径（对齐非流式 engine.chat）——
+            # 检索 top-1 绝对余弦 < 0.3 → suspected_misclassify（先度量后干预，
+            # 只写入 step 事件可观测）。_retrieve 已做父块映射，abs_cosine 经
+            # WP2b 透传（子块最大值），流式路径不再恒 0.0 恒标记
+            suspected_misclassify, top1_abs = rag_engine._check_suspected_misclassify(docs)
             # 预览文档（前5条标题+摘要）
             previews = []
             # module-035 (P2)：移除失真阈值——hybrid_score 是 min-max 相对分
@@ -407,7 +412,10 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
                     })
             step_data = json.dumps({
                 "step": "retrieval",
-                "data": {"count": retrieval_count, "relevant": relevant_count, "previews": previews},
+                "data": {"count": retrieval_count, "relevant": relevant_count,
+                         "top_abs_cosine": round(top1_abs, 4) if docs else None,
+                         "suspected_misclassify": suspected_misclassify,
+                         "previews": previews},
                 "timing_ms": int((_t() - t0) * 1000),
             })
             yield f"event: step\ndata: {step_data}\n\n"

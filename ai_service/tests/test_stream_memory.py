@@ -86,10 +86,11 @@ class _FakeLLM:
 
 
 def _hit_stream(gen_capture, memory_text="", recall_calls=None, classify_intent="knowledge",
-                xff="9.9.9.9"):
+                xff="9.9.9.9", docs=None):
     """发起一次 chat_stream 请求（mock 全链路），返回 (sse_events, status_code)
 
     附带收集 _recall_memory 的调用参数到 recall_calls（由调用方传入列表）。
+    docs 可指定 _retrieve 的返回（module-045 WP3 测试自定义 abs_cosine）。
     """
     events = []
     status = 0
@@ -98,7 +99,8 @@ def _hit_stream(gen_capture, memory_text="", recall_calls=None, classify_intent=
         with mock.patch("agent.router.router_agent.classify",
                         new=mock.AsyncMock(return_value={"intent": classify_intent})):
             with mock.patch("rag.engine.rag_engine._retrieve",
-                            new=mock.AsyncMock(return_value=[_doc()])):
+                            new=mock.AsyncMock(
+                                return_value=[_doc()] if docs is None else docs)):
                 with mock.patch("rag.engine.rag_engine._rerank",
                                 new=mock.AsyncMock(side_effect=lambda q, docs: docs)):
                     with mock.patch("rag.engine.rag_engine._recall_memory",
@@ -192,3 +194,47 @@ class TestChatStreamMemoryInjection:
             _hit_stream(gen, memory_text="不应被召回", recall_calls=recall_calls,
                         classify_intent="casual_chat")
         assert recall_calls == [], "casual_chat 不应触发记忆召回"
+
+
+class TestChatStreamL3Flag:
+    """module-045 WP3: 流式路径 retrieval step 补 L3 标记（对齐非流式 ChatSteps）"""
+
+    @staticmethod
+    def _retrieval_data(events):
+        for e in events:
+            if e["event"] == "step":
+                data = json.loads(e["data"])
+                if data.get("step") == "retrieval":
+                    return data.get("data", {})
+        return {}
+
+    def test_low_abs_cosine_marks_flag_in_stream_steps(self):
+        """top-1 abs_cosine < 0.3 → retrieval step 带 suspected_misclassify=True"""
+        doc = _doc(1)
+        doc["abs_cosine"] = 0.1
+        events, status = _hit_stream(_GenCapture(), docs=[doc])
+        assert status == 200
+        step = self._retrieval_data(events)
+        assert step.get("suspected_misclassify") is True
+        assert step.get("top_abs_cosine") == 0.1
+
+    def test_high_abs_cosine_no_flag_in_stream_steps(self):
+        """top-1 abs_cosine ≥ 0.3 → 不标记（与 engine.chat 非流式口径一致）"""
+        doc = _doc(1)
+        doc["abs_cosine"] = 0.7
+        events, status = _hit_stream(_GenCapture(), docs=[doc])
+        assert status == 200
+        step = self._retrieval_data(events)
+        assert step.get("suspected_misclassify") is False
+        assert step.get("top_abs_cosine") == 0.7
+
+    def test_empty_docs_no_flag_keeps_stream_flow(self):
+        """无检索结果 → 不标记（(False, 0.0)），SSE 照常走无结果降级路径"""
+        with mock.patch("llm.client.LLMFactory.get_client") as gc:
+            gc.return_value = _FakeLLM()
+            events, status = _hit_stream(_GenCapture(), docs=[])
+        assert status == 200
+        step = self._retrieval_data(events)
+        assert step.get("suspected_misclassify") is False
+        assert step.get("top_abs_cosine") is None
+        assert [e["event"] for e in events][-1] == "done"

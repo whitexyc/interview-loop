@@ -174,6 +174,7 @@ async def react_loop(
     messages: list,
     budget: int,
     tools: Optional[ToolRegistry] = None,
+    max_answer_len: int = 0,
 ) -> AsyncGenerator[dict, None]:
     """ReAct 循环核心（异步生成器，逐事件产出，供 react_agent 与 SSE 端点复用）
 
@@ -182,6 +183,7 @@ async def react_loop(
         messages: 会话消息（system + history + 当前问题，会追加工具结果）
         budget: 工具总调用次数上限（≥0）
         tools: 工具注册表，默认全局 registry
+        max_answer_len: 答案最大长度（0=不限制），超出截断并附加标记
 
     Yields 事件:
       {"type": "tool_call",   "name": str, "args": dict, "tool_count": int}
@@ -196,11 +198,14 @@ async def react_loop(
     tools = tools or registry
     client = LLMFactory.get_client()
     budget = int(budget or 0)
+    max_answer_len = int(max_answer_len or 0)
     tool_count = 0
 
     # 预算=0：不调用工具，LLM 直接回答（验收 §1.2「预算=0：直接生成」）
     if budget <= 0:
         answer = await client.chat(messages)
+        if max_answer_len and len(answer) > max_answer_len:
+            answer = answer[:max_answer_len] + "\n\n[答案过长，已截断]"
         yield {"type": "done", "answer": answer, "tool_count": 0}
         return
 
@@ -212,6 +217,8 @@ async def react_loop(
         # 无 tool_call：LLM 认为信息足够，直接输出答案
         if not tool_calls:
             if content:
+                if max_answer_len and len(content) > max_answer_len:
+                    content = content[:max_answer_len] + "\n\n[答案过长，已截断]"
                 yield {"type": "token", "content": content}
             yield {"type": "done", "answer": content, "tool_count": tool_count}
             return
@@ -257,6 +264,8 @@ async def react_loop(
         ctx.query, ctx.docs, history=ctx.history, memory=ctx.memory,
         scratchpad=ctx.scratchpad,
     )
+    if max_answer_len and len(answer) > max_answer_len:
+        answer = answer[:max_answer_len] + "\n\n[答案过长，已截断]"
     if answer:
         yield {"type": "token", "content": answer}
     yield {"type": "done", "answer": answer, "tool_count": tool_count}
