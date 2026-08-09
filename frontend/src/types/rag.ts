@@ -181,3 +181,16 @@ export interface DocumentListResponse {
   page: number;
   page_size: number;
 }
+
+/**
+ * 反馈请求 — module-048 反馈飞轮：对应后端 POST /ai/feedback 入参
+ * （feedback 表是层 4 分类器再训练的数据源）
+ */
+export interface FeedbackRequest {
+  /** 持久化消息 ID（Java 后端消息主键；无 message_id 的历史消息不展示反馈按钮） */
+  message_id: number;
+  /** 评价：1 = 有帮助（👍），-1 = 无帮助（👎） */
+  rating: 1 | -1;
+  /** 可选评论（后端限制 ≤500 字符；前端当前不采集，留待后续扩展） */
+  comment?: string;
+}

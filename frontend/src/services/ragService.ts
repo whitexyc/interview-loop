@@ -31,6 +31,7 @@ import type {
   ToolCallEvent,
   ToolResultEvent,
   VerifiedClaim,
+  FeedbackRequest,
 } from '../types/rag';
 import type { ApiResponse } from '../types/api';
 
@@ -349,4 +350,17 @@ export async function deleteDocument(id: number): Promise<void> {
   const response = await http.delete<ApiResponse<unknown>>(`/documents/${id}`);
   const body = response.data;
   if (body.code !== 0) throw new Error(body.msg || '删除失败');
+}
+
+/**
+ * 提交消息反馈 — module-048 反馈飞轮（层 4 分类器再训练数据源）
+ *
+ * 对应后端 POST /ai/feedback，rating ∈ {1, -1}，comment 可选 ≤500。
+ * 落库失败（4xx/5xx）时 axios 自动抛错，调用方 Toast 失败提示；
+ * 反馈链路与聊天链路解耦，失败不阻塞对话。
+ *
+ * @param payload - { message_id, rating, comment? }
+ */
+export async function submitFeedback(payload: FeedbackRequest): Promise<void> {
+  await http.post('/feedback', payload);
 }

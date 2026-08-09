@@ -170,7 +170,10 @@ class RouterAgent:
                 # 类别外漂移导致路由落入未知分支）
                 if intent not in ("knowledge", "casual_chat", "realtime"):
                     intent = "knowledge"
-                confidence = probs[intent]
+                # module-048 WP5: probs 缺键防御——白名单修正为 knowledge 后
+                # 该键可能不存在（真实分类器缺 knowledge 键），回退默认置信度
+                # 0.0，不抛 KeyError（缺键时语义等同于"该意图无置信度"）
+                confidence = probs.get(intent, 0.0)
                 logger.info("意图识别(L4): query=%s, intent=%s, confidence=%.2f",
                             query[:50], intent, confidence)
                 return {"intent": intent, "confidence": round(confidence, 4),

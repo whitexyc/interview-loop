@@ -23,9 +23,9 @@ from src.identity import parse_jwt, resolve_identity
 from rag.engine import rag_engine
 from rag.schemas import (
     SearchRequest, SearchResponse, ChatRequest, ChatResponse,
-    MemorySaveRequest, MemoryRecallRequest,
+    MemorySaveRequest, MemoryRecallRequest, FeedbackRequest,
 )
-from rag.models import Document
+from rag.models import Document, Feedback
 from rag.memory import memory_service
 from llm.client import LLMFactory
 
@@ -695,6 +695,39 @@ async def memory_recall(request: MemoryRecallRequest, fastapi_req: Request):
     except Exception as e:
         logger.error("记忆检索失败: %s", e, exc_info=True)
         return {"code": 1, "data": {"memories": []}, "message": "记忆检索失败"}
+
+
+# ─── 用户反馈 API（module-048 反馈飞轮）───
+
+
+@app.post("/ai/feedback")
+async def submit_feedback(request: FeedbackRequest, fastapi_req: Request):
+    """提交用户反馈（👍/👎，module-048 反馈飞轮）
+
+    feedback 表是层 4 分类器（intent/充分性）再训练的数据源：前端每条
+    AI 回复可点赞/点踩 + 可选评论，落库累积标注数据。
+
+    identity 从 request.state 取（user_id 优先 client_ip 兜底，对齐现有
+    中间件注入与 /ai/rag/chat 口径）。Pydantic 已校验 rating ∈ {1,-1}、
+    comment ≤500（非法值 422 拦截，防落库污染）；落库失败返回 500，
+    前端降级 Toast 提示，不阻塞聊天（降级验收 §6.1）。
+    """
+    try:
+        identity = resolve_identity(fastapi_req)
+        async with async_session_factory() as session:
+            session.add(Feedback(
+                message_id=request.message_id,
+                rating=request.rating,
+                comment=request.comment,
+                identity=identity,
+            ))
+            await session.commit()
+        logger.info("反馈落库: message_id=%d, rating=%d, identity=%s",
+                    request.message_id, request.rating, identity)
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error("反馈落库失败: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"message": "反馈保存失败"})
 
 
 @app.post("/ai/rag/documents")

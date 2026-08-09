@@ -62,3 +62,29 @@ class Document(Base):
             "metadata": self.meta,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
+
+
+class Feedback(Base):
+    """用户反馈模型 — 层 4 分类器（intent/充分性）再训练数据源（module-048）
+
+    👍👎 反馈飞轮：前端对每条 AI 回复点赞/点踩（可选评论），落 feedback 表
+    累积标注数据。feedback 与 documents 表无关（独立新表），message_id 先
+    落前端消息 ID，飞轮回填脚本再按需关联 query/answer（本模块不建外键）。
+    """
+
+    __tablename__ = "feedback"
+
+    id = Column(Integer, primary_key=True, autoincrement=True, comment="反馈 ID")
+    message_id = Column(Integer, nullable=False, index=True,
+                        comment="关联的消息 ID（飞轮回填用）")
+    rating = Column(Integer, nullable=False, comment="评分：1=赞，-1=踩")
+    comment = Column(Text, nullable=True, comment="补充评论（可选，≤500）")
+    identity = Column(String(256), nullable=False, default="",
+                      comment="反馈者身份（user_id 优先，client_ip 兜底）")
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), comment="创建时间"
+    )
+
+    def __repr__(self) -> str:
+        return (f"<Feedback id={self.id} message_id={self.message_id} "
+                f"rating={self.rating}>")

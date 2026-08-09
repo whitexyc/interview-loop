@@ -75,29 +75,6 @@ export default function ChatPage() {
   const [conversations, setConversations] = useState<ConversationInfo[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<number | null>(null);
 
-  // ── 反馈状态（M10） ──
-  const [feedbackMap, setFeedbackMap] = useState<Record<string, 'up' | 'down' | null>>({});
-
-  /** 挂载时从 localStorage 加载反馈数据 */
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem('rag_feedback');
-      if (saved) setFeedbackMap(JSON.parse(saved));
-    } catch { /* 数据损坏时静默忽略 */ }
-  }, []);
-
-  /** 处理反馈（toggle 模式：同按钮再点取消，异按钮切换） */
-  const handleFeedback = useCallback((messageIndex: number, rating: 'up' | 'down') => {
-    const key = `${activeConversationId}:${messageIndex}`;
-    setFeedbackMap((prev) => {
-      const current = prev[key];
-      const newRating = current === rating ? null : rating;
-      const next = { ...prev, [key]: newRating };
-      try { localStorage.setItem('rag_feedback', JSON.stringify(next)); } catch { /* 静默降级 */ }
-      return next;
-    });
-  }, [activeConversationId]);
-
   // ── ref ──
   const bottomRef = useRef<HTMLDivElement>(null);
   const pendingRef = useRef({ query: '', history: [] as { role: string; content: string }[] });
@@ -544,7 +521,6 @@ export default function ChatPage() {
           {messages.map((msg, i) => {
             const isLastAssistant = msg.role === 'assistant' && i === messages.length - 1;
             const isStreaming = loading && isLastAssistant && msg.content.length > 0;
-            const feedbackKey = activeConversationId ? `${activeConversationId}:${i}` : '';
             return (
               <ChatMessage
                 key={i}
@@ -553,10 +529,8 @@ export default function ChatPage() {
                 sources={msg.sources}
                 verifiedClaims={msg.verifiedClaims}
                 onCitationClick={handleCitationClick}
-                messageIndex={i}
+                messageId={msg.id}
                 isStreaming={isStreaming}
-                feedbackRating={feedbackMap[feedbackKey] ?? null}
-                onFeedback={handleFeedback}
               />
             );
           })}
@@ -650,6 +624,7 @@ export default function ChatPage() {
             <Input.TextArea
               value={input}
               onChange={(e) => setInput(e.target.value)}
+              maxLength={2000}
               onPressEnter={(e) => {
                 if (!e.shiftKey) {
                   e.preventDefault();

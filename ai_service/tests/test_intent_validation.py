@@ -628,6 +628,26 @@ class TestL4RouterInjection:
         assert result["intent"] == "knowledge"  # bogus 最高分被白名单拦截
         assert result["confidence"] == 0.1  # 置信度取白名单后 intent 的概率
 
+    def test_classifier_missing_knowledge_key_no_keyerror(self):
+        """module-048 WP5: probs 缺 knowledge 键 → 不抛 KeyError，回退默认置信度
+
+        真实分类器可能缺键：bogus 最高分被白名单修正为 knowledge 后，
+        probs["knowledge"] 会 KeyError（旧实现静默回退 LLM）。修复后
+        probs.get(intent, 0.0) 回退默认置信度，且不调用 LLM。
+        """
+        clf = _FakeClassifier(
+            probs={"casual_chat": 0.2, "realtime": 0.1, "bogus": 0.9},
+        )
+        agent = RouterAgent(intent_classifier=clf)
+
+        def boom(*args, **kwargs):
+            raise AssertionError("缺键防御不应触发 LLM 回退")
+
+        with mock.patch("llm.client.LLMFactory.get_client", side_effect=boom):
+            result = asyncio.run(agent.classify("什么是GC"))
+        assert result["intent"] == "knowledge"  # bogus 白名单归 knowledge
+        assert result["confidence"] == 0.0  # 缺 knowledge 键 → 回退默认置信度
+
     def test_default_llm_when_not_injected(self):
         agent = RouterAgent()
         payload = '{"intent": "casual_chat", "confidence": 0.9, "reason": "闲聊"}'

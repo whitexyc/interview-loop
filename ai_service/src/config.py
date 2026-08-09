@@ -91,6 +91,13 @@ class Settings(BaseSettings):
     # 默认 false = 零额外 LLM 调用（成本翻倍，按需开启）
     sufficiency_self_check_enabled: bool = False
 
+    # 反思充分性硬闸门阈值（module-048，module-047 实测数据结论）：
+    # check_sufficiency 层 1 top-1 abs_cosine < 该值 → 直接判不充分（零 LLM）。
+    # module-047 阈值扫描：0.4 漏判 60% 不充分；0.55 切在分布间隙上缘
+    #（充分 min 0.490 / 不充分 max 0.550），F1=0.98 最优且误杀与 0.5 相同
+    #（1/50）。不得改回 0.4（红线）。
+    sufficiency_gate_threshold: float = 0.55
+
     model_config = {"env_prefix": "PW_", "env_file": ".env"}
 
 

@@ -41,8 +41,9 @@ from src.config import settings
 logger = logging.getLogger(__name__)
 
 # ── 层 1 分数/数量硬闸门阈值（ADR-0005，module-044）──
+# 分数阈值读配置 settings.sufficiency_gate_threshold（module-048：默认 0.55，
+# module-047 实测数据结论——0.4 漏判 60% 不充分、0.55 F1=0.98 切在分布间隙上缘）
 _SUFFICIENCY_MIN_DOCS = 2          # 文档数 < 2 → 直接判不充分（零 LLM）
-_SUFFICIENCY_MIN_ABS_COSINE = 0.4  # top-1 绝对余弦 < 0.4 → 直接判不充分（零 LLM）
 
 # 反思 prompt：判断检索结果是否充分
 # 要求 LLM 输出 JSON，包含 sufficient（是否充分）和 rewritten_query（改写后的查询）。
@@ -188,14 +189,15 @@ class Reflector:
         # ── 层 1 分数闸门（零 LLM）──
         # abs_cosine：module-043 在 retriever 归一化前存档，engine 精排后 docs
         # 仍含该字段（rerank 不删字段）；仅 FTS 命中文档无该字段 → None 跳过
-        # 闸门走 LLM（不误杀）。
+        # 闸门走 LLM（不误杀）。阈值读配置（module-048：默认 0.55）。
         top1_abs = documents[0].get("abs_cosine", None)
         if top1_abs is not None:
+            gate = settings.sufficiency_gate_threshold
             try:
-                if float(top1_abs) < _SUFFICIENCY_MIN_ABS_COSINE:
+                if float(top1_abs) < gate:
                     return {"sufficient": False,
                             "reason": f"top-1 绝对余弦 {float(top1_abs):.3f} < "
-                                      f"{_SUFFICIENCY_MIN_ABS_COSINE}",
+                                      f"{gate}",
                             "rewritten_query": query}
             except (TypeError, ValueError):
                 # 异常值不误杀：跳过闸门走 LLM 判断

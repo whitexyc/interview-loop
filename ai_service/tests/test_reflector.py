@@ -213,15 +213,17 @@ class TestCheckSufficiencyGates:
     """module-044: check_sufficiency 层 1 分数/数量硬闸门 + 层 2 prompt 强化 + 层 3 多信号融合
 
     覆盖（验收 §1/§2/§5/§7，ADR-0005 层 1-3）：
-    - 分数闸门：top-1 abs_cosine < 0.4 → 直接不充分 + rewritten_query，零 LLM 调用
+    - 分数闸门：top-1 abs_cosine < 0.55 → 直接不充分 + rewritten_query，零 LLM 调用
+    - 分数闸门 module-048：0.45 在旧阈值 0.4 下会漏判进 LLM → 新阈值直接判不充分
     - 数量闸门：文档数 < 2 → 直接不充分 + rewritten_query，零 LLM 调用
-    - 达标走 LLM：≥0.4 → 才进 LLM 判模糊地带；LLM 判不充分 → 尊重语义走 rewritten_query
+    - 达标走 LLM：≥0.55 → 才进 LLM 判模糊地带；LLM 判不充分 → 尊重语义走 rewritten_query
     - prompt 结构：_CHECK_PROMPT 含 few-shot 正反例 + CoT 信息点比对步骤
     - 自洽性检查：默认关（单次调用，零额外）；开启时两温度各判一次、不一致 → 保守充分
     - 降级：abs_cosine 缺失 → 走 LLM（不误杀）；LLM 异常 → 默认充分（防死循环）
 
     实现说明：与既有用例同风格——mock 打桩 LLMFactory.get_client，
-    asyncio.run 执行，不依赖 pytest-asyncio。
+    asyncio.run 执行，不依赖 pytest-asyncio。阈值读配置
+    settings.sufficiency_gate_threshold（module-048 默认 0.55）。
     """
 
     @staticmethod
@@ -237,7 +239,7 @@ class TestCheckSufficiencyGates:
         ]
 
     def test_gate_top1_score_below_threshold_no_llm(self):
-        """层 1 分数闸门：top-1 abs_cosine=0.25 < 0.4 → 直接不充分，零 LLM 调用"""
+        """层 1 分数闸门：top-1 abs_cosine=0.25 < 0.55 → 直接不充分，零 LLM 调用"""
         async def run():
             r = Reflector()
             docs = self._sample_docs(top1_abs=0.25)
@@ -248,8 +250,27 @@ class TestCheckSufficiencyGates:
         result, mock_get = asyncio.run(run())
         assert result["sufficient"] is False
         assert result["rewritten_query"] == "线程池参数"
-        assert "0.4" in result["reason"]
+        assert "0.55" in result["reason"]
         mock_get.assert_not_called()  # 零 LLM 调用断言
+
+    def test_gate_threshold_0_55_catches_0_45(self):
+        """module-048 AC 场景 4：top-1 abs_cosine=0.45 → 直接判不充分（零 LLM）
+
+        旧阈值 0.4 下 0.45 会漏判进 LLM（module-047 实测漏判 60% 不充分）；
+        0.55 切在分布间隙上缘（充分 min 0.490 / 不充分 max 0.550）。
+        """
+        async def run():
+            r = Reflector()
+            docs = self._sample_docs(top1_abs=0.45)
+            with mock.patch("llm.client.LLMFactory.get_client") as mock_get:
+                result = await r.check_sufficiency("线程池参数", docs)
+            return result, mock_get
+
+        result, mock_get = asyncio.run(run())
+        assert result["sufficient"] is False
+        assert result["rewritten_query"] == "线程池参数"
+        assert "0.55" in result["reason"]
+        mock_get.assert_not_called()  # 硬闸门零 LLM 调用断言
 
     def test_gate_fewer_than_two_docs_no_llm(self):
         """层 1 数量闸门：只有 1 篇文档 → 直接不充分，零 LLM 调用"""
@@ -266,7 +287,7 @@ class TestCheckSufficiencyGates:
         mock_get.assert_not_called()
 
     def test_score_passes_gate_goes_llm(self):
-        """分数达标（0.7 ≥ 0.4）→ 才进 LLM 判模糊地带；LLM 判充分 → sufficient=true（零回归）"""
+        """分数达标（0.7 ≥ 0.55）→ 才进 LLM 判模糊地带；LLM 判充分 → sufficient=true（零回归）"""
         async def run():
             r = Reflector()
             docs = self._sample_docs(top1_abs=0.7)
