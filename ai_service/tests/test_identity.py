@@ -263,12 +263,14 @@ class TestEngineRecallIdentity:
         captured = {}
 
         async def run():
-            async def fake_recall(query, identity, top_k=3):
+            # module-037: memory_service.recall / recall_short 的 top_k 默认值 3→5
+            # 本测试验证"透传"语义，fake 默认值需与当前实现一致
+            async def fake_recall(query, identity, top_k=5):
                 captured["identity"] = identity
                 captured["top_k"] = top_k
                 return []
 
-            async def fake_recall_short(query, identity, top_k=3):
+            async def fake_recall_short(query, identity, top_k=5):
                 captured["short_identity"] = identity
                 captured["short_top_k"] = top_k
                 return []
@@ -285,10 +287,10 @@ class TestEngineRecallIdentity:
 
         asyncio.run(run())
         assert captured["identity"] == "42"
-        assert captured["top_k"] == 3
+        assert captured["top_k"] == 5
         # module-034：短期召回同样按身份隔离透传
         assert captured["short_identity"] == "42"
-        assert captured["short_top_k"] == 3
+        assert captured["short_top_k"] == 5
 
     def test_empty_identity_returns_without_calling_service(self):
         async def run():
