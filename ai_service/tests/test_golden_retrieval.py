@@ -209,10 +209,12 @@ class TestRunEvalEndToEnd:
         assert cap["golden_docs"] == ["8-Spring-Cloud-Nacos服务注册发现与配置中心_2026-07-18"]
         assert cap["hit_at_k"] == 1.0
 
-        # 30 题：23 题评估 + 7 题无 gold 跳过（原 6 题 + 本次新增 Docker）
-        assert scores["dataset_size"] == 30
-        assert scores["evaluated"] == 23
-        assert scores["skipped"] == 7
+        # module-047 扩样本后规模可变：断言数据集规模关系而非硬编码数量
+        golden = golden_retrieval.load_golden()
+        expected_empty = sum(1 for q in golden if not q["golden_docs"])
+        assert scores["dataset_size"] == len(golden)
+        assert scores["skipped"] == expected_empty
+        assert scores["evaluated"] == scores["dataset_size"] - expected_empty
 
 
 class TestMethodLengthLimit:
