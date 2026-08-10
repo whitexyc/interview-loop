@@ -86,10 +86,24 @@ _CHECK_PROMPT = """你是一个严格的答案质量检查员，倾向于使用�
 
 只返回 JSON，不要其他文字。"""
 
-# 验证 prompt：逐句检查答案是否被检索文档支持
-# 要求 LLM 拆解答案→逐条标注 supported/inferred/unsupported→返回 JSON 数组。
-# 用于模块 module-039 证据链幻觉检测。
-_VERIFY_PROMPT = """你是 RAG 系统的答案验证专家。检查以下答案是否被检索文档支持。
+# 验证 prompt（module-051 拆分，ADR-0010 P0-②）：只负责把答案拆成独立陈述句。
+# verdict/evidence 由 HHEM 专职裁判判定（同 LLM 验证自己输出的同源问题，
+# 换专职裁判解决）；LLM 不再判分（原全量版本保留为 _VERIFY_LLM_PROMPT 供降级链使用）。
+_VERIFY_PROMPT = """你是 RAG 系统的答案拆解器。把以下答案拆成独立的陈述句（claims）。
+
+## 待拆解答案
+{answer}
+
+## 任务
+1. 把答案拆成独立的陈述句（claims），每条 1-2 句话
+2. 只输出 claims 文本数组，不要其他文字、不要 JSON 对象
+
+格式：["claim 1", "claim 2", ...]"""
+
+# 验证 prompt 全量版（module-039 原版，module-051 保留供降级链使用）：
+# 拆句 + 判 verdict + 填 evidence 一步完成。HHEM 不可用 / 开关 "llm" 时走此路径，
+# 行为与 module-039 完全一致（降级路径行为不漂移）。
+_VERIFY_LLM_PROMPT = """你是 RAG 系统的答案验证专家。检查以下答案是否被检索文档支持。
 
 ## 检索文档
 {docs_text}
@@ -370,8 +384,15 @@ class Reflector:
     async def verify_answer(self, answer: str, docs: list[dict]) -> dict:
         """逐句验证答案是否被检索文档支持（证据链幻觉检测，module-039）
 
-        把 LLM 生成的答案拆成逐条陈述（claims），标注每条的
-        supported/inferred/unsupported 判定，计算整体置信度。
+        module-051（ADR-0010 P0-②）拆分：LLM 只负责拆句，verdict/evidence
+        改由 HHEM-2.1-Open 专职裁判判定（解决同源验证 + 引用号伪验证 + 降低成本）。
+
+        链路：
+            1. LLM 拆句（_VERIFY_PROMPT 纯拆句，15s 超时）
+            2. HHEM 判分（每 claim 对每文档打分 → max 分映射三态，evidence=max 分文档号）
+            3. 降级链：HHEM 不可用 → LLM 全量判分（_VERIFY_LLM_PROMPT，行为与
+               module-039 一致）→ LLM 也失败 → 空 claims；开关 verify_judge_model="llm"
+                → 完全不加载 HHEM 直走旧逻辑（零回归开关）
 
         Args:
             answer: LLM 生成的答案文本（含 [N] 引用标记）
@@ -401,18 +422,34 @@ class Reflector:
             return empty_result
 
         try:
-            # 组装完整文档内容（非截断——验证需要全文上下文判断依据）
+            # 组装完整文档内容（非截断——降级路径 LLM 判分需要全文上下文判断依据）
             docs_text = "\n\n".join(
                 f"[{i + 1}] {d.get('title', '')}\n来源: {d.get('source', '')}\n内容: {d.get('content', '')}"
                 for i, d in enumerate(docs)
             )
-            client = LLMFactory.get_client(self._provider, temperature=0)
-            prompt = _VERIFY_PROMPT.format(docs_text=docs_text, answer=answer)
-            response = await asyncio.wait_for(client.generate(prompt), timeout=15)
-            claims = self._parse_verification(response)
+            doc_count = len(docs)
+
+            if settings.verify_judge_model == "hhem":
+                # ── HHEM 模式：LLM 拆句 → HHEM 判分（module-051 主路径）──
+                client = LLMFactory.get_client(self._provider, temperature=0)
+                prompt = _VERIFY_PROMPT.format(answer=answer)
+                response = await asyncio.wait_for(client.generate(prompt), timeout=15)
+                claims = self._parse_claims(response)
+                if claims:
+                    judged = await self._judge_by_hhem(claims, docs)
+                    if judged is None:
+                        # HHEM 不可用（缺失/加载失败/推理异常）→ 回退 LLM 判分
+                        claims = await self._judge_by_llm(answer, docs_text)
+                    else:
+                        claims = judged
+                # claims 为空：HHEM 不调用，返回空结果（现有降级哲学）
+            else:
+                # ── 开关 "llm"：完全不加载 HHEM，直走旧逻辑（零回归开关）──
+                claims = await self._judge_by_llm(answer, docs_text)
 
             # 校验 evidence 引用号：越界则降级为 unsupported
-            doc_count = len(docs)
+            #（HHEM 路径 max 分来源文档天然不越界，此为兼容旧 claims 结构；
+            #  LLM 路径防引用号编造）
             for c in claims:
                 evidence = c.get("evidence", "")
                 ref_match = None
@@ -450,6 +487,87 @@ class Reflector:
             logger.warning("verify_answer 失败，返回空 claims: %s", e)
             return empty_result
 
+    async def _judge_by_hhem(self, claims: list[dict], docs: list[dict]) -> Optional[list[dict]]:
+        """HHEM 专职裁判：每 claim 对每篇文档打分，max 分映射三态（module-051）
+
+        映射（阈值读配置，ADR-0010 P0-②）：
+            max_score ≥ verify_hhem_threshold_high (0.7) → supported
+            verify_hhem_threshold_low (0.3) ≤ max_score < 0.7 → inferred
+            max_score < 0.3 → unsupported
+        evidence = max 分对应文档号（1-based，与现结构一致）；unsupported 填 "N/A"。
+
+        Args:
+            claims: LLM 拆句结果 [{"claim": str}, ...]
+            docs: 检索到的文档列表
+
+        Returns:
+            带 verdict/evidence 的 claims；HHEM 不可用（缺失/推理异常）→ None
+            （由 verify_answer 降级 LLM 判分）
+        """
+        try:
+            # 兼容旧格式（module-039 存量语义 + 防双重判定）：LLM 未听新 prompt 指令、
+            # 返回了带 verdict 的旧结构 claims → 视为已预判结果直接采用，不再由 HHEM
+            # 重复判定（证据号越界校验由 verify_answer 统一兜底）
+            if any("verdict" in c for c in claims):
+                return claims
+
+            from rag.retrieval.factcheck_judge import hhem_judge
+
+            high = settings.verify_hhem_threshold_high
+            low = settings.verify_hhem_threshold_low
+            doc_texts = [d.get("content", "") for d in docs]
+            n_docs = len(doc_texts)
+            claim_texts = [c["claim"] for c in claims]
+            # 交叉构造 (doc, claim) 对：先固定 claim 再遍历 docs（每 claim 段长度 = n_docs）
+            flat_docs = [t for _ in claim_texts for t in doc_texts]
+            flat_claims = [c for c in claim_texts for _ in doc_texts]
+            scores = await hhem_judge.predict(flat_docs, flat_claims)
+            if scores is None:
+                return None
+            if len(scores) != len(flat_claims):
+                logger.warning("HHEM 返回分数数量异常（%d vs %d），降级 LLM 判分",
+                               len(scores), len(flat_claims))
+                return None
+
+            judged = []
+            for j, c in enumerate(claims):
+                seg = scores[j * n_docs:(j + 1) * n_docs]
+                best_idx = max(range(n_docs), key=lambda i: seg[i])
+                max_score = seg[best_idx]
+                if max_score >= high:
+                    verdict, evidence = "supported", f"[{best_idx + 1}]"
+                elif max_score >= low:
+                    verdict, evidence = "inferred", f"[{best_idx + 1}]"
+                else:
+                    verdict, evidence = "unsupported", "N/A"
+                judged.append({**c, "verdict": verdict, "evidence": evidence})
+            return judged
+        except Exception as e:
+            logger.warning("HHEM 判定失败，降级 LLM 判分: %s", e)
+            return None
+
+    async def _judge_by_llm(self, answer: str, docs_text: str) -> list[dict]:
+        """LLM 判分降级路径（module-051：HHEM 不可用 / 开关 "llm" 时使用）
+
+        复用旧全量 prompt _VERIFY_LLM_PROMPT（拆句 + 判分 + evidence 一步完成），
+        返回结构与 module-039 完全一致（降级路径行为不漂移）。
+        evidence 引用号越界校验由 verify_answer 统一兜底。
+
+        Args:
+            answer: LLM 生成的答案文本
+            docs_text: 完整文档上下文（"[N] 标题\n内容" 拼接）
+
+        Returns:
+            带 verdict/evidence 的 claims（可能为空）
+
+        Raises:
+            asyncio.TimeoutError / Exception: 由 verify_answer 外层兜底返回空 claims
+        """
+        client = LLMFactory.get_client(self._provider, temperature=0)
+        prompt = _VERIFY_LLM_PROMPT.format(docs_text=docs_text, answer=answer)
+        response = await asyncio.wait_for(client.generate(prompt), timeout=15)
+        return self._parse_verification(response)
+
     @staticmethod
     def _parse_verification(response: str) -> list[dict]:
         """解析 LLM 返回的验证 JSON 数组
@@ -473,6 +591,43 @@ class Reflector:
                     ]
         except (json.JSONDecodeError, ValueError, TypeError) as e:
             logger.warning("解析验证结果失败: %s", e)
+        return []
+
+    @staticmethod
+    def _parse_claims(response: str) -> list[dict]:
+        """解析 LLM 拆句 JSON 数组（module-051：纯拆句，不判 verdict）
+
+        输出 [{"claim": str}, ...]（verdict/evidence 由 HHEM 判定后填充）。
+        与 _parse_verification 类似处理非 JSON 杂质；容忍 dict 项（取 claim 字段）
+        与空白过滤；dict 项若已带 verdict/evidence（LLM 未听指令返回旧格式），
+        原样保留（缺 evidence 时补默认 "N/A"）——_judge_by_hhem 据此判定为
+        预判结果直接采用（兼容 module-039 存量语义，防双重判定）。
+        """
+        try:
+            start = response.find("[")
+            end = response.rfind("]")
+            if start != -1 and end != -1 and end > start:
+                parsed = json.loads(response[start:end + 1])
+                if isinstance(parsed, list):
+                    claims = []
+                    for item in parsed:
+                        text = item if isinstance(item, str) else (
+                            item.get("claim", "") if isinstance(item, dict) else "")
+                        text = text.strip()
+                        if text:
+                            claim = {"claim": text}
+                            if isinstance(item, dict):
+                                if "verdict" in item:
+                                    claim["verdict"] = item.get("verdict", "unsupported")
+                                    # 旧格式可能缺 evidence 键：默认 "N/A"（对齐
+                                    # _parse_verification），前端 parseEvidenceRef 不抛错
+                                    claim["evidence"] = item.get("evidence", "N/A")
+                                if "evidence" in item:
+                                    claim["evidence"] = item.get("evidence", "N/A")
+                            claims.append(claim)
+                    return claims
+        except (json.JSONDecodeError, ValueError, TypeError) as e:
+            logger.warning("解析拆句结果失败: %s", e)
         return []
 
     @staticmethod

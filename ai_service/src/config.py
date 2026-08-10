@@ -108,6 +108,17 @@ class Settings(BaseSettings):
     query_rewrite_enabled: bool = False
     rewrite_fidelity_threshold: float = 0.6  # 保真预检阈值：改写与原 query 余弦低于该值 → 回退原话
 
+    # 答案验证裁判（module-051 / ADR-0010 P0-②）：
+    # verify_answer 的 verdict 判定模型——"hhem"（默认）：LLM 拆句 + HHEM-2.1-Open
+    # 批量判分（module-050 实测中文 Accuracy 0.77 显著胜出 MiniCheck 0.51，选型已定）；
+    # "llm"：完全不加载 HHEM，直走旧逻辑（零回归开关）。HHEM 不可用（缺失/加载失败/
+    # 推理异常）自动降级 LLM 判分，降级链保证默认 "hhem" 零风险。
+    verify_judge_model: str = "hhem"
+    # HHEM 三态映射阈值（经验值，标注集可校准）：每 claim 对每文档打分取 max →
+    # max_score ≥ high → supported；low ≤ max_score < high → inferred；< low → unsupported
+    verify_hhem_threshold_high: float = 0.7
+    verify_hhem_threshold_low: float = 0.3
+
     model_config = {"env_prefix": "PW_", "env_file": ".env"}
 
 

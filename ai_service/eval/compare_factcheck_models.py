@@ -141,26 +141,16 @@ _hhem = {}
 
 
 def load_hhem() -> None:
+    # module-051：加载逻辑提取为共享模块 rag/retrieval/hhem_loader.py（单一来源），
+    # 与 verify_answer 的 HHEM 裁判（factcheck_judge.py）共用同一已验证加载路径。
+    # _require_model 仍保留：MiniCheck（HF cache 布局）与 HHEM 双布局探测都在用它。
     ckpt = f"{MODELS_DIR}/hhem-2.1-open"
     _require_model(ckpt, ["model.safetensors", "config.json",
                           "configuration_hhem_v2.py", "modeling_hhem_v2.py"])
-    os.environ["HF_HUB_OFFLINE"] = "1"
 
-    from safetensors.torch import load_file
-    from transformers.dynamic_module_utils import get_class_from_dynamic_module
+    from rag.retrieval.hhem_loader import load_hhem_model
 
-    HHEMv2Config = get_class_from_dynamic_module("configuration_hhem_v2.HHEMv2Config", ckpt)
-    HHEMv2ForSequenceClassification = get_class_from_dynamic_module(
-        "modeling_hhem_v2.HHEMv2ForSequenceClassification", ckpt)
-
-    cfg = HHEMv2Config.from_pretrained(ckpt)
-    model = HHEMv2ForSequenceClassification(cfg)
-    state = load_file(f"{ckpt}/model.safetensors")
-    # 检查点（transformers 4.x）只有 shared，5.x 模型 embed_tokens 与 shared 绑定 → 展开
-    state["t5.transformer.encoder.embed_tokens.weight"] = state["t5.transformer.shared.weight"]
-    model.load_state_dict(state, strict=True)
-    model.eval()
-    _hhem["model"] = model
+    _hhem["model"] = load_hhem_model(ckpt)
 
 
 def hhem_score(docs: list[str], claims: list[str]) -> np.ndarray:
