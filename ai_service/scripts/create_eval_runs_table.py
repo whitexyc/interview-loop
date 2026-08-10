@@ -9,6 +9,10 @@ DDL 单源定义在 eval/golden_retrieval.py 的 EVAL_RUNS_DDL，
 评估脚本在写库前也会自动执行同一 DDL（自愈建表）。
 """
 import asyncio
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # ai_service 根
 
 from eval.golden_retrieval import EVAL_RUNS_DDL, ensure_eval_runs_table
 

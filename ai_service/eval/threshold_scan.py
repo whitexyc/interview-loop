@@ -25,7 +25,7 @@
 
 扫描 ②（硬闸门阈值，t ∈ [0.2, 0.6] 步长 0.05）:
     数据: eval.golden_sufficiency.SUFFICIENCY_DATASET 100 条 ×
-          实测相似度: 用生产同款 bge-m3 本地嵌入（rag.embeddings）计算
+          实测相似度: 用生产同款 bge-m3 本地嵌入（rag.retrieval.embeddings）计算
           question 与每条注入文档（扮演"检索到的文档"）的余弦，
           top-1 = 每条两篇文档的最大余弦（对应生产闸门读取的 top-1 abs_cosine）。
     模拟: 逐 t 的闸门单独分类器——top-1 < t → 判不充分，否则默认充分
@@ -59,7 +59,7 @@ from agent.router import RouterAgent, _PROMPT_TEMPLATE, router_agent
 from eval.golden_intent import load_intent_dataset
 from eval.golden_sufficiency import load_sufficiency_dataset
 from llm.client import LLMFactory
-from rag.embeddings import embedding_service
+from rag.retrieval.embeddings import embedding_service
 
 logging.basicConfig(
     level=logging.INFO,

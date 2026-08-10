@@ -38,8 +38,8 @@ from agent.router import RouterAgent
 from eval.golden_retrieval import (
     compute_metrics, get_git_commit, load_rag_config, load_golden, save_eval_run,
 )
-from rag import query_rewrite
-from rag.retriever import hybrid_retriever
+from rag.retrieval import query_rewrite
+from rag.retrieval.retriever import hybrid_retriever
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,7 +53,7 @@ TOP_K = 5
 def heuristic_triage(query: str) -> str:
     """fixture 启发式分诊：分词术语存在即"命中"（确定性，不依赖 DB）
 
-    真实分诊（rag.query_rewrite.triage）查 FTS 倒排需要数据库；fixture
+    真实分诊（rag.retrieval.query_rewrite.triage）查 FTS 倒排需要数据库；fixture
     用 _kb_terms 非空近似"词表对得上"（module-020 语义的简化演示）。
     仅用于 fixture 模式演示管线，不代表真实分诊能力。
     """

@@ -39,7 +39,7 @@ import logging
 
 from agent.router import fts_term_hit
 from llm.client import LLMFactory
-from rag.embeddings import embedding_service
+from rag.retrieval.embeddings import embedding_service
 from src.config import settings
 
 logger = logging.getLogger(__name__)

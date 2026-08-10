@@ -30,19 +30,19 @@ from llm.client import LLMFactory
 from src.cache import cache
 from rag.schemas import SearchRequest, SearchResponse, ChatRequest, ChatResponse, ChatSteps
 from rag.models import Document
-from rag.embeddings import embedding_service
-from rag.text_tokenizer import tokenize
-from rag.retriever import hybrid_retriever
-from rag.reranker import reranker
-from rag.chunker import chunker
+from rag.retrieval.embeddings import embedding_service
+from rag.retrieval.text_tokenizer import tokenize
+from rag.retrieval.retriever import hybrid_retriever
+from rag.retrieval.reranker import reranker
+from rag.retrieval.chunker import chunker
 from agent.router import router_agent
 from agent.reflector import reflector
-from rag.graph_store import graph_store
-from rag.graph_extractor import graph_extractor
-from rag.memory import memory_service, format_memory_line
-from rag.memory_extractor import extract_facts
-from rag.session_memory import session_memory_service
-from rag import query_rewrite
+from rag.graph.graph_store import graph_store
+from rag.graph.graph_extractor import graph_extractor
+from rag.memory.memory import memory_service, format_memory_line
+from rag.memory.memory_extractor import extract_facts
+from rag.memory.session_memory import session_memory_service
+from rag.retrieval import query_rewrite
 
 logger = logging.getLogger(__name__)
 

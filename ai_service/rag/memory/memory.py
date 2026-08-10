@@ -52,10 +52,10 @@ from sqlalchemy import delete, func, select, update
 from src.config import settings
 from src.database import async_session_factory
 from rag.models import Document
-from rag.chunker import chunker
-from rag.embeddings import embedding_service
-from rag.retriever import hybrid_retriever
-from rag.text_tokenizer import tokenize
+from rag.retrieval.chunker import chunker
+from rag.retrieval.embeddings import embedding_service
+from rag.retrieval.retriever import hybrid_retriever
+from rag.retrieval.text_tokenizer import tokenize
 
 logger = logging.getLogger(__name__)
 

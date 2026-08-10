@@ -34,7 +34,7 @@ from src.config import settings
 from src.database import async_session_factory
 from llm.client import LLMFactory
 from rag.models import Document
-from rag.memory import MEMORY_SOURCE_PREFIX, _normalize_identity
+from rag.memory.memory import MEMORY_SOURCE_PREFIX, _normalize_identity
 
 logger = logging.getLogger(__name__)
 

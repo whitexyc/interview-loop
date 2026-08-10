@@ -23,9 +23,9 @@ import logging
 from typing import Callable, Optional
 
 from rag.engine import rag_engine
-from rag.retriever import hybrid_retriever
-from rag.graph_store import graph_store
-from rag.graph_extractor import graph_extractor
+from rag.retrieval.retriever import hybrid_retriever
+from rag.graph.graph_store import graph_store
+from rag.graph.graph_extractor import graph_extractor
 from agent.reflector import reflector
 
 logger = logging.getLogger(__name__)

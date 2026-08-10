@@ -10,9 +10,9 @@ import os
 import sys
 import tempfile
 
-sys.path.insert(0, '.')
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # ai_service 根
 
-from rag.reranker import CrossEncoderReranker, RerankerException
+from rag.retrieval.reranker import CrossEncoderReranker, RerankerException
 
 
 async def main():

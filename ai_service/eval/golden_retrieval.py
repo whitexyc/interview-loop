@@ -37,7 +37,7 @@ from pathlib import Path
 from sqlalchemy import text
 
 from src.database import async_session_factory
-from rag.retriever import RetrievalException, hybrid_retriever
+from rag.retrieval.retriever import RetrievalException, hybrid_retriever
 
 logging.basicConfig(
     level=logging.INFO,

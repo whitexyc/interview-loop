@@ -9,7 +9,7 @@ jieba 中文分词工具 — Module-020 中文 FTS 复活
   search_tokens 列，'simple' 按空格切分即得到中文词元，可精确匹配。
 
 使用：
-  from rag.text_tokenizer import tokenize
+  from rag.retrieval.text_tokenizer import tokenize
   tokenize("Java线程池核心参数")   # -> "Java 线程 池 核心 参数"（空格连接）
 """
 import logging

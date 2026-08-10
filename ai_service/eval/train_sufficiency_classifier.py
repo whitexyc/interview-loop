@@ -13,7 +13,7 @@ sufficient（bool）——问题借 golden 集真实题目，文档为代表性�
 
 特征设计: 充分性由"问题能否被检索文档回答"决定，单靠问题无法判别——
 特征 = bge-m3 冻结 embedding 对"问题 + 检索文档内容"拼接文本编码
-（复用 rag.embeddings.embedding_service，1024 维；文档内容按序拼接）。
+（复用 rag.retrieval.embeddings.embedding_service，1024 维；文档内容按序拼接）。
 
 分类头: LogisticRegression（max_iter=500, class_weight="balanced" 抗类别
 不平衡，与 intent 分类器同款结构；训练/推理接口对齐 IntentClassifier）。
@@ -35,7 +35,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from rag.embeddings import embedding_service as default_embedding_service
+from rag.retrieval.embeddings import embedding_service as default_embedding_service
 
 logging.basicConfig(
     level=logging.INFO,
@@ -93,7 +93,7 @@ def load_training_samples() -> list[tuple[str, str]]:
 class SufficiencyClassifier:
     """bge-m3 冻结特征 + sklearn 逻辑回归头的充分性分类器
 
-    - 特征：复用 rag.embeddings.embedding_service（bge-m3 冻结，1024 维）
+    - 特征：复用 rag.retrieval.embeddings.embedding_service（bge-m3 冻结，1024 维）
       对"问题 + 检索文档"拼接文本编码
     - 分类头：LogisticRegression（class_weight="balanced" 抗类别不平衡）
     - fit(): 标注样本训练 → 落盘（joblib）

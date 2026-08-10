@@ -51,6 +51,12 @@
 | ai_service/backfill_search_tokens.py | module-020 | 脚本 | search_tokens 回填 | ✅ |
 | ai_service/backfill_graph.py | module-016 | 脚本 | 图数据补跑 | ✅ |
 | ai_service/rag_metadata_tables.sql | module-018 | SQL | rag_config + document_chunk_stats | ✅ |
+| ai_service/scripts/ | module-050 | 脚本 | 12 个一次性脚本迁移目录（backfill_*/create_*/migrate_*/download_model/do_all/reindex_knowledge_base/test_embedding/test_m17/test_m18/test_models） | ✅ |
+| ai_service/rag/retrieval/ | module-050 | 代码 | 检索子包（retriever/reranker/chunker/embeddings/text_tokenizer/query_rewrite） | ✅ |
+| ai_service/rag/graph/ | module-050 | 代码 | 图谱子包（graph/graph_extractor/graph_store） | ✅ |
+| ai_service/rag/memory/ | module-050 | 代码 | 记忆子包（memory/memory_extractor/session_memory） | ✅ |
+| ai_service/eval/compare_factcheck_models.py | module-050 | 代码 | HHEM vs MiniCheck 真实对比（Accuracy/F1/kappa/一致率/耗时，--limit/--skip-*） | ✅ |
+| ai_service/tests/test_compare_factcheck.py | module-050 | 测试 | 对比脚本单元测试（build_pairs/指标/kappa/模型缺失报错）12 项 | ✅ |
 
 ## 三、前端核心文件（frontend/，module-003+）
 
@@ -87,5 +93,6 @@
 | module-034 | specs/module-034-short-session-memory/ | ✅ 短期记忆+会话记忆（Tester 验收 36/36，2026-08-06） |
 | module-035 | specs/module-035-score-calibration/ | ✅ 分数口径校准（Tester 验收通过，35 项 32 通过 + 3 P3 不适用，2026-08-06） |
 | module-036 | specs/module-036-agent-memory/ | ✅ Agent 端点接入会话记忆（Tester 验收 29/29，全量 298/0 + 真实 E2E，2026-08-07） |
+| module-050 | specs/module-050-factcheck-compare/ | ✅ 幻觉检测模型对比（HHEM 0.77 vs MiniCheck 0.51；MiniCheck 中文退化）+ WP5 目录细分（rag 三子包 + scripts/），全量 579/0（2026-08-11） |
 
 > 每个模块目录含 plan.md / acceptance-criteria.md / changelog.md / review-report.md / test-report.md。

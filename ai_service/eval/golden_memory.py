@@ -21,7 +21,7 @@ Golden 记忆提取评测 — extract_facts P/R/F1 + eval_runs 版本化回归�
 提取器契约:
     run_eval(extractor=None, dataset=None) — extractor 为 async callable
     (item) -> list[str]（预测事实列表）。默认走 extract_facts 公共入口
-    （rag.memory_extractor.extract_facts，签名 query/answer/history，由
+    （rag.memory.memory_extractor.extract_facts，签名 query/answer/history，由
     dialogue 末轮 user/assistant 映射）；--fixture 走关键词启发式。
 
 版本化回归:
@@ -41,7 +41,7 @@ import re
 import sys
 
 from eval.golden_retrieval import get_git_commit, load_rag_config, save_eval_run
-from rag.memory_extractor import extract_facts
+from rag.memory.memory_extractor import extract_facts
 
 logging.basicConfig(
     level=logging.INFO,
@@ -191,7 +191,7 @@ def _dialogue_to_extract_inputs(dialogue: str):
 async def _extract_with_llm(item: dict) -> list[str]:
     """LLM 模式提取器：调用 extract_facts 公共入口，返回预测事实 content 列表
 
-    extract_facts(query, answer, history) 为公共接口（rag.memory_extractor），
+    extract_facts(query, answer, history) 为公共接口（rag.memory.memory_extractor），
     dialogue 经 _dialogue_to_extract_inputs 映射；提取失败 extract_facts 内部
     降级返回 []（不影响整体运行）。
 

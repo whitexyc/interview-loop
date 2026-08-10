@@ -31,8 +31,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
 from src.database import async_session_factory
-from rag.embeddings import EmbeddingService, embedding_service as default_embedding_service
-from rag.text_tokenizer import tokenize
+from rag.retrieval.embeddings import EmbeddingService, embedding_service as default_embedding_service
+from rag.retrieval.text_tokenizer import tokenize
 
 logger = logging.getLogger(__name__)
 
@@ -227,8 +227,8 @@ class HybridRetriever:
             关联文档列表；失败返回空列表
         """
         try:
-            from rag.graph_extractor import graph_extractor
-            from rag.graph_store import graph_store
+            from rag.graph.graph_extractor import graph_extractor
+            from rag.graph.graph_store import graph_store
 
             entities = await asyncio.wait_for(
                 graph_extractor.extract_from_query(query), timeout=10

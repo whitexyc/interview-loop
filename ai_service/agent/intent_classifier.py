@@ -25,7 +25,7 @@ import logging
 import os
 from typing import Optional
 
-from rag.embeddings import embedding_service as default_embedding_service
+from rag.retrieval.embeddings import embedding_service as default_embedding_service
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ _INTENT_LABELS = ("knowledge", "casual_chat", "realtime")
 class IntentClassifier:
     """bge-m3 冻结特征 + sklearn 逻辑回归头的意图分类器
 
-    - 特征：复用 rag.embeddings.embedding_service（bge-m3 冻结，1024 维）
+    - 特征：复用 rag.retrieval.embeddings.embedding_service（bge-m3 冻结，1024 维）
     - 分类头：LogisticRegression（class_weight="balanced" 抗类别不平衡——
       golden 集天然 knowledge 多，不补权会学成"永远猜 knowledge"）
     - fit(): 标注样本训练 → 落盘（joblib）

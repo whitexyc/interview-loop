@@ -26,7 +26,7 @@ from rag.schemas import (
     MemorySaveRequest, MemoryRecallRequest, FeedbackRequest,
 )
 from rag.models import Document, Feedback
-from rag.memory import memory_service
+from rag.memory.memory import memory_service
 from llm.client import LLMFactory
 
 
@@ -97,7 +97,7 @@ async def lifespan(app: FastAPI):
     await init_db()
 
     # 预热 embedding 模型 + LLM 客户端，避免首次请求卡顿
-    from rag.embeddings import embedding_service
+    from rag.retrieval.embeddings import embedding_service
     logger.info("预热 embedding 模型中...")
     await embedding_service.embed_text("warmup")
     logger.info("embedding 模型已就绪")

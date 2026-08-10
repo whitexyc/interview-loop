@@ -20,13 +20,16 @@ Module-020 backfill 脚本 — search_tokens 列迁移 + 已有子块文档 jieb
 """
 import asyncio
 import logging
+import os
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # ai_service 根
 
 from sqlalchemy import select, update, text
 
 from src.database import async_session_factory
 from rag.models import Document
-from rag.text_tokenizer import tokenize
+from rag.retrieval.text_tokenizer import tokenize
 
 logger = logging.getLogger(__name__)
 

@@ -299,7 +299,7 @@ class RouterAgent:
         Returns:
             候选术语列表；纯闲聊（如"你好呀"）可能为空
         """
-        from rag.text_tokenizer import tokenize
+        from rag.retrieval.text_tokenizer import tokenize
         return [
             tok for tok in tokenize(query).split()
             if len(tok) >= 2 and tok not in _FUNCTION_STOPWORDS
@@ -335,7 +335,7 @@ class RouterAgent:
         import json
         from sqlalchemy import text
         from src.database import async_session_factory
-        from rag.graph_store import GRAPH_NAME
+        from rag.graph.graph_store import GRAPH_NAME
         async with async_session_factory() as session:
             await session.execute(text("LOAD 'age'"))
             await session.execute(text('SET search_path = ag_catalog, "$user", public'))

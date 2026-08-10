@@ -1,7 +1,11 @@
 """测试 ModelScope 云端嵌入模型是否可用"""
 import asyncio
+import os
 import sys
-from rag.embeddings import embedding_service
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # ai_service 根
+
+from rag.retrieval.embeddings import embedding_service
 
 
 async def main():

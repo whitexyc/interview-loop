@@ -17,12 +17,15 @@ embedding 维度迁移脚本 — 384 → 1024（本地 bge-m3 GGUF）
 """
 import asyncio
 import logging
+import os
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # ai_service 根
 
 from sqlalchemy import text
 
 from src.database import async_session_factory
-from rag.embeddings import embedding_service
+from rag.retrieval.embeddings import embedding_service
 
 logger = logging.getLogger("migrate_embedding")
 

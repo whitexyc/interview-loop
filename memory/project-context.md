@@ -52,6 +52,7 @@
 | module-034 | 短期记忆 + 会话记忆（source 三层分层 long/short/session + 短期 TTL 7 天 + 会话持久化） | 0.34.0-module-034 | 2026-08-06 | ✅ 完成（Tester 验收 36/36；全量 278/0 + 真实 E2E；Reviewer 阻塞#1 双重调度由 team-lead 修复后复验通过） |
 | module-035 | 记忆/检索分数口径校准（动态K 绝对余弦 + 去重阈值 0.85 + min_score 移除失真阈值 + P3 RRF 评估不采纳） | 0.35.0-module-035 | 2026-08-06 | ✅ 完成（Tester 验收 35 项 32 通过 + 3 P3 不适用；全量 292/0 + 半真实 E2E K=5/3 真实可达） |
 | module-036 | Agent 端点接入会话记忆（agent/agent-lg 会话恢复 + 保存 + ReactContext.client_ip→identity 命名修正） | 0.36.0-module-036 | 2026-08-07 | ✅ 完成（Tester 验收 29/29；全量 298/0 + 新增 6 单测 + 真实 E2E 落库/恢复/隔离） |
+| module-050 | 幻觉检测模型真实对比（HHEM-2.1-Open vs MiniCheck-RoBERTa-Large，ADR-0010 P0-② 数据验证）+ WP5 目录细分（rag 三子包 + scripts/） | 0.50.0-module-050 | 2026-08-11 | ✅ 完成（HHEM 0.77 vs MiniCheck 0.51 Accuracy/F1 0.75 vs 0.04；MiniCheck 中文退化 Recall 0.02；全量 579/0 + 新增 12） |
 
 ## 4. 架构决策记录（ADR）索引
 | ADR 编号 | 决策标题 | 状态 | 日期 |

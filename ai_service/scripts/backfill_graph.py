@@ -17,14 +17,17 @@ Graph RAG 补跑脚本 — 对已有文档提取实体/关系并写入 AGE 图
 """
 import asyncio
 import logging
+import os
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # ai_service 根
 
 from sqlalchemy import select, text
 
 from src.database import async_session_factory
 from rag.models import Document
-from rag.graph_store import graph_store, GRAPH_NAME
-from rag.graph_extractor import graph_extractor
+from rag.graph.graph_store import graph_store, GRAPH_NAME
+from rag.graph.graph_extractor import graph_extractor
 
 logger = logging.getLogger("backfill_graph")
 
