@@ -98,6 +98,16 @@ class Settings(BaseSettings):
     #（1/50）。不得改回 0.4（红线）。
     sufficiency_gate_threshold: float = 0.55
 
+    # 分诊式 Query 改写（module-049 / ADR-0009）：
+    # 静态分诊（FTS 术语命中 → 精确 query 直接检索，零成本不走改写）+ 模糊
+    # query 走 LLM 改写 + 保真预检（改写 vs 原 query 余弦 < 阈值 → 回退原话，
+    # 省一次检索）+ 并行检索择优（改写检索 top-1 绝对余弦 > 原检索 → 用改写
+    # 结果，否则回退原结果）。改写链路任何一环失败 → 回退原 query（零回归）。
+    # 默认关闭（与 intent_classifier_enabled 同款 opt-in 模式，保证零回归）；
+    # 开启方式：PW_QUERY_REWRITE_ENABLED=true
+    query_rewrite_enabled: bool = False
+    rewrite_fidelity_threshold: float = 0.6  # 保真预检阈值：改写与原 query 余弦低于该值 → 回退原话
+
     model_config = {"env_prefix": "PW_", "env_file": ".env"}
 
 

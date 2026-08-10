@@ -42,6 +42,7 @@ from rag.graph_extractor import graph_extractor
 from rag.memory import memory_service, format_memory_line
 from rag.memory_extractor import extract_facts
 from rag.session_memory import session_memory_service
+from rag import query_rewrite
 
 logger = logging.getLogger(__name__)
 
@@ -247,6 +248,25 @@ class RAGEngine:
             current_query = request.query
             all_docs: list[dict] = []
             seen_ids: set[int] = set()
+            # module-049 分诊式改写（前置增强）：静态分诊（FTS 术语命中 →
+            # 精确 query 直接检索）+ 模糊 query 走 LLM 改写 + 保真预检 +
+            # 并行检索择优。rewrite_round0 非 None 时 = 并行择优结果，
+            # round 0 直接使用（不重复检索）；改写链路任何一环失败 →
+            # 回退原 query（与现状行为完全一致，零回归）。HyDE/反思兜底
+            # 均保留，本增强只把"改写时机"提前。
+            rewrite_round0: list[dict] | None = None
+            if settings.query_rewrite_enabled:
+                current_query, rewrite_round0, rewrite_info = await query_rewrite.prepare(
+                    request.query,
+                    lambda q: asyncio.wait_for(
+                        hybrid_retriever.retrieve(q, top_k=20), timeout=15,
+                    ),
+                )
+                if rewrite_info.get("mode") != "precise":
+                    logger.info("Query 改写: mode=%s, used_rewrite=%s, query=%s",
+                                rewrite_info.get("mode"),
+                                rewrite_info.get("used_rewrite", "-"),
+                                request.query[:50])
             # module-043 L3 后置校验：精排 top-1 绝对余弦 < 0.3 → 疑似误判标记
             #（先度量后干预：只写入 ChatSteps 可观测，不阻塞、不改回答路径）
             # module-045 WP2b/c：判定与展示同源——round 0 判定处由
@@ -257,10 +277,16 @@ class RAGEngine:
             top1_abs = 0.0
 
             for round_num in range(3):
-                docs = await asyncio.wait_for(
-                    hybrid_retriever.retrieve(current_query, top_k=20),
-                    timeout=15,
-                )
+                if round_num == 0 and rewrite_round0 is not None:
+                    # 分诊式改写已做并行择优（module-049），round 0 直接用
+                    # 择优结果，不再重复检索（rewrite_round0 为空列表时也
+                    # 直接进入无结果降级，与现状一致）
+                    docs = rewrite_round0
+                else:
+                    docs = await asyncio.wait_for(
+                        hybrid_retriever.retrieve(current_query, top_k=20),
+                        timeout=15,
+                    )
                 docs = await reranker.rerank(current_query, docs, top_k=5)
                 if round_num == 0:
                     suspected_misclassify, top1_abs = self._check_suspected_misclassify(docs)
@@ -662,9 +688,28 @@ class RAGEngine:
         all_docs: list[dict] = []
         existing_ids: set[int] = set()
         current_query = query
+        # module-049 分诊式改写（流式路径，查询级）：分诊（FTS 术语命中 →
+        # 直接检索）+ 模糊 query 走 LLM 改写 + 保真门控。不并行（round 0
+        # 已有向量+图并行与 HyDE 扩展，叠加成本翻倍且语义重叠）；改写通过
+        # 保真后作为 HyDE 扩展的基础 query（改写与 HyDE 正交），失败一律
+        # 回退原 query（零回归）
+        if settings.query_rewrite_enabled:
+            current_query, _rewrite_info = await query_rewrite.prepare_query(query)
+            if _rewrite_info.get("mode") != "precise":
+                logger.info("Query 改写(流式): mode=%s, query=%s",
+                            _rewrite_info.get("mode"), query[:50])
+
+        # 改写后再次检查检索预算：LLM 改写（≤10s）可能消耗大部分预算，若
+        # 已超预算则回退原 query——改写 query 的收益尚未验证，不应让预算超支
+        # 导致 round 0 直接 break 返回空结果（保守降级：宁用原 query 检索
+        # 也不跳过检索）
+        if current_query != query and loop.time() >= deadline:
+            logger.warning("Query 改写后检索预算已耗尽 (%.0fs)，回退原 query 继续检索",
+                           _RETRIEVE_BUDGET_SECONDS)
+            current_query = query
 
         # HyDE 查询扩展：首轮用假设回答检索（语义更接近文档），后续轮次用反射改写查询
-        hyde_query = await self._hyde_expand(query)
+        hyde_query = await self._hyde_expand(current_query)
 
         for round_num in range(3):  # 最多 3 轮
             # 超预算检查：到点不再发起新一轮检索，用已收集 docs 进入生成

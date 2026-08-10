@@ -102,6 +102,42 @@ _PROMPT_TEMPLATE = """你是一个问题分类器。判断用户问题的意图�
 {{"intent": "knowledge|casual_chat|realtime", "confidence": 0.0-1.0, "reason": "简短原因"}}"""
 
 
+async def fts_term_hit(query: str) -> bool:
+    """FTS 术语命中（模块级公开函数，module-049 分诊复用；L2 确认同源）
+
+    语义与 RouterAgent._fts_term_hit 完全一致（L2 逻辑单一来源，不复制）：
+    jieba 分词（_kb_terms：过滤功能词/单字）→ 逐术语查 documents.search_tokens
+    FTS 倒排（plainto_tsquery @@，大小写不敏感）→ 任一命中即 True。
+    只查知识库文档（排除 memory:% 记忆文档）。
+
+    Args:
+        query: 用户问题
+
+    Returns:
+        命中 ≥1 知识库专有术语 → True
+    """
+    terms = RouterAgent._kb_terms(query)
+    if not terms:
+        return False
+    from sqlalchemy import text
+    from src.database import async_session_factory
+    async with async_session_factory() as session:
+        for term in terms:
+            row = await session.execute(text("""
+                SELECT 1 FROM documents
+                WHERE search_tokens IS NOT NULL
+                  AND parent_id IS NOT NULL
+                  AND (source IS NULL OR source NOT LIKE 'memory:%')
+                  AND to_tsvector('simple', search_tokens)
+                      @@ plainto_tsquery('simple', :term)
+                LIMIT 1
+            """), {"term": term})
+            if row.scalar_one_or_none() is not None:
+                logger.info("FTS 术语命中: term=%s, query=%s", term, query[:50])
+                return True
+    return False
+
+
 class RouterAgent:
     """意图识别路由器
 
@@ -272,10 +308,8 @@ class RouterAgent:
     async def _fts_term_hit(self, query: str) -> bool:
         """① FTS 术语命中：任一知识库专有术语出现在倒排索引（search_tokens）
 
-        复用 module-020 中文 FTS 通道的匹配语义：jieba 预分词写入的
-        search_tokens 经 to_tsvector('simple') 切分，plainto_tsquery 单术语
-        @@ 匹配（大小写不敏感，'GC' 与 'gc' 等价）。只查知识库文档
-        （排除 memory:% 记忆文档）。逐术语短回路查询，命中即返。
+        module-049：实现提取为模块级函数 fts_term_hit（L2 确认与分诊共用，
+        逻辑单一来源），本方法委托之，L2 确认语义不变。
 
         Args:
             query: 用户问题
@@ -283,26 +317,7 @@ class RouterAgent:
         Returns:
             命中 ≥1 知识库专有术语 → True
         """
-        terms = self._kb_terms(query)
-        if not terms:
-            return False
-        from sqlalchemy import text
-        from src.database import async_session_factory
-        async with async_session_factory() as session:
-            for term in terms:
-                row = await session.execute(text("""
-                    SELECT 1 FROM documents
-                    WHERE search_tokens IS NOT NULL
-                      AND parent_id IS NOT NULL
-                      AND (source IS NULL OR source NOT LIKE 'memory:%')
-                      AND to_tsvector('simple', search_tokens)
-                          @@ plainto_tsquery('simple', :term)
-                    LIMIT 1
-                """), {"term": term})
-                if row.scalar_one_or_none() is not None:
-                    logger.info("L2 FTS 术语命中: term=%s, query=%s", term, query[:50])
-                    return True
-        return False
+        return await fts_term_hit(query)
 
     async def _graph_entity_hit(self, query: str) -> bool:
         """② 图谱实体命中：图谱 Entity 名称（≥2 字符）出现在 query 中
