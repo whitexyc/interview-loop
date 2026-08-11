@@ -4,7 +4,7 @@
 - 项目名称: personal-interview-website
 - 项目简介: 融合简历展示与 Agentic RAG 知识库问答的个人网站系统（双语言微服务架构：Java Spring Boot + Python FastAPI + React 前端）
 - 创建时间: 2026-07-29
-- 最后更新: 2026-08-06
+- 最后更新: 2026-08-12
 
 ## 2. 技术栈
 > 详见 `tech-stack.md`，此处仅保留摘要。
@@ -52,19 +52,35 @@
 | module-034 | 短期记忆 + 会话记忆（source 三层分层 long/short/session + 短期 TTL 7 天 + 会话持久化） | 0.34.0-module-034 | 2026-08-06 | ✅ 完成（Tester 验收 36/36；全量 278/0 + 真实 E2E；Reviewer 阻塞#1 双重调度由 team-lead 修复后复验通过） |
 | module-035 | 记忆/检索分数口径校准（动态K 绝对余弦 + 去重阈值 0.85 + min_score 移除失真阈值 + P3 RRF 评估不采纳） | 0.35.0-module-035 | 2026-08-06 | ✅ 完成（Tester 验收 35 项 32 通过 + 3 P3 不适用；全量 292/0 + 半真实 E2E K=5/3 真实可达） |
 | module-036 | Agent 端点接入会话记忆（agent/agent-lg 会话恢复 + 保存 + ReactContext.client_ip→identity 命名修正） | 0.36.0-module-036 | 2026-08-07 | ✅ 完成（Tester 验收 29/29；全量 298/0 + 新增 6 单测 + 真实 E2E 落库/恢复/隔离） |
+| module-037 | backlog 收敛（top_k 3→5、abs_cosine KeyError 防御、session 拆分、一键启动） | 0.37.0-module-037 | 2026-08-07 | ✅ 完成（全量 355/358 基线） |
+| module-038 | 评估补全（图谱消融 --ablate + faithfulness LLM-as-Judge + golden 自动扩题 + --ablate 文档化） | 0.38.0-module-038 | 2026-08-08 | ✅ 完成（生成端评估闭环补齐） |
+| module-039 | 证据链幻觉检测（逐句验证 supported/inferred/unsupported + 可信度色标 + verified 事件） | 0.39.0-module-039 | 2026-08-08 | ✅ 完成（全量 314/315，1 项预存缺陷） |
+| module-040 | Adaptive RAG（re_search 工具：check_sufficiency 判不充分自动改写重查） | 0.40.0-module-040 | 2026-08-08 | ✅ 完成（全量 318/319） |
+| module-041 | Agent 工作记忆 Scratchpad（note_to_self 工具 + 跨轮次草稿纸注入生成） | 0.41.0-module-041 | 2026-08-08 | ✅ 完成（全量 326/327） |
+| module-042 | Harness 围栏（工具 15s 超时 + 输入校验 max_length + 答案截断） | 0.42.0-module-042 | 2026-08-08 | ✅ 完成（全量 355/358，2 项预存 429 限流） |
+| module-043 | 输入防护 + Intent 校验体系（三端点 max_length + L1 评测 + L2 确定性信号确认 + L3 后置反证 + L4 分类器） | 0.43.0-module-043 | 2026-08-09 | ✅ 完成（全量 404/407；L1 accuracy 1.0 见 module-047 正式落库） |
+| module-044 | 反思充分性精确化（ADR-0005 层 1-3 硬闸门 + prompt CoT/few-shot + 层 0 评测闭环）+ 重排截断 500→250 验证 | 0.44.0-module-044 | 2026-08-09 | ✅ 完成（全量 425/428） |
+| module-045 | 遗留清理批（retriever 双命中 abs_cosine 透传 + 043 四 minor + 流式 L3 + 充分性分类器训练脚本 + requirements 补依赖） | 0.45.0-module-045 | 2026-08-10 | ✅ 完成（全量 448/448 全绿；sufficiency_clf Accuracy 0.80/insuff Recall 1.00） |
+| module-046 | 记忆进化机制（ADR-0007：强化/衰减/升级 + 会话摘要 + 提取评测闭环） | 0.46.0-module-046 | 2026-08-10 | ✅ 完成（全量 503/503；Review 修复后 503 全绿） |
+| module-047 | 数据实验批（intent/sufficiency 真实 baseline 满分 + 阈值校准 0.4→0.55 + golden 扩 112 题 Hit@5 0.9714 + 图谱消融待环境） | 0.47.0-module-047 | 2026-08-10 | ✅ 完成（全量 525/525） |
+| module-048 | 反馈飞轮（feedback 表 + POST /ai/feedback + 前端 👍👎）+ 硬闸门阈值 0.55 落地 + 前端 maxlength | 0.48.0-module-048 | 2026-08-10 | ✅ 完成（全量 533/533 + 前端 build PASS） |
+| module-049 | 分诊式 Query 改写（ADR-0009：FTS 静态分诊 + 保真预检 + 并行检索绝对余弦择优 + 评测闭环） | 0.49.0-module-049 | 2026-08-10 | ✅ 完成（全量 567/567） |
 | module-050 | 幻觉检测模型真实对比（HHEM-2.1-Open vs MiniCheck-RoBERTa-Large，ADR-0010 P0-② 数据验证）+ WP5 目录细分（rag 三子包 + scripts/） | 0.50.0-module-050 | 2026-08-11 | ✅ 完成（HHEM 0.77 vs MiniCheck 0.51 Accuracy/F1 0.75 vs 0.04；MiniCheck 中文退化 Recall 0.02；全量 579/0 + 新增 12） |
 | module-051 | verify_answer 接入 HHEM 专职裁判（ADR-0010 P0-②：LLM 拆句 + HHEM 判分三态 + 降级链 + kappa 评测闭环） | 0.51.0-module-051 | 2026-08-11 | ✅ 完成（kappa 三态 0.3252 < 0.7 未达门槛如实标注；全量 611/0 + 新增 32） |
+| module-052 | NLI 矛盾扫描前置决策（ADR-0010 P1-③ 数据验证：mDeBERTa-v3 中文实测 kappa 0.4711 显著优于 HHEM 0.1351 → 替换方向推荐，三态映射/复测/阈值校准计划入 ADR） | 0.52.0-module-052 | 2026-08-12 | ✅ 完成（新增 15/15 全绿；全量 628/1——唯一失败为 module-053 在途 retriever 方法长度自检非本模块回归；矛盾样本 0 条诚实标注，复测留后续模块） |
+| module-053 | 检索融合升级（RRF 三通道消融验证：基线复测 0.9714 复现 + RRF k=60 实测 0.9905 放行推荐启用 + 加权两组对照持平否决 + DB 修复两列/feedback 表 + 嵌入路径回归修复 + eval 口径钉死 fusion_mode 落库） | 0.53.0-module-053 | 2026-08-12 | ✅ 完成（全量 645/0；rrf 开关 PW_RETRIEVAL_FUSION_MODE 一键启用，默认 hybrid 保持零回归契约） |
 
 ## 4. 架构决策记录（ADR）索引
 | ADR 编号 | 决策标题 | 状态 | 日期 |
 |----------|----------|------|------|
 | adr-001 | Qwen3-Reranker 需 chat template 适配（不能裸 pair） | 已采纳（superseded by module-030） | 2026-08-01 |
-| adr-010 | 幻觉检测升级方案（HHEM 专职裁判 + 逐句报分 + 矛盾扫描） | ✅ P0-② 已实施（module-051：裁判切换完成，kappa 0.3252 未达门槛如实标注，阈值校准待标注集扩充） | 2026-08-11 |
+| adr-009 | Query 改写优化方案（分诊式改写 + 保真校验 + 评测闭环） | ✅ 已实施（module-049：静态 FTS 分诊 + 保真预检 + 并行检索择优 + golden_query_rewrite 评测闭环） | 2026-08-10 |
+| adr-010 | 幻觉检测升级方案（HHEM 专职裁判 + 逐句报分 + 矛盾扫描） | ✅ P0-② 已实施（module-051：裁判切换完成，kappa 0.3252 未达门槛如实标注）；P1-③ 前置决策完成（module-052：mDeBERTa-v3 替换方向推荐——kappa 0.4711 vs HHEM 0.1351 同批 100 对，三态映射/复测/阈值校准计划见 ADR 选型结论节；实施待复测放行） | 2026-08-11（2026-08-12 更新） |
 
 ## 5. 当前迭代状态
-- 当前迭代版本: v0.36.0
-- 正在进行的模块: **module-036 Agent 端点接入会话记忆**（✅ 完成：Tester 验收 29/29，全量 298/0 + 真实 E2E）
-- 下一个待开发模块: 待定
+- 当前迭代版本: v0.53.0（module-052/053 已完成，见模块清单行）
+- 正在进行的模块: 无（v0.51 批次全部收尾）
+- 下一个待开发模块: 待定（按 roadmap-next-phase.md）
 
 ## 7. 关键技术决策记录
 - 所有 API 返回格式统一为 {code, msg, data, timestamp, request_id}（详见 CLAUDE.md 第5节）

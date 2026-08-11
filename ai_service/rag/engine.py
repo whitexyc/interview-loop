@@ -722,37 +722,58 @@ class RAGEngine:
 
             # Round 0: 并行向量检索 + 图搜索
             if round_num == 0:
-                # 实体提取失败时 graph_extractor 内部降级返回空列表
-                query_entities = await graph_extractor.extract_from_query(query)
-                vector_task = asyncio.wait_for(
-                    hybrid_retriever.retrieve(search_text, top_k=top_k),
-                    timeout=15,
-                )
-                graph_task = asyncio.wait_for(
-                    graph_store.search_related(query_entities, top_k=top_k),
-                    timeout=15,
-                )
-                vector_docs, graph_docs = await asyncio.gather(
-                    vector_task, graph_task, return_exceptions=True,
-                )
-                # 单路失败降级为另一路（与混合检索降级哲学一致）：
-                # 向量超时/失败 → 仅图结果；图超时/失败 → 仅向量结果；
-                # 两路都失败 → 空列表，不整链路崩溃
-                if isinstance(vector_docs, Exception):
-                    logger.warning("round 0 向量检索失败，降级为仅图结果: %s", vector_docs)
-                    vector_docs = []
-                if isinstance(graph_docs, Exception):
-                    logger.warning("round 0 图检索失败，降级为仅向量结果: %s", graph_docs)
-                    graph_docs = []
-                # 合并：向量结果优先，图结果追加去重
-                docs = list(vector_docs) if vector_docs else []
-                for gd in (graph_docs or []):
-                    if gd.get("id") and gd["id"] not in {d.get("id") for d in docs}:
-                        docs.append(gd)
+                if settings.retrieval_fusion_mode != "hybrid":
+                    # module-053：三通道融合模式（rrf/weighted）下，图谱通道由
+                    # retriever 内部并行完成（round 0 语义），引擎不再重复查图
+                    # （避免双倍 LLM 实体提取与图查询）。单路失败由 retriever
+                    # 内部降级（该路不参与融合），融合异常回退 hybrid。
+                    try:
+                        docs = await asyncio.wait_for(
+                            hybrid_retriever.retrieve(
+                                search_text, top_k=top_k, round_num=0,
+                            ),
+                            timeout=15,
+                        )
+                    except Exception as e:
+                        logger.warning("round 0 三通道融合检索失败，降级为空结果: %s", e)
+                        docs = []
+                else:
+                    # 实体提取失败时 graph_extractor 内部降级返回空列表
+                    query_entities = await graph_extractor.extract_from_query(query)
+                    vector_task = asyncio.wait_for(
+                        hybrid_retriever.retrieve(search_text, top_k=top_k, round_num=0),
+                        timeout=15,
+                    )
+                    graph_task = asyncio.wait_for(
+                        graph_store.search_related(query_entities, top_k=top_k),
+                        timeout=15,
+                    )
+                    vector_docs, graph_docs = await asyncio.gather(
+                        vector_task, graph_task, return_exceptions=True,
+                    )
+                    # 单路失败降级为另一路（与混合检索降级哲学一致）：
+                    # 向量超时/失败 → 仅图结果；图超时/失败 → 仅向量结果；
+                    # 两路都失败 → 空列表，不整链路崩溃
+                    if isinstance(vector_docs, Exception):
+                        logger.warning("round 0 向量检索失败，降级为仅图结果: %s", vector_docs)
+                        vector_docs = []
+                    if isinstance(graph_docs, Exception):
+                        logger.warning("round 0 图检索失败，降级为仅向量结果: %s", graph_docs)
+                        graph_docs = []
+                    # 合并：向量结果优先，图结果追加去重
+                    docs = list(vector_docs) if vector_docs else []
+                    for gd in (graph_docs or []):
+                        if gd.get("id") and gd["id"] not in {d.get("id") for d in docs}:
+                            docs.append(gd)
             else:
                 try:
                     docs = await asyncio.wait_for(
-                        hybrid_retriever.retrieve(search_text, top_k=top_k),
+                        # module-053：round 1/2 传 round_num>0——fusion 模式下
+                        # retriever 保持单路混合（FTS+向量，无图谱），与引擎层
+                        # "图谱仅 round 0 查一次"语义一致
+                        hybrid_retriever.retrieve(
+                            search_text, top_k=top_k, round_num=round_num,
+                        ),
                         timeout=15,
                     )
                 except asyncio.TimeoutError:

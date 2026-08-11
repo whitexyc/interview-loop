@@ -24,8 +24,11 @@ from src.config import settings
 logger = logging.getLogger(__name__)
 
 # 本地 GGUF 模型路径
+# module-050 目录细分后本文件位于 rag/retrieval/ 下，需三级 dirname 才回到
+# ai_service/ 根（与 factcheck_judge._HHEM_MODEL_DIR 同范式）；
+# 二级 dirname 会落在 rag/ 下解析出 rag/models/... 导致模型缺失
 _LOCAL_MODEL_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)),
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     "models", "bge-m3-gguf", "bge-m3-q8_0.gguf",
 )
 # 权重文件名（校验完整性）

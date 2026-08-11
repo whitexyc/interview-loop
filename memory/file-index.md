@@ -61,6 +61,10 @@
 | ai_service/rag/retrieval/factcheck_judge.py | module-051 | 代码 | HHEM 裁判封装（延迟加载 + threading.Lock + to_thread + 失败返回 None） | ✅ |
 | ai_service/eval/golden_factcheck.py | module-051 | 代码 | factcheck 评测（50 条三态标注 + kappa 三态/二值 + eval_runs + --fixture） | ✅ |
 | ai_service/tests/test_factcheck_judge.py | module-051 | 测试 | 裁判单元测试（加载降级/三态映射/集成/降级链/开关 llm/评测脚本）32 项 | ✅ |
+| ai_service/eval/compare_nli_models.py | module-052 | 代码 | mDeBERTa vs HHEM 三分类对比（数据构造复用 + 三分类标注 + 加载/打分 + kappa 两口径 + 混淆矩阵 + --smoke） | ✅ |
+| ai_service/tests/test_compare_nli.py | module-052 | 测试 | NLI 对比脚本单元测试（三分类标注/阈值映射/指标/mock 模型/降级）15 项 | ✅ |
+| ai_service/scripts/migrate_module053.py | module-053 | 脚本 | DB 修复迁移（documents 补 last_mentioned_at/mention_count 两列幂等 + feedback 表建表复用 FEEDBACK_DDL） | ✅ |
+| ai_service/tests/test_rrf_fusion.py | module-053 | 测试 | 三通道融合单测（RRF 公式/三路融合/开关零回归/单路降级/abs_cosine 保留/加权/回退）16 项 | ✅ |
 
 ## 三、前端核心文件（frontend/，module-003+）
 
@@ -99,5 +103,7 @@
 | module-036 | specs/module-036-agent-memory/ | ✅ Agent 端点接入会话记忆（Tester 验收 29/29，全量 298/0 + 真实 E2E，2026-08-07） |
 | module-050 | specs/module-050-factcheck-compare/ | ✅ 幻觉检测模型对比（HHEM 0.77 vs MiniCheck 0.51；MiniCheck 中文退化）+ WP5 目录细分（rag 三子包 + scripts/），全量 579/0（2026-08-11） |
 | module-051 | specs/module-051-hhem-judge/ | ✅ verify_answer 接入 HHEM 专职裁判（LLM 拆句 + HHEM 判分三态 + 降级链 + kappa 评测），kappa 0.3252 未达门槛如实标注，全量 611/0（2026-08-11） |
+| module-052 | specs/module-052-nli-contradiction-scan/ | ✅ NLI 矛盾扫描前置决策（mDeBERTa-v3 中文实测 kappa 0.4711 vs HHEM 0.1351 → 替换方向推荐，ADR-0010 P1-③ 选型结论），全量 645/0（2026-08-12 Tester 复跑；在途快照 628/1 系 module-053 并行改造，非本模块回归） |
+| module-053 | specs/module-053-rrf-fusion/ | ✅ 检索融合升级（RRF 三通道消融验证：基线复测 0.9714 + RRF 0.9905 放行推荐启用 + 加权两组持平否决 + DB 修复 + 嵌入路径回归修复），全量 645/0（2026-08-12） |
 
 > 每个模块目录含 plan.md / acceptance-criteria.md / changelog.md / review-report.md / test-report.md。

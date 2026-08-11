@@ -81,47 +81,45 @@ class HybridRetriever:
         session: Optional[AsyncSession] = None,
         mode: str = "hybrid",
         source_pattern: Optional[str] = None,
+        round_num: int = 0,
     ) -> list[dict]:
-        """执行混合检索（支持按通道消融）
+        """执行混合检索（通道消融 + 三通道融合，细节见 _execute_fusion）
 
-        hybrid 模式：query 向量化 → 并行 FTS+向量 → min-max 归一化 → alpha 融合。
-        消融模式（fts_only/vector_only/graph_only）委托 _dispatch_mode 分派。
+        hybrid：FTS+向量 → min-max → alpha 融合（默认，零回归）。
+        fusion（rrf/weighted，module-053）：round 0 三通道并行融合；
+        round 1/2（round_num>0）单路混合（无图谱，与引擎层 round 0
+        图谱语义一致）。消融模式委托 _dispatch_mode。
 
         Args:
             query: 用户查询
             top_k: 返回结果数量
             session: 数据库会话（可选）
-            mode: 检索模式，见 VALID_MODES，默认 hybrid 与之前完全一致
-            source_pattern: source LIKE 过滤（module-023 记忆检索 'memory:<ip>:%'）；
-                为空默认排除 'memory:%'（防记忆污染知识库检索）；None 与之前一致
+            mode: 检索模式，见 VALID_MODES
+            source_pattern: source LIKE 过滤（记忆检索），None 排除 'memory:%'
+            round_num: 检索轮次（fusion 仅 round 0 启用图谱，hybrid 忽略）
 
         Returns:
-            检索结果列表（含 fts_score / vector_score / hybrid_score）
-
-        Raises:
-            RetrievalException: 检索失败时抛出
-            ValueError: mode 不在 VALID_MODES 中
+            检索结果列表（fusion 另含 graph_score，rrf 含 rrf_score）
         """
         if not query or not query.strip():
             raise RetrievalException("检索查询不能为空")
         if mode not in VALID_MODES:
             raise ValueError(f"非法检索模式: {mode}，可选: {VALID_MODES}")
-
         # 消融模式（fts_only/vector_only/graph_only）：单通道检索，互不影响
         if mode != "hybrid":
             return await self._dispatch_mode(query, top_k, session, mode, source_pattern)
 
-        # hybrid 模式（原逻辑，零回归）：向量化 → 并行检索 → 归一化融合
         try:
             query_embedding = await self._embedding_service.embed_text(query)
         except Exception as e:
             raise RetrievalException("查询向量化失败", cause=e)
 
-        # 扩大召回，取 2 倍候选给 rerank 更大提升空间
-        fetch_k = top_k * 2
-
-        # session 可选：传入则共享串行，不传则 _execute 内为两路各建独立 session
-        # 并行（module-026 并发修复，session 由 _execute 内部按需创建）
+        fetch_k = top_k * 2  # 扩大召回，取 2 倍候选给 rerank 更大提升空间
+        # module-053：fusion 模式仅 round 0 语义启用图谱三通道（见 docstring）
+        if settings.retrieval_fusion_mode != "hybrid" and round_num == 0:
+            return await self._execute_fusion(
+                query, query_embedding, fetch_k, top_k, session, source_pattern,
+            )
         return await self._execute(query, query_embedding, fetch_k, top_k, session, source_pattern)
 
     async def _dispatch_mode(
@@ -369,6 +367,265 @@ class HybridRetriever:
         # Step 6: 排序取 top_k，返回给上层（reranker 或直接输出）
         results = sorted(merged.values(), key=lambda x: x["hybrid_score"], reverse=True)
         return results[:top_k]
+
+    async def _execute_fusion(
+        self,
+        query: str,
+        query_embedding: list[float],
+        fetch_k: int,
+        top_k: int,
+        session: Optional[AsyncSession] = None,
+        source_pattern: Optional[str] = None,
+    ) -> list[dict]:
+        """三通道融合检索（module-053：rrf / weighted 模式）
+
+        round 0 语义：三路并行（FTS / 向量 / 图谱），图谱通道仅在 round 0
+        参与融合（引擎层 round 1/2 为单路混合、无图，由调用方传 round_num>0
+        落到 _execute 单路混合路径）。
+
+        融合方式（settings.retrieval_fusion_mode）：
+          rrf      —— Reciprocal Rank Fusion：
+                       score(d) = Σ 1/(k + rank_i(d))，k=rrf_constant_k（默认
+                       60，业界默认值）；rank 为各路 1-based 排名序号。
+                       融合分数量纲小（单路 top1 ≈ 1/61），引擎 min_score 过滤
+                       作用于相对分，故结尾 min-max 归一化到 [0,1] 兼容
+                       （module-035 记录过 RRF 原始分与 0.6 过滤硬不兼容）。
+          weighted —— 三路各自 min-max 归一化 + 权重加权
+                       （retrieval_fusion_weights：FTS,向量,图谱）
+
+        降级：
+          - 单路失败 → 该路不参与融合（缺路退化为两通道/单通道），不崩
+          - 三路全空 → 返回空列表
+          - 融合计算异常 → 回退 _execute（hybrid 单路混合，保守降级）
+
+        Args:
+            query: 用户查询（图谱实体提取基于该 query）
+            query_embedding: 查询向量
+            fetch_k: 各通道召回候选数（top_k 的 2 倍）
+            top_k: 最终返回数
+            session: 外部数据库会话（可选，不传则各通道独立 session）
+            source_pattern: source LIKE 过滤（透传 FTS/向量 SQL）
+
+        Returns:
+            融合排序后的检索结果列表（含 fts_score / vector_score /
+            graph_score / hybrid_score；rrf 模式另含 rrf_score 原始分）
+        """
+        if session is not None:
+            # 外部 session：共享连接上串行执行 FTS/向量（asyncpg 单连接禁并发），
+            # 图谱通道自建 session，与之串行
+            try:
+                fts_results, vector_results = await self._search_serial(
+                    query, query_embedding, fetch_k, session, source_pattern,
+                )
+                graph_results = await self._retrieve_graph_only(query, fetch_k)
+            except Exception as e:
+                logger.warning("三通道融合检索失败，回退 hybrid: %s", e)
+                return await self._execute(
+                    query, query_embedding, fetch_k, top_k, session, source_pattern,
+                )
+        else:
+            # 默认路径：FTS / 向量各开独立 session + 图谱并行（module-026 同款并发修复）
+            try:
+                async with async_session_factory() as fts_sess, async_session_factory() as vec_sess:
+                    fts_task = self._fts_search(query, fetch_k, fts_sess, source_pattern)
+                    vector_task = self._vector_search(query_embedding, fetch_k, vec_sess, source_pattern)
+                    graph_task = self._retrieve_graph_only(query, fetch_k)
+                    fts_results, vector_results, graph_results = await asyncio.gather(
+                        fts_task, vector_task, graph_task, return_exceptions=True,
+                    )
+            except Exception as e:
+                # 独立 session 创建失败 → 降级共享 session 串行（图谱并行保留）
+                logger.warning("独立 session 创建失败，降级为共享 session 串行: %s", e)
+                async with async_session_factory() as shared_sess:
+                    fts_results, vector_results = await self._search_serial(
+                        query, query_embedding, fetch_k, shared_sess, source_pattern,
+                    )
+                    graph_results = await self._retrieve_graph_only(query, fetch_k)
+
+        # 单路失败 → 该路不参与融合（graceful degradation）
+        if isinstance(fts_results, Exception):
+            logger.warning("全文检索失败，该路不参与融合: %s", fts_results)
+            fts_results = []
+        if isinstance(vector_results, Exception):
+            logger.warning("向量检索失败，该路不参与融合: %s", vector_results)
+            vector_results = []
+        if isinstance(graph_results, Exception):
+            logger.warning("图谱检索失败，该路不参与融合: %s", graph_results)
+            graph_results = []
+
+        if not fts_results and not vector_results and not graph_results:
+            return []
+
+        # 红线（module-043 L3 反证依赖）：归一化/融合前存档向量通道原始绝对余弦
+        for r in vector_results:
+            r["abs_cosine"] = r.get("score", 0.0)
+
+        try:
+            if settings.retrieval_fusion_mode == "weighted":
+                results = self._fuse_weighted(fts_results, vector_results, graph_results)
+            else:
+                results = self._fuse_rrf(fts_results, vector_results, graph_results)
+        except Exception as e:
+            # 融合计算异常 → 回退 hybrid（保守，与 query_rewrite 同哲学）
+            logger.warning("融合计算失败，回退 hybrid: %s", e)
+            return await self._execute(
+                query, query_embedding, fetch_k, top_k, session, source_pattern,
+            )
+
+        return results[:top_k]
+
+    def _fuse_rrf(
+        self,
+        fts_results: list[dict],
+        vector_results: list[dict],
+        graph_results: list[dict],
+    ) -> list[dict]:
+        """Reciprocal Rank Fusion 三路融合（module-053 WP-B）
+
+        score(d) = Σ 1/(k + rank_i(d))，k=settings.rrf_constant_k（默认 60），
+        rank_i(d) 为文档 d 在通道 i 的 1-based 排名（通道内按分数降序）。
+        缺路（空列表/失败）不贡献分数，融合退化为两通道/单通道 RRF。
+        融合后 rrf_score 为原始 RRF 分（量纲小，供观察），hybrid_score 为
+        min-max 归一化后的 RRF 分（[0,1]，兼容引擎 min_score 相对分过滤）。
+
+        Args:
+            fts_results: FTS 通道结果（含 score，已按分数降序）
+            vector_results: 向量通道结果（含 score，已按分数降序）
+            graph_results: 图谱通道结果（含 hybrid_score 真实相关度，已降序）
+
+        Returns:
+            按 RRF 分降序的融合结果列表
+        """
+        k = settings.rrf_constant_k if settings.rrf_constant_k > 0 else 60
+
+        def _channel_ranks(results: list[dict], score_key: str) -> dict[int, float]:
+            """通道内 1-based 排名 → {doc_id: 1/(k+rank)} 贡献分"""
+            # 通道内按自身分数降序排序（SQL/graph 已排序，防御性再排一次）
+            ordered = sorted(
+                results, key=lambda d: d.get(score_key, 0.0), reverse=True,
+            )
+            return {
+                d["id"]: 1.0 / (k + rank)
+                for rank, d in enumerate(ordered, start=1)
+            }
+
+        fts_contrib = _channel_ranks(fts_results, "score")
+        vec_contrib = _channel_ranks(vector_results, "score")
+        graph_contrib = _channel_ranks(graph_results, "hybrid_score")
+
+        merged: dict[int, dict] = {}
+        for doc in fts_results:
+            doc_id = doc["id"]
+            merged[doc_id] = doc
+            merged[doc_id].update({"fts_score": doc.get("score", 0.0), "vector_score": 0.0,
+                                   "graph_score": 0.0, "rrf_score": 0.0})
+        for doc in vector_results:
+            doc_id = doc["id"]
+            if doc_id in merged:
+                merged[doc_id]["vector_score"] = doc.get("score", 0.0)
+                # 双命中透传 abs_cosine（module-045 同款；仅向量命中文档有）
+                if "abs_cosine" in doc:
+                    merged[doc_id]["abs_cosine"] = doc["abs_cosine"]
+            else:
+                merged[doc_id] = doc
+                merged[doc_id].update({"fts_score": 0.0, "vector_score": doc.get("score", 0.0),
+                                       "graph_score": 0.0, "rrf_score": 0.0})
+        for doc in graph_results:
+            doc_id = doc["id"]
+            if doc_id in merged:
+                merged[doc_id]["graph_score"] = doc.get("hybrid_score", 0.0)
+            else:
+                merged[doc_id] = dict(doc)
+                merged[doc_id].update({"fts_score": 0.0, "vector_score": 0.0,
+                                       "graph_score": doc.get("hybrid_score", 0.0),
+                                       "rrf_score": 0.0})
+
+        for doc_id, doc in merged.items():
+            doc["rrf_score"] = (
+                fts_contrib.get(doc_id, 0.0)
+                + vec_contrib.get(doc_id, 0.0)
+                + graph_contrib.get(doc_id, 0.0)
+            )
+
+        # 归一化：rrf_score 原始分量纲小（top 单通道 ≈ 1/61），min-max 到
+        # [0,1] 作 hybrid_score 输出（引擎 min_score 过滤基于相对分，兼容）
+        ranked = sorted(merged.values(), key=lambda x: x["rrf_score"], reverse=True)
+        scores = [d["rrf_score"] for d in ranked]
+        min_s, max_s = min(scores), max(scores)
+        score_range = max_s - min_s
+        for d in ranked:
+            d["hybrid_score"] = (
+                (d["rrf_score"] - min_s) / score_range if score_range > 1e-9 else 1.0
+            )
+        return ranked
+
+    def _fuse_weighted(
+        self,
+        fts_results: list[dict],
+        vector_results: list[dict],
+        graph_results: list[dict],
+    ) -> list[dict]:
+        """三通道 min-max 归一化 + 权重加权融合（module-053 WP-C 对照）
+
+        与 hybrid 两通道加权同哲学，扩展到图谱第三路：
+        各通道 min-max 归一化 → 加权和（retrieval_fusion_weights，逗号分隔
+        FTS,向量,图谱，默认 0.3,0.6,0.1）。缺路该通道分按 0 计。
+        权重解析失败（非 3 个可解析浮点）→ 回退默认权重并告警。
+
+        Args:
+            fts_results: FTS 通道结果（含 score）
+            vector_results: 向量通道结果（含 score）
+            graph_results: 图谱通道结果（含 hybrid_score）
+
+        Returns:
+            按加权分降序的融合结果列表
+        """
+        try:
+            parts = [float(p.strip()) for p in settings.retrieval_fusion_weights.split(",")]
+            if len(parts) != 3 or any(p < 0 for p in parts):
+                raise ValueError(f"权重需为 3 个非负浮点: {settings.retrieval_fusion_weights!r}")
+            w_fts, w_vec, w_graph = parts
+        except (ValueError, TypeError) as e:
+            logger.warning("retrieval_fusion_weights 解析失败，回退默认 0.3,0.6,0.1: %s", e)
+            w_fts, w_vec, w_graph = 0.3, 0.6, 0.1
+
+        # 各通道内 min-max 归一化（_normalize 原地修改，通道结果互不重叠）
+        self._normalize(fts_results, "score")
+        self._normalize(vector_results, "score")
+        self._normalize(graph_results, "hybrid_score")
+
+        merged: dict[int, dict] = {}
+        for doc in fts_results:
+            doc_id = doc["id"]
+            merged[doc_id] = doc
+            merged[doc_id].update({"fts_score": doc.get("score", 0.0), "vector_score": 0.0,
+                                   "graph_score": 0.0})
+        for doc in vector_results:
+            doc_id = doc["id"]
+            if doc_id in merged:
+                merged[doc_id]["vector_score"] = doc.get("score", 0.0)
+                if "abs_cosine" in doc:
+                    merged[doc_id]["abs_cosine"] = doc["abs_cosine"]
+            else:
+                merged[doc_id] = doc
+                merged[doc_id].update({"fts_score": 0.0, "vector_score": doc.get("score", 0.0),
+                                       "graph_score": 0.0})
+        for doc in graph_results:
+            doc_id = doc["id"]
+            if doc_id in merged:
+                merged[doc_id]["graph_score"] = doc.get("hybrid_score", 0.0)
+            else:
+                merged[doc_id] = dict(doc)
+                merged[doc_id].update({"fts_score": 0.0, "vector_score": 0.0,
+                                       "graph_score": doc.get("hybrid_score", 0.0)})
+
+        for doc_id, doc in merged.items():
+            doc["hybrid_score"] = (
+                w_fts * doc.get("fts_score", 0.0)
+                + w_vec * doc.get("vector_score", 0.0)
+                + w_graph * doc.get("graph_score", 0.0)
+            )
+        return sorted(merged.values(), key=lambda x: x["hybrid_score"], reverse=True)
 
     async def _search_serial(
         self,
