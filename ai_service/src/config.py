@@ -59,24 +59,24 @@ class Settings(BaseSettings):
     # 混合检索
     hybrid_search_alpha: float = 0.3  # BM25 权重，向量权重为 1-alpha
 
-    # 检索融合模式（module-053 三通道融合验证）：
-    #   hybrid   —— 两通道 min-max 加权（FTS+向量），默认（零回归契约）
+    # 检索融合模式（module-053 三通道融合验证，module-055 切默认 rrf）：
+    #   hybrid   —— 两通道 min-max 加权（FTS+向量），module-055 起为回退开关
     #   rrf      —— 三通道（FTS/向量/图谱）Reciprocal Rank Fusion，
     #                score(d) = Σ 1/(k + rank_i(d))，k=60 业界默认；
     #                图谱通道仅 round 0 语义参与融合（引擎层 round 1/2 单路混合）
     #   weighted —— 三通道 min-max 归一化 + 权重加权（retrieval_fusion_weights）
     # module-053 实测（golden 112 题同口径，见 specs/module-053-rrf-fusion/
     # changelog.md 对比表）：rrf Hit@5=0.9905 > 基线 hybrid 两通道 0.9714
-    # （+0.0191，0 回退）> 加权两组 = 基线 —— **rrf 放行（推荐启用）**。
-    # 默认保持 hybrid 的原因（AC 零回归契约）：① 全量 614 全绿 + 不改存量
-    # 测试红线——rrf 默认会改变引擎 round 0 降级语义（2 项存量降级用例断言
-    # 引擎层图回退）② 引擎 chat 路径 rrf 尚未真实 HTTP E2E（评估为 retriever
-    # 直调口径）③ rrf 每次知识库查询 +1 次 LLM 实体提取调用。启用方式：
-    # PW_RETRIEVAL_FUSION_MODE=rrf 一键开启。
-    # minor 修复：Literal 枚举校验——非法字符串（拼写错误）启动即抛
-    # ValidationError（fail-fast），防静默落入 rrf 分支（rrf 每次知识库
-    # 查询 +1 次 LLM 实体提取调用，静默走错分支代价高）。
-    retrieval_fusion_mode: Literal["hybrid", "rrf", "weighted"] = "hybrid"
+    # （+0.0191，0 回退）> 加权两组 = 基线 —— **rrf 放行**。
+    # module-054 清障：向量化降级方案 A/B（rrf 向量路失败 = FTS+图谱照常、
+    # 引擎补图兜底）+ 引擎 rrf 真实 HTTP E2E 通过（chat/stream 全链路）。
+    # module-055 决策：默认 hybrid→rrf（前置清障全部完成；存量 2 项降级
+    # 用例在 module-054 方案 A/B 落地后已消解，零断言改动）。回退方式：
+    # PW_RETRIEVAL_FUSION_MODE=hybrid 一键回退（保留开关）。
+    # minor 修复（module-053）：Literal 枚举校验——非法字符串（拼写错误）
+    # 启动即抛 ValidationError（fail-fast），防静默落入 rrf 分支（rrf 每次
+    # 知识库查询 +1 次 LLM 实体提取调用，静默走错分支代价高）。
+    retrieval_fusion_mode: Literal["hybrid", "rrf", "weighted"] = "rrf"
     # 加权融合权重（逗号分隔：FTS,向量,图谱；仅 retrieval_fusion_mode=weighted 生效）
     retrieval_fusion_weights: str = "0.3,0.6,0.1"
     # RRF 常数 k（业界默认 60；本模块不做 k 扫描，扫 k 留后续）

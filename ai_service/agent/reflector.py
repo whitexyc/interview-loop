@@ -45,6 +45,19 @@ logger = logging.getLogger(__name__)
 # module-047 实测数据结论——0.4 漏判 60% 不充分、0.55 F1=0.98 切在分布间隙上缘）
 _SUFFICIENCY_MIN_DOCS = 2          # 文档数 < 2 → 直接判不充分（零 LLM）
 
+# ── HHEM 交叉对数上限（module-055，E2E 实测数据支撑，见 _judge_by_hhem）──
+# E2E 实测（module-054 收尾）：5 claims × 3 docs = 15 对在服务负载下耗时
+# 12s+ 贴近 15s 超时哲学，HHEM 超时 → LLM 判分降级又 15s 超时 → 级联超时
+# verified_claims=0；本机实测 15 对冷启动（含模型加载）≈9s、热推理 0.11s/对。
+# 上限后典型 5 claims × 2 docs = 10 对（冷 ≈6s），20s 预算下 3 倍余量。
+_MAX_HHEM_DOCS = 2                # 每 claim 最多打分的文档数（按相关度取前 N）
+_MAX_HHEM_CLAIMS = 8              # 最多打分的 claims 数（防超长答案拆句爆炸）
+# 每对文档文本截断上限（module-055 实测）：verify 传入的是父块全文（≤4000
+# 字符 ≈ 2000+ token），超 HHEM 512 token 上限（transformers 报 indexing
+# error）且拖慢单对推理；截断到 500 字符后单对耗时显著下降。实测（E2E G1
+# 问题 10 对）：截断后 verdict 与全文口径一致（claims 证据通常位于文档头部）。
+_MAX_HHEM_DOC_CHARS = 500
+
 # 反思 prompt：判断检索结果是否充分
 # 要求 LLM 输出 JSON，包含 sufficient（是否充分）和 rewritten_query（改写后的查询）。
 # 如果不充分，rewritten_query 会被用于二次检索。
@@ -166,7 +179,8 @@ class Reflector:
         # module-044 自洽性检查第二温度：与反思温度 0.1 不同（结果多样化的依据）
         self._self_check_temperature = 0.7
 
-    async def check_sufficiency(self, query: str, documents: list[dict]) -> dict:
+    async def check_sufficiency(self, query: str, documents: list[dict],
+                                prompt: Optional[str] = None) -> dict:
         """检查检索结果是否充分
 
         如果 LLM 判断检索结果不够回答问题，会返回一个 rewritten_query，
@@ -182,9 +196,16 @@ class Reflector:
           开启时同 query 两温度各判一次，不一致 → 保守判充分（防漏检）
         - 闸门/LLM 异常 → 默认充分（防死循环，保持"默认充分"哲学）
 
+        module-055（ADR-0011 第一步）：
+        - prompt 参数可注入变体（变体测试只度量不替换生产 prompt）；None 时
+          使用模块默认 _CHECK_PROMPT（零回归）。自洽性检查第二判同用注入变体
+          （同一变体两温度，保证对比口径一致）。
+
         Args:
             query: 原始查询
             documents: 检索到的文档列表
+            prompt: 反思 prompt 变体（含 {query}/{docs_summary} 占位符），
+                None = 默认 _CHECK_PROMPT
 
         Returns:
             充分时: {"sufficient": true, "reason": "..."}
@@ -227,8 +248,10 @@ class Reflector:
             client = LLMFactory.get_client(
                 self._provider, temperature=self._reflection_temperature,
             )
-            prompt = _CHECK_PROMPT.format(query=query, docs_summary=docs_summary)
-            response = await client.generate(prompt)
+            # module-055: prompt 变体注入（默认 _CHECK_PROMPT 零回归）
+            check_prompt = prompt if prompt is not None else _CHECK_PROMPT
+            formatted = check_prompt.format(query=query, docs_summary=docs_summary)
+            response = await client.generate(formatted)
             result = self._parse_check(response)
 
             # ── 层 2 自洽性检查（配置开关，默认关 → 零额外调用）──
@@ -236,7 +259,7 @@ class Reflector:
                 second_client = LLMFactory.get_client(
                     self._provider, temperature=self._self_check_temperature,
                 )
-                response2 = await second_client.generate(prompt)
+                response2 = await second_client.generate(formatted)
                 result2 = self._parse_check(response2)
                 if result.get("sufficient") != result2.get("sufficient"):
                     logger.warning(
@@ -496,6 +519,14 @@ class Reflector:
             max_score < 0.3 → unsupported
         evidence = max 分对应文档号（1-based，与现结构一致）；unsupported 填 "N/A"。
 
+        module-055 交叉对数上限（E2E 实测数据支撑，见 changelog）：
+            - docs 每 claim 上限 _MAX_HHEM_DOCS（按传入顺序取前 N——文档已按
+              相关度排序，最相关文档承载证据的概率最高；丢弃尾部文档的代价是
+              该 claim 证据可能只存在于尾部 → verdict 从严，保守方向）
+            - claims 上限 _MAX_HHEM_CLAIMS（防超长答案拆句爆炸，正常答案
+              3-8 条不触达）
+        上限在降级链之前（旧格式兼容判断之后）生效。
+
         Args:
             claims: LLM 拆句结果 [{"claim": str}, ...]
             docs: 检索到的文档列表
@@ -513,9 +544,16 @@ class Reflector:
 
             from rag.retrieval.factcheck_judge import hhem_judge
 
+            # module-055：交叉对数上限（实测 15 对冷启动 ≈9s、E2E 负载下 12s+
+            # 贴近 15s 超时哲学致级联超时 → verified_claims=0；上限后典型 10 对）
+            claims = claims[:_MAX_HHEM_CLAIMS]
+            docs = docs[:_MAX_HHEM_DOCS]
+
             high = settings.verify_hhem_threshold_high
             low = settings.verify_hhem_threshold_low
-            doc_texts = [d.get("content", "") for d in docs]
+            # module-055: 父块全文截断（防超 512 token 上限 + 提速，见常量注释）
+            doc_texts = [(d.get("content") or "")[:_MAX_HHEM_DOC_CHARS]
+                         for d in docs]
             n_docs = len(doc_texts)
             claim_texts = [c["claim"] for c in claims]
             # 交叉构造 (doc, claim) 对：先固定 claim 再遍历 docs（每 claim 段长度 = n_docs）

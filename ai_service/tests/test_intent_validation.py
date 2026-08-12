@@ -32,20 +32,39 @@ class FakeLLM:
         return self._payload
 
 
+class AsyncConfirm:
+    """模块级 async 确认桩（module-055 新增用例：E2E query 类多用例复用）"""
+
+    def __init__(self, confirmed: bool, signal: str):
+        self._confirmed = confirmed
+        self._signal = signal
+
+    async def __call__(self, query: str) -> tuple[bool, str]:
+        return self._confirmed, self._signal
+
+
 # ─── L2 前置校验（AC §2 / §5 / §6） ───
 
 
 class TestL2Trigger:
-    """AC §2: intent≠knowledge 且 confidence<0.5 才触发确认"""
+    """AC §2: intent≠knowledge 无条件触发确认（module-055 扩展）
 
-    def _classify(self, payload: str, confirm=None):
+    module-055 行为升级：原"且 confidence<0.5"限制在 module-054 E2E 暴露缺口
+    ——LLM 高置信误判 casual_chat 直接漏检（"G1垃圾收集器的核心创新是什么？"
+    被判闲聊返回来源 0）；确定性信号便宜且精确（golden 50 条非 knowledge
+    样本误确认 0），规则表否决闲聊/实时特征词，扩展零风险。相应更新
+    test_high_confidence_skips_l2 / test_missing_confidence_skips_l2 断言
+    （行为升级非掩盖）。
+    """
+
+    def _classify(self, payload: str, confirm=None, query: str = "测试查询"):
         async def run():
             agent = RouterAgent()
             if confirm is not None:
                 agent._deterministic_confirm = confirm
             with mock.patch("llm.client.LLMFactory.get_client",
                             return_value=FakeLLM(payload)):
-                return await agent.classify("测试查询")
+                return await agent.classify(query)
         return asyncio.run(run())
 
     def test_low_confidence_casual_triggers_l2(self):
@@ -75,7 +94,9 @@ class TestL2Trigger:
         )
         assert called
 
-    def test_high_confidence_skips_l2(self):
+    def test_high_confidence_casual_triggers_l2(self):
+        """module-055 行为升级：高置信闲聊也触发 L2（module-054 E2E 缺口——
+        LLM 高置信误判 casual_chat 直接漏检；信号命中 → 修正为 knowledge）"""
         called = []
 
         async def fake_confirm(query):
@@ -86,7 +107,22 @@ class TestL2Trigger:
             '{"intent": "casual_chat", "confidence": 0.9, "reason": "闲聊"}',
             confirm=fake_confirm,
         )
-        assert not called
+        assert called  # 高置信同样触发确认
+        assert result["intent"] == "knowledge"
+
+    def test_high_confidence_no_signal_keeps_original(self):
+        """高置信触发 L2 但信号未命中（真闲聊）→ 保持原判"""
+        called = []
+
+        async def fake_confirm(query):
+            called.append(query)
+            return False, "no_signal"
+
+        result = self._classify(
+            '{"intent": "casual_chat", "confidence": 0.9, "reason": "闲聊"}',
+            confirm=fake_confirm,
+        )
+        assert called
         assert result["intent"] == "casual_chat"
 
     def test_knowledge_intent_skips_l2(self):
@@ -103,20 +139,42 @@ class TestL2Trigger:
         assert not called  # 不对称投放：走 knowledge 是低风险路径，不校验
         assert result["intent"] == "knowledge"
 
-    def test_missing_confidence_skips_l2(self):
-        """降级/外部 mock 结果无 confidence → 不触发（零回归既有测试）"""
+    def test_missing_confidence_triggers_l2(self):
+        """降级/外部 mock 结果无 confidence → 同样触发（module-055：触发条件
+        与置信度解耦——高置信误判即 E2E 根因，无 confidence 不再作为豁免）"""
         called = []
 
         async def fake_confirm(query):
             called.append(query)
-            return True, "fts_term"
+            return False, "no_signal"
 
         result = self._classify(
             '{"intent": "casual_chat", "reason": "闲聊"}',
             confirm=fake_confirm,
         )
-        assert not called
-        assert result["intent"] == "casual_chat"
+        assert called
+        assert result["intent"] == "casual_chat"  # 信号未命中 → 保持原判
+
+    def test_e2e_query_high_confidence_casual_corrected(self):
+        """E2E 场景 query（专有术语 G1 + 疑问句）：LLM 高置信误判 casual_chat
+        → L2 确定性信号确认 → knowledge（module-054 E2E 回归场景）"""
+        result = self._classify(
+            '{"intent": "casual_chat", "confidence": 0.95, "reason": "闲聊"}',
+            confirm=AsyncConfirm(True, "fts_term"),
+            query="G1垃圾收集器的核心创新是什么？",
+        )
+        assert result["intent"] == "knowledge"
+        assert "fts_term" in result["reason"]
+
+    def test_boundary_term_question_queries_corrected(self):
+        """专有术语 + 疑问句边界样本：JVM/Redis 类查询均被确定性信号拉回"""
+        for q in ("JVM内存溢出怎么排查？", "Redis 的持久化机制有哪些？"):
+            result = self._classify(
+                '{"intent": "casual_chat", "confidence": 0.9, "reason": "误判闲聊"}',
+                confirm=AsyncConfirm(True, "graph_entity"),
+                query=q,
+            )
+            assert result["intent"] == "knowledge", q
 
     def test_confirm_hit_corrects_to_knowledge(self):
         async def fake_confirm(query):
@@ -192,12 +250,44 @@ class TestL2DeterministicConfirm:
         assert confirmed is False
         assert signal == "rule_veto"
 
+    def test_rule_check_short_circuits_before_db(self):
+        """module-055：规则表提前短路——规则词命中时 FTS/图谱信号零调用
+
+        L2 无条件触发后，闲聊/实时请求每轮都进确认；规则词命中直接返回
+        rule_veto，不浪费 DB 查询（原实现 FTS 先行属无效开销）。
+        """
+        agent = RouterAgent()
+        fts = mock.AsyncMock(return_value=True)
+        graph = mock.AsyncMock(return_value=True)
+        with mock.patch.object(agent, "_fts_term_hit", new=fts):
+            with mock.patch.object(agent, "_graph_entity_hit", new=graph):
+                confirmed, signal = asyncio.run(agent._deterministic_confirm("现在几点了"))
+        assert confirmed is False
+        assert signal == "rule_veto"
+        fts.assert_not_awaited()   # 规则命中 → 零 DB 查询
+        graph.assert_not_awaited()
+
+    def test_kb_terms_filters_module055_noise_words(self):
+        """module-055 数据驱动停用词：golden 扫描实测噪声词不再参与 FTS 确认
+
+        "今天/问题/怎么样" 等词在知识库文档中广泛存在，命中无判别力
+        （实测会导致闲聊/实时样本 20/50 误确认 → 补入后归零）。
+        """
+        for noisy in ("今天心情不太好", "最近在忙什么呀", "周末过得怎么样", "没问题"):
+            terms = RouterAgent._kb_terms(noisy)
+            assert "今天" not in terms and "问题" not in terms
+            assert "怎么样" not in terms and "最近" not in terms
+
     def test_signal_exception_conservative_knowledge(self):
-        """AC 场景 4: 信号查询异常 → 保守 knowledge"""
+        """AC 场景 4: 信号查询异常 → 保守 knowledge
+
+        module-055 规则表提前短路后，异常路径仅对无规则词的 query 可达
+        （"你好呀"现走 rule_veto 短路，改用无规则词 query 保持原测试意图）。
+        """
         agent = RouterAgent()
         with mock.patch.object(agent, "_fts_term_hit",
                                new=mock.AsyncMock(side_effect=RuntimeError("db"))):
-            confirmed, signal = asyncio.run(agent._deterministic_confirm("你好呀"))
+            confirmed, signal = asyncio.run(agent._deterministic_confirm("周末去哪玩"))
         assert confirmed is True
         assert signal == "error_conservative"
 
@@ -303,10 +393,25 @@ class TestL3PostValidation:
         assert flag is False
         assert top1_abs == 0.0
 
-    def test_missing_abs_cosine_defaults_zero_flagged(self):
-        """复用 module-037 口径 d.get("abs_cosine", 0.0)：缺字段 → 0.0 → 标记"""
+    def test_all_missing_abs_cosine_no_flag(self):
+        """module-055 行为升级：整组文档均无 abs_cosine（向量通道整体降级——
+        module-054 方案 A 合法生产状态）→ 语义证据未度量，不标记
+
+        原"缺字段视为 0.0 保守标记"在该状态恒误触发 suspected_misclassify
+        （module-054 E2E 实测 top_abs_cosine=0.0 + 误标记；rrf 融合路径
+        向量路降级即全组缺字段）。
+        """
         flag, top1_abs = RAGEngine._check_suspected_misclassify([{"hybrid_score": 0.9}])
-        assert flag is True
+        assert flag is False
+        assert top1_abs == 0.0
+
+    def test_top1_missing_no_flag(self):
+        """module-055 行为升级：top-1 无 abs_cosine（FTS/图谱独有命中排首——
+        rrf 三通道下图谱通道返回父块文档可排 top-1，HyDE 查询实测复现）→
+        缺向量分数 ≠ 低分，不标记（图谱实体命中本身就是相关证据）"""
+        docs = [{"hybrid_score": 0.9}, {"abs_cosine": 0.8, "hybrid_score": 0.8}]
+        flag, top1_abs = RAGEngine._check_suspected_misclassify(docs)
+        assert flag is False
         assert top1_abs == 0.0
 
     def test_multiple_docs_uses_top1_only(self):

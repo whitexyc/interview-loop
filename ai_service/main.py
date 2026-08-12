@@ -39,6 +39,11 @@ IP_SESSION_MESSAGES: dict[str, list[dict]] = defaultdict(list)
 MAX_MESSAGES_PER_IP = 50
 MAX_ANSWER_LEN = 10000  # module-042: 答案最大长度，超出截断并附加提示
 
+# module-055 minor 修复：持有 HHEM 后台预热任务引用（lifespan 内赋值），
+# 防服务在预热期间关闭时任务被 GC 触发 "Task was destroyed but it is pending"
+# 告警（fail-soft，仅持引用不 await/不取消，语义与无预热行为一致）
+_HHEM_WARMUP_TASK: Optional[asyncio.Task] = None
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
@@ -120,6 +125,25 @@ async def lifespan(app: FastAPI):
             logger.info("%s 客户端已预热", label)
         except Exception as e:
             logger.warning("%s 预热失败（可接受）: %s", label, e)
+
+    # module-055: 后台预热 HHEM 裁判模型（fail-soft，不阻塞启动）。
+    # 依据（changelog 实测）：冷加载独立进程 ≈9s、服务进程（CPU 争用）≈17-19s，
+    # 首请求 verify 的 20s 预算内"加载+推理"超时 → verified_claims=0（E2E 复现）；
+    # 预热后 predict 纯推理（实测 0.11-0.5s/对）。后台任务通常先于首个验证请求
+    # 完成；失败仅告警（首次验证请求退回冷加载路径，与无预热行为一致）。
+    import asyncio as _asyncio
+
+    async def _warmup_hhem() -> None:
+        try:
+            from rag.retrieval.factcheck_judge import hhem_judge
+            scores = await hhem_judge.predict(["warmup"], ["warmup"])
+            if scores is not None:
+                logger.info("HHEM 裁判模型已预热")
+        except Exception as e:
+            logger.warning("HHEM 预热失败（可接受，首个验证请求将含冷加载）: %s", e)
+
+    global _HHEM_WARMUP_TASK
+    _HHEM_WARMUP_TASK = _asyncio.create_task(_warmup_hhem())
 
     yield
     logger.info("AI 服务关闭")

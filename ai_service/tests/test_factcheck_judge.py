@@ -208,6 +208,84 @@ class TestJudgeByHhem:
         assert judged == legacy
         mock_pred.assert_not_called()
 
+    def test_docs_capped_to_top_two(self):
+        """module-055 交叉对数上限：每 claim 只打最相关 2 篇文档（按传入顺序）
+
+        4 docs × 2 claims → predict 收到 2×2=4 对（E2E 实测 15 对贴近超时
+        致 verified_claims=0；上限后典型 10 对，冷启动 ≈6s < 20s 预算 3 倍余量）。
+        """
+        docs = [
+            {"id": 1, "title": "d1", "content": "文档一内容"},
+            {"id": 2, "title": "d2", "content": "文档二内容"},
+            {"id": 3, "title": "d3", "content": "文档三内容"},
+            {"id": 4, "title": "d4", "content": "文档四内容"},
+        ]
+        async def run():
+            r = Reflector()
+            with mock.patch("rag.retrieval.factcheck_judge.hhem_judge.predict",
+                            new=mock.AsyncMock(return_value=[0.9, 0.1, 0.1, 0.9])) as mock_pred:
+                judged = await r._judge_by_hhem([{"claim": "c1"}, {"claim": "c2"}], docs)
+            return judged, mock_pred
+
+        judged, mock_pred = asyncio.run(run())
+        assert len(judged) == 2
+        # 只传前 2 篇文档内容（最相关）；预测对 = 2 claims × 2 docs
+        args = mock_pred.await_args[0]
+        assert args[0] == ["文档一内容", "文档二内容", "文档一内容", "文档二内容"]
+        assert len(args[1]) == 4
+        # evidence 引用号只可能指向 1-2（封顶文档内）
+        for c in judged:
+            assert c["evidence"] in ("[1]", "[2]", "N/A")
+
+    def test_claims_capped_at_max(self):
+        """module-055 上限：超长答案拆句（10 claims）→ 只判前 _MAX_HHEM_CLAIMS 条"""
+        from agent.reflector import _MAX_HHEM_CLAIMS, _MAX_HHEM_DOCS
+        assert _MAX_HHEM_CLAIMS == 8
+        assert _MAX_HHEM_DOCS == 2
+
+        claims = [{"claim": f"c{i}"} for i in range(10)]
+        scores = [0.9, 0.1] * _MAX_HHEM_CLAIMS  # 8 claims × 2 docs
+        async def run():
+            r = Reflector()
+            with mock.patch("rag.retrieval.factcheck_judge.hhem_judge.predict",
+                            new=mock.AsyncMock(return_value=scores)) as mock_pred:
+                judged = await r._judge_by_hhem(claims, self._docs())
+            return judged, mock_pred
+
+        judged, mock_pred = asyncio.run(run())
+        assert len(judged) == _MAX_HHEM_CLAIMS  # 尾部 2 条截断
+        assert judged[0]["claim"] == "c0"
+        assert mock_pred.await_args[0][1] == ["c0", "c0", "c1", "c1", "c2", "c2",
+                                              "c3", "c3", "c4", "c4", "c5", "c5",
+                                              "c6", "c6", "c7", "c7"]
+
+    def test_doc_content_truncated_for_hhem(self):
+        """module-055：父块全文截断（超 HHEM 512 token 上限 + 提速）
+
+        实测：6 对全文 9.3s（含 585 token 溢出对）→ 截断 500 字符 2.4s，
+        verdict 与全文口径一致（头部即答案主体）。断言传给 HHEM 的 doc
+        文本 ≤ _MAX_HHEM_DOC_CHARS。
+        """
+        from agent.reflector import _MAX_HHEM_DOC_CHARS
+        assert _MAX_HHEM_DOC_CHARS == 500
+
+        long_docs = [
+            {"id": 1, "title": "d1", "content": "长" * 2000},
+            {"id": 2, "title": "d2", "content": "短内容"},
+        ]
+        async def run():
+            r = Reflector()
+            with mock.patch("rag.retrieval.factcheck_judge.hhem_judge.predict",
+                            new=mock.AsyncMock(return_value=[0.9, 0.9])) as mock_pred:
+                await r._judge_by_hhem([{"claim": "c1"}], long_docs)
+            return mock_pred
+
+        mock_pred = asyncio.run(run())
+        flat_docs = mock_pred.await_args[0][0]
+        assert len(flat_docs[0]) == 500          # 超长截断
+        assert len(flat_docs[1]) == len("短内容")  # 短内容不截断
+        assert "短内容" in flat_docs[1]
+
 
 class TestVerifyAnswerHhem:
     """verify_answer HHEM 主路径 + 降级链三层 + 开关 llm（mock HHEM，不加载真实模型）"""

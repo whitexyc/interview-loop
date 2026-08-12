@@ -8,7 +8,7 @@
       （module-027 嵌入并发修复同款经验）
     - CPU 推理经 asyncio.to_thread 不阻塞事件循环
 
-降级契约（WP1 AC）：模型缺失/加载失败/推理异常/15s 超时 → predict 返回
+降级契约（WP1 AC）：模型缺失/加载失败/推理异常/20s 超时 → predict 返回
 None（不抛异常），由 verify_answer 上层回退 LLM 判分。
 
 加载复用：rag/retrieval/hhem_loader.load_hhem_model（module-050 已验证路径，单一来源）。
@@ -27,9 +27,13 @@ _HHEM_MODEL_DIR = os.path.join(
     "models", "hhem-2.1-open",
 )
 
-# 推理超时（秒）：对齐 LLM 拆句 15s 超时哲学——交叉打分随 claims×docs 增长，
-# HHEM 推理 hang 时不无限阻塞（超时降级 LLM 判分，minor#1 修复）
-_PREDICT_TIMEOUT = 15
+# 推理超时（秒）：对齐 LLM 拆句超时哲学（module-051 minor#1 修复，15s；
+# module-055 提至 20s）——交叉打分随 claims×docs 增长（reflector 已限对数
+# 上限：每 claim ≤2 文档、≤8 claims，典型 10 对），HHEM 推理 hang 时不无限
+# 阻塞（超时降级 LLM 判分）。提预算依据（module-055 changelog 实测）：15 对
+# 冷启动（含 438MB 模型加载）≈9s、E2E 服务负载下 12s+ 贴近旧 15s 上限致
+# 级联超时 verified_claims=0；对数上限后冷启动 ≈6s，20s = 3 倍余量。
+_PREDICT_TIMEOUT = 20
 
 
 class HHEMJudge:
@@ -87,7 +91,7 @@ class HHEMJudge:
                 asyncio.to_thread(self._predict_sync, docs, claims),
                 timeout=_PREDICT_TIMEOUT)
         except asyncio.TimeoutError:
-            logger.warning("HHEM 推理超时 (15s)，降级 LLM 判分")
+            logger.warning("HHEM 推理超时 (%ds)，降级 LLM 判分", _PREDICT_TIMEOUT)
             return None
         except Exception as e:
             logger.warning("HHEM 推理失败，降级 LLM 判分: %s", e)

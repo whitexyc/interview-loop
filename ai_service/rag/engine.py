@@ -128,8 +128,15 @@ class RAGEngine:
     ) -> tuple[bool, float]:
         """L3 后置校验：精排 top-1 绝对余弦 < 阈值 → 疑似误判
 
-        复用 module-037 的 abs_cosine 字段（d.get("abs_cosine", 0.0)）：
-        缺字段视为 0.0（无绝对语义匹配证据 → 保守标记）。
+        复用 module-037 的 abs_cosine 字段：仅向量通道命中的文档有该字段
+        （retriever 归一化前存档）；FTS/图谱独有命中文档缺字段。
+        module-055 修订缺字段语义（行为升级，E2E 实测支撑）：
+          - rrf 三通道融合下图谱通道返回父块文档（无向量分数）可排 top-1
+            （HyDE 查询场景实测复现）——缺字段 ≠ 低分，"缺→按 0.0 标记"
+            令其恒误触发 suspected_misclassify（module-054 E2E 实测
+            top_abs_cosine=0.0 + 误标记；图谱实体命中本身就是相关证据）
+          - 向量通道整体降级（module-054 方案 A）全组缺字段同理
+        → 只对"实测到的低分"标记：top-1 无 abs_cosine（缺向量分数）→ 不标记。
         只度量不打干预：标记写入 ChatSteps，不改回答路径（先度量后干预）。
         module-045 WP2c: 返回 (flag, top1_abs) 二元组——top1_abs 与判定同源，
         供 chat 在父块映射前存档（WP2b：映射重建 dict 会丢 abs_cosine，
@@ -141,12 +148,15 @@ class RAGEngine:
 
         Returns:
             (flag, top1_abs)：flag 为疑似误判标记；top1_abs 为 top-1 绝对
-            余弦（空列表返回 (False, 0.0)）
+            余弦（空列表/top-1 无 abs_cosine 返回 (False, 0.0)）
         """
         if not docs:
             return False, 0.0
-        top1_abs = docs[0].get("abs_cosine") or 0.0
-        return top1_abs < threshold, top1_abs
+        top1_abs = docs[0].get("abs_cosine")
+        if top1_abs is None:
+            # 无向量分数（FTS/图谱独有命中排首或向量通道降级）→ 无低分可判
+            return False, 0.0
+        return float(top1_abs) < threshold, float(top1_abs)
 
     async def search(self, request: SearchRequest) -> SearchResponse:
         """知识库检索：混合检索 → Rerank

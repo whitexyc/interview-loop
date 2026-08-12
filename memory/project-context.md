@@ -4,7 +4,7 @@
 - 项目名称: personal-interview-website
 - 项目简介: 融合简历展示与 Agentic RAG 知识库问答的个人网站系统（双语言微服务架构：Java Spring Boot + Python FastAPI + React 前端）
 - 创建时间: 2026-07-29
-- 最后更新: 2026-08-12（module-054 完成）
+- 最后更新: 2026-08-12（module-055 完成）
 
 ## 2. 技术栈
 > 详见 `tech-stack.md`，此处仅保留摘要。
@@ -70,6 +70,7 @@
 | module-052 | NLI 矛盾扫描前置决策（ADR-0010 P1-③ 数据验证：mDeBERTa-v3 中文实测 kappa 0.4711 显著优于 HHEM 0.1351 → 替换方向推荐，三态映射/复测/阈值校准计划入 ADR） | 0.52.0-module-052 | 2026-08-12 | ✅ 完成（新增 15/15 全绿；全量 628/1——唯一失败为 module-053 在途 retriever 方法长度自检非本模块回归；矛盾样本 0 条诚实标注，复测留后续模块） |
 | module-053 | 检索融合升级（RRF 三通道消融验证：基线复测 0.9714 复现 + RRF k=60 实测 0.9905 放行推荐启用 + 加权两组对照持平否决 + DB 修复两列/feedback 表 + 嵌入路径回归修复 + eval 口径钉死 fusion_mode 落库） | 0.53.0-module-053 | 2026-08-12 | ✅ 完成（全量 645/0；rrf 开关 PW_RETRIEVAL_FUSION_MODE 一键启用，默认 hybrid 保持零回归契约） |
 | module-054 | 检索降级修复（reranker 三级 dirname 路径修复 + RRF 向量化降级方案 A/B）+ mDeBERTa 矛盾复测（矛盾样本 32+对照 24 + 真实答案句子 + DB 检索片段 → kappa 0.4991 < 0.7 未达放行门槛 → 降级双轨，结论入 ADR-0010） | 0.54.0-module-054 | 2026-08-12 | ✅ 完成（全量 667/0；重排真实加载冒烟 PASS；vector_only 保持抛错语义声明） |
+| module-055 | 提示词评估优化（ADR-0011 第一步：eval/prompt_variants.py 变体对比表 + check_sufficiency prompt 可注入参数）+ E2E 3 问题修复（intent 漏检：L2 无条件触发 + 停用词 43 词数据驱动扩充 + 规则表短路 / HHEM 超时：交叉对数上限 8×2 + 截断 500 + 预算 20s + 启动预热 / RRF abs_cosine：L3 只对实测低分标记）+ rrf 切默认（hybrid 保留回退开关） | 0.55.0-module-055 | 2026-08-12 | ✅ 完成（全量 688/0；真实 E2E chat+stream 默认 rrf 验证 3 问题场景全修复；golden intent 实测 0.98——2 条 realtime→knowledge 系 LLM 自判非 L2 所致） |
 
 ## 4. 架构决策记录（ADR）索引
 | ADR 编号 | 决策标题 | 状态 | 日期 |
@@ -77,6 +78,7 @@
 | adr-001 | Qwen3-Reranker 需 chat template 适配（不能裸 pair） | 已采纳（superseded by module-030） | 2026-08-01 |
 | adr-009 | Query 改写优化方案（分诊式改写 + 保真校验 + 评测闭环） | ✅ 已实施（module-049：静态 FTS 分诊 + 保真预检 + 并行检索择优 + golden_query_rewrite 评测闭环） | 2026-08-10 |
 | adr-010 | 幻觉检测升级方案（HHEM 专职裁判 + 逐句报分 + 矛盾扫描） | ✅ P0-② 已实施（module-051：裁判切换完成，kappa 0.3252 未达门槛如实标注）；P1-③ 前置决策完成（module-052：mDeBERTa-v3 替换方向推荐——kappa 0.4711 vs HHEM 0.1351 同批 100 对，三态映射/复测/阈值校准计划见 ADR 选型结论节）；P1-③ 复测完成（module-054：kappa 三分类 0.4991 < 0.7 未达放行门槛 → **降级双轨（NLI 只做矛盾扫描，不替换 HHEM 主裁判）**，eval_runs id=21；internal_contradiction 判别是核心短板） | 2026-08-11（2026-08-12 更新） |
+| adr-011 | 提示词评估优化（四维评估 + 业界工具扫描 + 四代算法三步落地：变体测试→OPRO→DSPy） | ✅ 第一步已实施（module-055：eval/prompt_variants.py 变体对比表 + check_sufficiency prompt 可注入参数，只度量不替换）；第二/三步（OPRO/DSPy）按数据决定 | 2026-08-12 |
 
 ## 5. 当前迭代状态
 - 当前迭代版本: v0.53.0（module-052/053 已完成，见模块清单行）

@@ -23,15 +23,22 @@
   保守策略：当 LLM 分类失败或超时时，默认返回 "knowledge" 意图。
   宁可多检索一次，也不要漏检。这是"安全优先"的设计。
 
-L2 前置校验（module-043 / ADR-0003 修订版）：
-  LLM 低置信（intent≠knowledge 且 confidence<0.5）时，用**确定性信号**确认
-  是否涉及知识库——与 LLM 完全无关（同源复核已否决，红线：确认路径零 LLM）：
+L2 前置校验（module-043 / ADR-0003 修订版，module-055 扩展触发）：
+  LLM 判定 intent≠knowledge（无论置信高低，module-055：低置信限制在
+  module-054 E2E 暴露缺口——LLM 高置信误判 casual_chat 同样漏检）时，用
+  **确定性信号**确认是否涉及知识库——与 LLM 完全无关（同源复核已否决，
+  红线：确认路径零 LLM）：
     ① FTS 术语命中：jieba 分词 query → documents.search_tokens 倒排匹配
-       （复用 module-020 中文 FTS 通道），命中 ≥1 知识库专有术语 → 确认
+       （复用 module-020 中文 FTS 通道），命中 ≥1 知识库专有术语 → 确认。
+       术语需有专有术语特征（module-055：golden 扫描实测 20 个噪声词——
+       今天/问题/怎么样/最近等知识库文档常见词——补入 _FUNCTION_STOPWORDS，
+       消除误确认，扫描 50 条闲聊/实时样本误确认 0 条）
     ② 图谱实体命中：图谱 Entity 名称出现在 query 中 → 确认（Cypher 拉实体
-       名后 Python 子串匹配，全程无 LLM——不走 graph_extractor，其依赖 LLM）
+       名后 Python 子串匹配，全程无 LLM——不走 graph_extractor，其依赖 LLM）。
+       实测判别力最强：golden 50 条非 knowledge 样本 0 误命中
     ③ 规则表：明确闲聊/实时特征词（"几点""天气""你是谁"），命中 → 保持原判
-       （否决确认信号，防止"现在""天气"等常见词在知识库文档中的巧合命中误转）
+       （否决确认信号，防止"现在""天气"等常见词在知识库文档中的巧合命中误转）。
+       module-055：提前到信号查询前短路（无条件触发后规则表命中零 DB 开销）
   任何异常 → 保守 knowledge（宁多检不漏检）。
 
 L4 分类器（module-043 / ADR-0003）：
@@ -48,9 +55,12 @@ from src.config import settings
 
 logger = logging.getLogger(__name__)
 
-# ── L2 前置校验配置（module-043 / ADR-0003 修订版） ──
-# 触发条件：intent≠knowledge 且 LLM 低置信（单向信任：LLM 自报绝对值不可信，
-# 但低置信是有效的"不放心"信号）。
+# ── L2 前置校验配置（module-043 / ADR-0003 修订版，module-055 扩展） ──
+# 触发条件：intent≠knowledge 无条件触发（module-055：原"且 LLM 低置信"
+# 限制在 module-054 E2E 暴露缺口——LLM 高置信误判 casual_chat 直接漏检；
+# 确定性信号便宜且精确（golden 50 条非 knowledge 样本误确认 0），
+# 规则表否决闲聊/实时特征词，任何异常保守 knowledge，扩展零风险）。
+# 常量保留以记录历史触发口径（低置信曾被用作"不放心"信号）。
 _L2_CONFIDENCE_THRESHOLD = 0.5
 
 # 规则表：明确闲聊/实时特征词，命中任一 → 保持原判（不修正为 knowledge）。
@@ -73,6 +83,11 @@ _RULE_TABLE = (
 
 # 高频功能词/代词/疑问词：不计入 FTS 术语命中。"什么""怎么""区别"等词在
 # 知识库文档中广泛存在，命中无判别力；只保留有专有术语特征的词参与确认。
+# module-055 数据驱动扩充（2026-08-12 golden 扫描实测）：L2 无条件触发后，
+# 用 _deterministic_confirm 对 golden 50 条闲聊/实时样本逐条模拟，实测 20 条
+# 被下述噪声词 FTS 命中误确认（今天/问题/怎么样/最近…在知识库文档中普遍
+# 存在），补入后扫描误确认归零。只补"知识库文档常见但无判别力"的词，
+# 不收录技术术语（G1/JVM/Region 等保留参与确认）。
 _FUNCTION_STOPWORDS = frozenset((
     "什么", "怎么", "为什么", "哪些", "哪个", "如何", "请问", "知道", "可以",
     "是不是", "区别", "关系", "原理", "作用", "特点", "介绍", "了解", "解释",
@@ -81,6 +96,14 @@ _FUNCTION_STOPWORDS = frozenset((
     "究竟", "到底", "为什么", "是", "的", "了", "吗", "呢", "吧", "啊", "呀",
     "哦", "喔", "嗯", "哈", "喂", "你", "我", "他", "她", "它", "您", "有",
     "没", "在", "和", "与", "及", "就", "都", "也", "很", "太",
+    # module-055 噪声词（golden 扫描实测两轮，见上注释；第二轮补入
+    # 剩余误确认样本的命中术语——简历类文档含闲聊词（电影/人民币等），
+    # FTS 信号固有噪声，停用词表是数据驱动的防护）：
+    "今天", "明天", "最近", "怎么样", "问题", "名字", "一下", "随便", "厉害",
+    "没关系", "没错", "明白", "换个", "上午", "下午", "今年", "距离", "外面",
+    "新闻", "股市", "行情", "汇率", "流行", "周末", "心情", "工作",
+    "早上好", "不错", "聊聊", "好累", "下次", "注意", "猜猜", "干嘛", "话题",
+    "还是", "几年", "还有", "几天", "人民币", "多少", "热门", "电影",
 ))
 
 # 意图分类的 prompt 模板
@@ -182,8 +205,10 @@ class RouterAgent:
         使用 generate（单轮）而不是 chat（多轮），因为分类不需要上下文。
         module-043 增强：
           - L4 分类器可用时用它替换 LLM 决策主体（校准概率，无 LLM 调用）
-          - LLM 低置信（intent≠knowledge 且 confidence<0.5）时走 L2 确定性
-            信号确认（FTS 术语/图谱实体/规则表），命中 → 修正为 knowledge
+          - LLM 判定 intent≠knowledge（module-055 起无条件，不再限低置信）时
+            走 L2 确定性信号确认（FTS 术语/图谱实体/规则表），命中 → 修正为
+            knowledge（module-054 E2E 实测：LLM 高置信误判 casual_chat 也会
+            漏检，低置信限制不可靠）
 
         Args:
             query: 用户问题
@@ -223,14 +248,13 @@ class RouterAgent:
             response = await client.generate(prompt)
             result = self._parse_response(response)
 
-            # ── L2 前置校验（module-043 / ADR-0003 修订版） ──
-            # 触发：intent≠knowledge 且 LLM 低置信（confidence<0.5）。确认动作
-            # 是确定性信号（_deterministic_confirm），与 LLM 完全无关。
-            # confidence 缺失（降级/外部 mock 结果）时不触发：无"低置信"信号
-            # 即无"不放心"依据，保持原判（零回归）。
-            confidence = result.get("confidence")
-            if (result.get("intent") != "knowledge"
-                    and confidence is not None and confidence < _L2_CONFIDENCE_THRESHOLD):
+            # ── L2 前置校验（module-043 / ADR-0003 修订版，module-055 扩展）──
+            # 触发：intent≠knowledge 无条件触发（module-055：原"且低置信"
+            # 限制在 module-054 E2E 暴露缺口——LLM 高置信误判 casual_chat
+            # 直接漏检；确定性信号便宜且精确，规则表否决闲聊/实时特征词，
+            # 任何异常保守 knowledge，扩展零风险）。确认动作是确定性信号
+            # （_deterministic_confirm），与 LLM 完全无关（红线：零 LLM）。
+            if result.get("intent") != "knowledge":
                 confirmed, signal = await self._deterministic_confirm(query.strip())
                 if confirmed:
                     logger.info("L2 信号确认(%s)，intent 修正为 knowledge: query=%s",
@@ -256,9 +280,11 @@ class RouterAgent:
         """L2 确定性信号确认 — 与 LLM 完全无关（确认路径零 LLM 调用）
 
         信号（按优先级，FTS/图谱任一命中即确认；规则表命中保持原判）：
-          ① FTS 术语命中（_fts_term_hit）→ confirmed
-          ② 图谱实体命中（_graph_entity_hit）→ confirmed
-          ③ 规则表（_rule_hits）→ 保持原判（否决 FTS/图谱的巧合命中）
+          ① 规则表（_rule_hits）→ 保持原判（否决 FTS/图谱的巧合命中）。
+             module-055 提前到首位：L2 无条件触发后，闲聊/实时特征词命中
+             直接短路零 DB 查询（原 FTS 先行属无效开销，结果不变）
+          ② FTS 术语命中（_fts_term_hit）→ confirmed
+          ③ 图谱实体命中（_graph_entity_hit）→ confirmed
         任何异常 → 保守 knowledge（宁多检不漏检，AC 场景 4）。
 
         Args:
@@ -271,11 +297,11 @@ class RouterAgent:
                       error_conservative（可观测：写入日志与 reason）
         """
         try:
+            if self._rule_hits(query):
+                # 规则表：明确闲聊/实时特征词 → 保持原判（module-055 提前短路）
+                return False, "rule_veto"
             fts_hit = await self._fts_term_hit(query)
             graph_hit = await self._graph_entity_hit(query) if not fts_hit else False
-            if self._rule_hits(query):
-                # 规则表：明确闲聊/实时特征词 → 保持原判
-                return False, "rule_veto"
             if fts_hit:
                 return True, "fts_term"
             if graph_hit:
