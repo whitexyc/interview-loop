@@ -41,3 +41,30 @@ def default_intent_classifier_disabled(monkeypatch):
     from src.config import settings
 
     monkeypatch.setattr(settings, "intent_classifier_enabled", False)
+
+
+@pytest.fixture(autouse=True)
+def default_tool_phase_split_disabled(monkeypatch):
+    """测试环境统一钉住工具阶段切分开关=关闭（module-058，对齐 056 模式）
+
+    生产默认已开启（PW_TOOL_PHASE_SPLIT 默认 true），但存量 react 层 agent
+    测试以全量 10 个工具 schema 为准——默认 true 会漂移走 react 层的存量
+    测试（检索阶段 schema 只有 7 个）。钉住 false 是"存量测试全绿"的真正
+    保证；新测试（test_tool_phase_split.py）体内显式 setattr True 验证切分。
+    """
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "tool_phase_split", False)
+
+
+@pytest.fixture(autouse=True)
+def request_logs_disabled(monkeypatch):
+    """测试环境统一钉住 request_logs 落库开关=关闭（module-058 WP-C）
+
+    生产默认已开启（PW_REQUEST_LOGS 默认 true），但单测需 hermetic：不
+    依赖真实 DB 落库、不污染 request_logs 表。新测试（test_observability.py）
+    体内显式开启验证埋点/落库（配合假 session 打桩）。
+    """
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "request_logs_enabled", False)

@@ -140,8 +140,11 @@ _VERIFY_LLM_PROMPT = """你是 RAG 系统的答案验证专家。检查以下答
 # 要求 LLM 用 [1][2] 格式标注引用来源，这是 RAG 答案"可溯源"的关键。
 # sections（= 历史对话段 + 记忆段）是可选的，由 generate_answer 方法根据
 # 传入的 history / memory 参数填充；两者均为空时 sections 为空串，
-# 模板保留 {sections} 后的换行（对齐旧版 {history_section}\n 结构），
-# 故空 sections 时 prompt 与旧版逐字节一致（零回归，review #2 实测验证）。
+# 模板保留 {sections} 后的换行（对齐旧版 {history_section}\n 结构）。
+# module-058（WP-B）：区块顺序改为 sections → 检索到的文档 → 用户问题——
+# docs 前移为前缀缓存铺路（LLM API 对 prompt 开头重复前缀自动打折，
+# 前提 = 前缀逐字一致；同 docs 重复生成时最受益）。query 标签格式不变，
+# sections 内容/格式一字不改（仅调换区块顺序，存量测试零漂移）。
 _GENERATE_PROMPT = """你是一个知识库问答助手。基于检索到的文档回答用户问题。
 
 要求：
@@ -150,10 +153,10 @@ _GENERATE_PROMPT = """你是一个知识库问答助手。基于检索到的文�
 3. 回答后附带引用文档列表
 
 {sections}
-用户问题: {query}
-
 检索到的文档:
 {docs_detail}
+
+用户问题: {query}
 
 回答："""
 
@@ -334,7 +337,8 @@ class Reflector:
             if scratchpad:
                 lines = [f"  {i+1}. {n}" for i, n in enumerate(scratchpad)]
                 scratchpad_section = f"\n[工作笔记 - Agent 推理过程中的关键发现]\n" + "\n".join(lines) + "\n"
-            # 合并历史段、scratchpad 段与记忆段：三者为空时 sections=""，prompt 与旧版逐字节一致
+            # 合并历史段、scratchpad 段与记忆段：三者为空时 sections=""（module-058
+            # WP-B 区块顺序已定稿：sections → docs → query，无多余内容）
             sections = history_section + scratchpad_section + (f"{memory}\n" if memory else "")
             prompt = _GENERATE_PROMPT.format(
                 query=query,
@@ -391,7 +395,8 @@ class Reflector:
             if scratchpad:
                 lines = [f"  {i+1}. {n}" for i, n in enumerate(scratchpad)]
                 scratchpad_section = f"\n[工作笔记 - Agent 推理过程中的关键发现]\n" + "\n".join(lines) + "\n"
-            # 合并历史段、scratchpad 段与记忆段：三者为空时 sections=""，prompt 与旧版逐字节一致
+            # 合并历史段、scratchpad 段与记忆段：三者为空时 sections=""（module-058
+            # WP-B 区块顺序已定稿：sections → docs → query，无多余内容）
             sections = history_section + scratchpad_section + (f"{memory}\n" if memory else "")
             prompt = _GENERATE_PROMPT.format(
                 query=query,

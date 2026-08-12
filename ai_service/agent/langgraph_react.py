@@ -32,7 +32,10 @@ from langgraph.graph import END, StateGraph
 
 from src.config import settings
 from llm.client import LLMFactory
-from agent.react import ReactContext, _assistant_message, _build_messages
+from agent.react import (
+    ReactContext, _assistant_message, _build_messages,
+    advance_phase, schemas_for_phase,
+)
 from agent.reflector import reflector
 from agent.tool_registry import ToolRegistry, registry
 
@@ -86,7 +89,9 @@ async def llm_call(state: ReActGraphState) -> dict:
     events = state["events"]
 
     client = LLMFactory.get_client()
-    response = await client.chat_with_tools(messages, tools.to_llm_schemas())
+    # module-058（ADR-0012 方案 A）：按 ctx.phase 阶段选工具 schema
+    #（与手写 react_loop 共用 schemas_for_phase，防两处漂移）
+    response = await client.chat_with_tools(messages, schemas_for_phase(tools, ctx))
 
     content = response.get("content", "") or ""
     if content:
@@ -128,8 +133,10 @@ async def execute_tools(state: ReActGraphState) -> dict:
     executed_ids = {tc.get("id", "") for tc in allowed}
     messages.append(_assistant_message(response, executed_ids))
 
+    executed_names: list[str] = []
     for tc in allowed:
         name = tc.get("name", "")
+        executed_names.append(name)
         args = tc.get("args") or {}
         if isinstance(args, str):  # 防御：个别供应商返回未解析的 JSON 字符串
             try:
@@ -147,6 +154,8 @@ async def execute_tools(state: ReActGraphState) -> dict:
         # 工具结果追加到消息历史（LLM 下一轮能看到）
         messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                          "content": result})
+    # 本轮调用过生成工具 → 下一轮切 generation（单向前进，与手写 react_loop 共用）
+    advance_phase(ctx, executed_names)
 
     return {"messages": messages, "tool_count": tool_count, "events": events}
 

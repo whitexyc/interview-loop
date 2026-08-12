@@ -76,6 +76,9 @@ class ReactContext:
         docs: 检索工具累积的文档（按 doc id 去重）
         memory: recall_memory 工具召回的记忆文本（供 generate_answer 使用）
         scratchpad: note_to_self 工具记录的工作笔记列表，按写入序（module-041）
+        phase: 工具执行阶段（module-058 / ADR-0012 方案 A）——初始 "retrieval"；
+            本轮调用过 generate_answer/verify_answer → 下一轮切 "generation"
+            （单向前进，generation 内调 re_search 不回退）
     """
 
     def __init__(self, query: str, identity: str = "unknown",
@@ -87,6 +90,7 @@ class ReactContext:
         self._seen_ids: set = set()
         self.memory = ""
         self.scratchpad: list[str] = []  # module-041: Agent 工作笔记，按写入序
+        self.phase: str = "retrieval"    # module-058: 工具执行阶段状态机
 
     def add_note(self, note: str) -> None:
         """记录一条工作笔记到 scratchpad（module-041）"""
@@ -125,6 +129,36 @@ def _assistant_message(response: dict, executed_ids: set) -> dict:
     if calls:
         msg["tool_calls"] = calls
     return msg
+
+
+# ─── 工具阶段切分公共辅助（module-058 / ADR-0012 方案 A，两条循环共用） ───
+# 阶段判定：以"是否已调用过 generate_answer/verify_answer"为界（非 docs
+# 非空——后者会切断"生成后发现不足→再补检"能力）；generation 内调 re_search
+# 不回退（单向前进，防死循环）。归组见 tool_registry.register_builtin_tools。
+_GENERATION_GATE_TOOLS = {"generate_answer", "verify_answer"}
+
+
+def schemas_for_phase(tools: ToolRegistry, ctx: ReactContext) -> list[dict]:
+    """按当前阶段选工具 schema（开关 false → 全量 10 个，零回归逃生口）
+
+    两条 ReAct 循环（react_loop + langgraph_react_loop）共用本函数，只改
+    一处 = 回归（防两处漂移）。
+    """
+    if settings.tool_phase_split:
+        return tools.to_llm_schemas(group=ctx.phase)
+    return tools.to_llm_schemas()
+
+
+def advance_phase(ctx: ReactContext, executed_names: list[str]) -> None:
+    """本轮调用过生成工具 → 下一轮切 generation（单向前进）
+
+    Args:
+        ctx: 会话上下文（phase 原地更新，跨轮次/跨节点可见）
+        executed_names: 本轮实际执行的工具名列表（含预算截断后实际执行者）
+    """
+    if ctx.phase == "retrieval" and any(
+            n in _GENERATION_GATE_TOOLS for n in executed_names):
+        ctx.phase = "generation"
 
 
 async def react_agent(
@@ -210,7 +244,9 @@ async def react_loop(
         return
 
     while tool_count < budget:
-        response = await client.chat_with_tools(messages, tools.to_llm_schemas())
+        # module-058（ADR-0012 方案 A）：按 ctx.phase 阶段选工具 schema
+        #（检索阶段 7 个 / 生成阶段 4 个；开关 false → 全量，零回归）
+        response = await client.chat_with_tools(messages, schemas_for_phase(tools, ctx))
         tool_calls = response.get("tool_calls", []) or []
         content = response.get("content", "") or ""
 
@@ -237,8 +273,10 @@ async def react_loop(
         executed_ids = {tc.get("id", "") for tc in allowed}
         messages.append(_assistant_message(response, executed_ids))
 
+        executed_names: list[str] = []
         for tc in allowed:
             name = tc.get("name", "")
+            executed_names.append(name)
             args = tc.get("args") or {}
             if isinstance(args, str):  # 防御：个别供应商返回未解析的 JSON 字符串
                 try:
@@ -256,6 +294,8 @@ async def react_loop(
             # 工具结果追加到消息历史（LLM 下一轮能看到）
             messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                              "content": result})
+        # 本轮调用过生成工具 → 下一轮切 generation（单向前进）
+        advance_phase(ctx, executed_names)
 
     # 预算耗尽：用已收集 docs 兜底生成
     logger.warning("工具预算耗尽 (budget=%d)，用 %d 篇已收集文档兜底生成",

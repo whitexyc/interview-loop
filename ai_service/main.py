@@ -20,6 +20,7 @@ from src.database import init_db, async_session_factory
 from src.ratelimit import check_rate_limit, get_client_ip
 from src.cache import cache
 from src.identity import parse_jwt, resolve_identity
+from src import observability
 from rag.engine import rag_engine
 from rag.schemas import (
     SearchRequest, SearchResponse, ChatRequest, ChatResponse,
@@ -46,9 +47,15 @@ _HHEM_WARMUP_TASK: Optional[asyncio.Task] = None
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    # module-058（WP-C）Review 修复：日志格式含 %(trace_id)s（TraceIdFilter
+    # 保证该字段恒存在，无请求上下文时为空串）——请求期间日志行可肉眼关联
+    format="%(asctime)s [%(name)s] %(levelname)s [%(trace_id)s]: %(message)s",
 )
 logger = logging.getLogger("ai_service")
+
+# module-058（WP-C）Review 修复（MAJOR-1）：trace_id 贯穿日志——过滤器从
+# 请求上下文取 trace_id 注入 record.trace_id extra（幂等挂根 logger + handler）
+observability.install_trace_id_filter()
 
 
 class ChainUpdateRequest(BaseModel):
@@ -173,7 +180,17 @@ async def rate_limit_middleware(request: Request, call_next):
     在请求进入路由之前检查限流，超出阈值返回 429。
     同时提取客户端 IP 注入 request.state.client_ip；
     并解析 JWT 注入 request.state.user_id（无/非法/过期 token 为 ""，module-032）。
+
+    module-058（WP-C）：请求入口生成 trace_id 挂 request.state + 观测上下文
+    （contextvar），引擎/重排/LLM 客户端在请求任务内读取；request_logs_enabled
+    =false 时跳过（零埋点零落库）。
     """
+    # 可观测性：trace_id 初始化（关闭时零埋点）
+    if settings.request_logs_enabled:
+        trace_id = observability.make_trace_id()
+        observability.init_request(trace_id)
+        request.state.trace_id = trace_id
+
     # 健康检查不限制
     if request.url.path == "/ai/health":
         return await call_next(request)
@@ -209,6 +226,38 @@ def save_messages_to_session(client_ip: str, user_msg: str, assistant_msg: str, 
     # 裁剪超出部分
     if len(records) > MAX_MESSAGES_PER_IP:
         IP_SESSION_MESSAGES[client_ip] = records[-MAX_MESSAGES_PER_IP:]
+
+
+# ─── 请求观测落库（module-058 WP-C 可观测性） ───
+def persist_request_log(fastapi_req: Request, endpoint: str, intent: str = "",
+                        error: bool = False) -> None:
+    """请求结束异步落库 request_logs（fire-and-forget，fail-open 不阻塞响应）
+
+    观测数据来自请求上下文（中间件初始化的 trace_id + 引擎/重排/LLM 客户端
+    累积的阶段耗时/token 用量/缓存命中）；identity 对齐 048 口径（user_id
+    优先，client_ip 兜底）。开关关闭时零埋点零落库。
+
+    Args:
+        fastapi_req: 当前请求（取 identity / trace_id）
+        endpoint: 端点标识（chat/chat_stream/agent/agent-lg）
+        intent: 意图（knowledge/casual_chat/realtime/agent）
+        error: 请求错误标记（主链路异常置 true）
+    """
+    if not settings.request_logs_enabled:
+        return
+    stats = observability.get_request_stats()
+    record = {
+        "trace_id": stats.get("trace_id") or getattr(fastapi_req.state, "trace_id", ""),
+        "identity": resolve_identity(fastapi_req),
+        "endpoint": endpoint,
+        "intent": intent,
+        "timings": stats.get("timings", {}),
+        "usage": stats.get("usage", {}),
+        "cache_hits": stats.get("cache_hits", 0),
+        "cache_misses": stats.get("cache_misses", 0),
+        "error": error,
+    }
+    asyncio.create_task(observability.save_request_log(record))
 
 
 def schedule_stream_persist(intent: str, query: str, answer: str,
@@ -360,6 +409,16 @@ async def chat(request: ChatRequest, fastapi_req: Request):
         # 注：会话持久化（_schedule_session_persist）已由 engine.chat 内部在 no-docs/docs
         # 两个 return 点自包含调度（module-034），此处不再重复调用——此前双重调度导致
         # 每轮会话消息确定性重复落库 4 行/轮（Reviewer 阻塞 #1，content_hash 无唯一约束）。
+    # module-058：请求观测落库（intent 取 ChatSteps/消息语义；error 取 internal_error）
+    intent = ""
+    if result.message == "casual_chat":
+        intent = "casual_chat"
+    elif result.message == "realtime_not_implemented":
+        intent = "realtime"
+    elif getattr(result, "steps", None) and result.steps.intent:
+        intent = result.steps.intent.get("label", "")
+    persist_request_log(fastapi_req, "chat", intent=intent,
+                        error=result.message == "internal_error")
     return result
 
 
@@ -386,12 +445,15 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
     async def event_stream():
         import time
         _t = time.monotonic
+        intent = ""
+        failed = False
         try:
             # ====== Step 1: 意图识别 ======
             t0 = _t()
             from agent.router import router_agent
             intent_result = await router_agent.classify(request.query)
             intent = intent_result.get("intent", "knowledge")
+            observability.timing("intent", _t() - t0)
             intent_labels = {"knowledge": "知识库", "casual_chat": "闲聊", "realtime": "实时数据"}
             step_data = json.dumps({
                 "step": "intent",
@@ -414,6 +476,7 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
             t0 = _t()
             docs = await rag_engine._retrieve(request.query, top_k=20)
             retrieval_count = len(docs)
+            observability.timing("retrieve", _t() - t0)
             # module-045 WP3: L3 标记接入流式路径（对齐非流式 engine.chat）——
             # 检索 top-1 绝对余弦 < 0.3 → suspected_misclassify（先度量后干预，
             # 只写入 step 事件可观测）。_retrieve 已做父块映射，abs_cosine 经
@@ -464,6 +527,7 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
             t0 = _t()
             rerank_before = len(docs)
             docs = await rag_engine._rerank(request.query, docs)
+            observability.timing("rerank", _t() - t0)
             step_data = json.dumps({
                 "step": "rerank",
                 "data": {"before": rerank_before, "after": len(docs)},
@@ -475,6 +539,7 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
             t0 = _t()
             from agent.reflector import reflector
             check = await reflector.check_sufficiency(request.query, docs)
+            observability.timing("reflection", _t() - t0)
             reflection_data = {
                 "sufficient": check.get("sufficient", True),
                 "reason": check.get("reason", ""),
@@ -495,6 +560,7 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
             memory = await rag_engine._recall_memory(request.query, identity)
             history = await rag_engine._resolve_session_history(identity, request.history)
             answer_parts = []
+            gen_t0 = _t()
             total_len = 0
             async for token in reflector.generate_answer_stream(request.query, docs, history=history, memory=memory):
                 answer_parts.append(token)
@@ -524,10 +590,13 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
             rag_engine._schedule_session_persist(identity, request.query, "".join(answer_parts))
 
             # ====== Step 7: 证据链验证（module-039） ======
+            observability.timing("generate", _t() - gen_t0)
             full_answer = "".join(answer_parts)
             # module-042: 剥离截断标记后验证，避免标记文本误导置信度评估
             clean_answer = full_answer.replace("\n\n[答案过长，已截断]", "")
+            vf_t0 = _t()
             verified = await reflector.verify_answer(clean_answer, docs)
+            observability.timing("verify", _t() - vf_t0)
             if verified.get("claims"):
                 yield f"event: verified\ndata: {json.dumps({'claims': verified['claims'], 'overall_confidence': verified['overall_confidence'], 'total_claims': verified['total_claims'], 'supported': verified['supported'], 'inferred': verified['inferred'], 'unsupported': verified['unsupported']}, ensure_ascii=False)}\n\n"
                 yield f"event: done\ndata: {json.dumps({'sources': sources, 'verified': True, 'overall_confidence': verified['overall_confidence']})}\n\n"
@@ -535,8 +604,13 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
                 yield f"event: done\ndata: {json.dumps({'sources': sources, 'verified': False})}\n\n"
 
         except Exception as e:
+            failed = True
             logger.error("流式问答失败: %s", e, exc_info=True)
             yield f"event: error\ndata: {json.dumps({'message': '服务暂时不可用'})}\n\n"
+        finally:
+            # module-058：请求观测落库（流式结束/断开均触发，fail-open）
+            persist_request_log(fastapi_req, "chat_stream", intent=intent,
+                                error=failed)
 
     return StreamingResponse(
         event_stream(),
@@ -564,6 +638,7 @@ async def chat_agent(request: ChatRequest, fastapi_req: Request):
 
     async def event_stream():
         from agent.react import ReactContext, _build_messages, react_loop
+        failed = False
         try:
             # module-036：会话恢复优先持久化（刷新/换设备不丢）；无持久化会话
             # 则回退当前请求 history（零回归），与 chat_stream Step 5 一致
@@ -601,8 +676,12 @@ async def chat_agent(request: ChatRequest, fastapi_req: Request):
             rag_engine._schedule_session_persist(identity, request.query, answer)
             yield f"event: done\ndata: {json.dumps({'answer': answer, 'sources': sources, 'tool_count': tool_count, 'budget': budget}, ensure_ascii=False)}\n\n"
         except Exception as e:
+            failed = True
             logger.error("Agent 问答失败: %s", e, exc_info=True)
             yield f"event: error\ndata: {json.dumps({'message': '服务暂时不可用'})}\n\n"
+        finally:
+            # module-058：请求观测落库（agent 端点无独立意图分类，intent="agent"）
+            persist_request_log(fastapi_req, "agent", intent="agent", error=failed)
 
     return StreamingResponse(
         event_stream(),
@@ -632,6 +711,7 @@ async def chat_agent_langgraph(request: ChatRequest, fastapi_req: Request):
         from agent.langgraph_react import (
             ReactContext, _build_messages, langgraph_react_loop,
         )
+        failed = False
         try:
             # module-036：会话恢复优先持久化（刷新/换设备不丢）；无持久化会话
             # 则回退当前请求 history（零回归），与 chat_stream Step 5 一致
@@ -669,8 +749,12 @@ async def chat_agent_langgraph(request: ChatRequest, fastapi_req: Request):
             rag_engine._schedule_session_persist(identity, request.query, answer)
             yield f"event: done\ndata: {json.dumps({'answer': answer, 'sources': sources, 'tool_count': tool_count, 'budget': budget}, ensure_ascii=False)}\n\n"
         except Exception as e:
+            failed = True
             logger.error("LangGraph Agent 问答失败: %s", e, exc_info=True)
             yield f"event: error\ndata: {json.dumps({'message': '服务暂时不可用'})}\n\n"
+        finally:
+            # module-058：请求观测落库（agent-lg 端点无独立意图分类，intent="agent"）
+            persist_request_log(fastapi_req, "agent-lg", intent="agent", error=failed)
 
     return StreamingResponse(
         event_stream(),

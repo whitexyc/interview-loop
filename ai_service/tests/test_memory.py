@@ -530,8 +530,11 @@ class TestPromptZeroRegression:
         from agent.reflector import _GENERATE_PROMPT
         query = "什么是G1 GC"
         docs_detail = "[1] 标题\n来源: 知识库\n内容: 内容"
-        # 旧模板（module-023 之前）结构：{history_section}\n用户问题，
-        # history 为空时「列表」与「用户问题」之间是 2 个空行
+        # 期望模板（module-058 WP-B 定稿）：{sections}\n检索到的文档\n用户问题。
+        # 区块顺序由"用户问题 → 检索到的文档"改为"检索到的文档 → 用户问题"
+        #（docs 前移为前缀缓存铺路）；sections 空时无多余内容（逐字节一致语义
+        # 保留——sections/格式/标签一字不改，仅调换区块顺序，验收 §1 允许的
+        # 顺序预期变更）
         old_prompt = (
             "你是一个知识库问答助手。基于检索到的文档回答用户问题。\n\n"
             "要求：\n"
@@ -540,10 +543,10 @@ class TestPromptZeroRegression:
             "3. 回答后附带引用文档列表\n"
             "\n"
             "\n"
-            f"用户问题: {query}\n"
-            "\n"
             "检索到的文档:\n"
             f"{docs_detail}\n"
+            "\n"
+            f"用户问题: {query}\n"
             "\n"
             "回答："
         )

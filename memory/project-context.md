@@ -4,7 +4,7 @@
 - 项目名称: personal-interview-website
 - 项目简介: 融合简历展示与 Agentic RAG 知识库问答的个人网站系统（双语言微服务架构：Java Spring Boot + Python FastAPI + React 前端）
 - 创建时间: 2026-07-29
-- 最后更新: 2026-08-12（module-057 完成）
+- 最后更新: 2026-08-13（module-058 完成）
 
 ## 2. 技术栈
 > 详见 `tech-stack.md`，此处仅保留摘要。
@@ -73,6 +73,7 @@
 | module-055 | 提示词评估优化（ADR-0011 第一步：eval/prompt_variants.py 变体对比表 + check_sufficiency prompt 可注入参数）+ E2E 3 问题修复（intent 漏检：L2 无条件触发 + 停用词 43 词数据驱动扩充 + 规则表短路 / HHEM 超时：交叉对数上限 8×2 + 截断 500 + 预算 20s + 启动预热 / RRF abs_cosine：L3 只对实测低分标记）+ rrf 切默认（hybrid 保留回退开关） | 0.55.0-module-055 | 2026-08-12 | ✅ 完成（全量 688/0；真实 E2E chat+stream 默认 rrf 验证 3 问题场景全修复；golden intent 实测 0.98——2 条 realtime→knowledge 系 LLM 自判非 L2 所致） |
 | module-056 | L4 意图分类器上岗（ADR-0003 L4 达标启用）：人造标注集 337 条（knowledge 132/casual 105/realtime 100，边界易混 32 含 E2E bug 类 G1 query + 专有术语 40 + 口语化 24，与评测集字符串零重叠防泄漏）+ golden.json 112 题重训（test split Accuracy 1.0000 vs 旧 0.89）+ golden_intent 100 条真实对比 LLM vs 分类器**双 1.0000**（eval_runs id=23/24，knowledge Recall 双 1.0，casual/realtime 30+20 零重叠纯泛化全对）→ **PW_INTENT_CLASSIFIER_ENABLED 默认开**（加载/推理失败回退 LLM，保留开关） | 0.56.0-module-056 | 2026-08-12 | ✅ 完成（全量 699/0 + 新增 11；真实 HTTP 冒烟：分类器路径 G1 E2E bug query 0.92 正确路由 + casual 直判 + 模型改名回退 LLM 路径 200；训练/评测分离：load_golden_intent_samples 移出训练管线；**Review 修复**：--compare-classifier LLM 侧钉住 L4 防自污染（eval_runs 快照含 intent_classifier_enabled 运行时字段）+ 文档口径同步（router/intent_classifier/train 脚本 docstring、changelog 重叠量化 1/50 全等/23/50 余弦>0.95）；修复后全量 700/0） |
 | module-057 | 数据验证批（5 个硬数字）：**① 矛盾复测 v2**（句级拆解 + 阈值校准 + 样本扩至 86 条/contradiction 53，eval_runs id=26 'nli_retest_v2'）：全量 110 对 kappa **0.4311**（t=0.80）、同口径旧 80 对 **0.3754 < 基线 0.5167（-0.1413）**——改进未达门槛且低于基线，最严聚合误杀 9 条 + 真实检索子集崩至 0.0957，降级双轨维持，结论入 ADR-0010（下一轮方向：中文专用/更大 NLI、微调、保守矛盾门控）；**② 图谱消融**（eval_runs id=27 graph_only Hit@5 0.7333 / id=28 hybrid rrf 0.9905，--ablate 同跑 0.7429→0.9810 delta **+0.2381**，rrf 三通道口径）——图谱单通道能力与融合增量分列；**③ 改写真实增益**（id=29，rrf 口径 n=104）：Hit@5 **+0.0096** / Recall@5 +0.0048 / MRR **-0.0353**（improved 3/worsened 10）——基线近饱和改写无净收益；**④ RRF k 扫描**（id=30 benchmark_rrf_k.py 新建）：k=20-100 全平坦 Hit@5 **0.9810**，两通道 0.9714，**图谱净增益 +0.0096**——k 不敏感 k=60 保持不改默认；**⑤ 飞轮冒烟**（flywheel_smoke.py 新建：真实 chat + POST /ai/feedback + 落库验证 + 防重复如实记录——后端无幂等防重在前端已评态；6 行 feedback 保留为飞轮种子 identity=203.0.113.66/message_id 990001-990005 构造标识） | 0.57.0-module-057 | 2026-08-13 | ✅ 完成（全量 740/0 = 700 基线 + 40 新增；详见 specs/module-057-data-validation-batch/changelog.md） |
+| module-058 | 检索链优化（prompt 顺序 + 前缀缓存 + 可观测性）+ 工具治理 P1（阶段切分，原 059 并入；WP-A 拼标题用户决策推迟）：**WP-B** `_GENERATE_PROMPT` 顺序改 sections→检索到的文档→用户问题（docs 前移前缀缓存铺路，sections/标签格式一字不改）——真实探测（probe_prefix_cache.py）：单文档 637 token 未达 DeepSeek 硬盘缓存门槛（docs 段不缓存）；**多文档 3001 token 同 docs 二次生成 billed miss 3001→57-60（-98%，cached 0→2944）缓存命中**；verify 口径核实（LLM 只拆句 docs 不进 prompt，无前缀可复用，收益面在 generate_answer 同 docs 重复生成）。**WP-C 可观测性**：src/observability.py（contextvar 观测上下文：trace_id/timing/usage/cache 计数，开关 PW_REQUEST_LOGS 默认 true 关闭零埋点）+ trace_id 中间件挂 request.state + **TraceIdFilter 日志注入（Review 修复：record.trace_id 贯穿日志，根 logger+handler 挂载，日志格式含 [%(trace_id)s]）** + 阶段计时（意图/分诊改写/检索 FTS·向量·图谱各自/rerank/反思/生成/幻觉检测，retriever._timed_channel 并行主路径）+ token 用量按供应商（llm/client.py _extract_usage 兼容 OpenAI/langchain/Anthropic，流式不采集；**Review 修复：chat_with_tools 按 _provider_label 落供应商桶**）+ 缓存命中计数（_retrieve_cache_key 处）→ **request_logs 表**（init_db 幂等 DDL 对齐 048 feedback 模式，JSONB timings/usage，identity user_id 优先 client_ip 兜底，fail-open 落库，chat/chat_stream/agent/agent-lg 四端点接线含流式 finally）——真实 trace 样例已落库（probe_request_trace.py）。**WP-E 工具阶段切分（ADR-0012 方案 A）**：AgentTool.group + `to_llm_schemas(group=None)` 默认全量 10（test_agent_tools len==10 不挂）；检索组 7/生成组 4（re_search 双组）；ctx.phase 状态机（初始 retrieval，调过 generate_answer/verify_answer 后下一轮切 generation，单向前进不回退，判定以"已调用过生成工具"为界非 docs 非空）；react_loop + langgraph_react_loop 抽公共辅助 schemas_for_phase/advance_phase 防漂移；PW_TOOL_PHASE_SPLIT 默认 true false 回退全量；10 工具 name/description/args_schema 一字不改只动暴露逻辑；conftest autouse 钉住测试环境 false+request_logs=false（对齐 056 模式） | 0.58.0-module-058 | 2026-08-13 | ✅ 完成（全量 **780/0** = 740 基线 + 40 新增（test_prompt_order 6 + test_tool_phase_split 18 + test_observability 16；仅 test_memory.py 1 项顺序预期按验收许可更新）；两循环真实 E2E 冒烟（agent/agent-lg tool_trace 全检索组 0 生成工具 0 防御串，预算耗尽兜底真实答案）；request_logs 样例/E2E 行保留为观测种子（3 行：probe/agent/agent-lg）；**Review 修复**：MAJOR-1 trace_id 日志 extra（TraceIdFilter）+ MAJOR-2 chat_with_tools 用量按供应商标签（DB 实测旧 'llm' 桶证据）+ MINOR-1 changelog 422 误记修正（422 不落库，删除来源不可确证的 id=2 异常样例行）+ MINOR-2 测试数口径修正（14/14→实 18/10→修复后 18/16）+ MINOR-3 遗留改动观察未触碰；详见 specs/module-058-retrieval-chain-opt/changelog.md §7） |
 
 ## 4. 架构决策记录（ADR）索引
 | ADR 编号 | 决策标题 | 状态 | 日期 |
@@ -83,9 +84,9 @@
 | adr-011 | 提示词评估优化（四维评估 + 业界工具扫描 + 四代算法三步落地：变体测试→OPRO→DSPy） | ✅ 第一步已实施（module-055：eval/prompt_variants.py 变体对比表 + check_sufficiency prompt 可注入参数，只度量不替换）；第二/三步（OPRO/DSPy）按数据决定 | 2026-08-12 |
 
 ## 5. 当前迭代状态
-- 当前迭代版本: v0.57.0（module-057 数据验证批已完成，见模块清单行）
-- 正在进行的模块: 无（v0.56/057 批次全部收尾）
-- 下一个待开发模块: 待定（按 roadmap-next-phase.md）
+- 当前迭代版本: v0.58.0（module-058 检索链优化 + 工具治理 P1 已完成，见模块清单行）
+- 正在进行的模块: 无（v0.58 批次全部收尾）
+- 下一个待开发模块: 待定（按 roadmap-next-phase.md；backlog 含：WP-A 拼标题+防扎堆（用户决策推迟，届时三口径对比 + 聚合式必配）、L2 阈值再校准、图谱消融已补跑、mDeBERTa 矛盾判别、飞轮重训管线）
 
 ## 7. 关键技术决策记录
 - 所有 API 返回格式统一为 {code, msg, data, timestamp, request_id}（详见 CLAUDE.md 第5节）

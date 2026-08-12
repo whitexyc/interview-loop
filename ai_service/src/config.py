@@ -85,6 +85,19 @@ class Settings(BaseSettings):
     # Agent 工具化（module-028）：ReAct 循环工具总调用次数预算（防空转烧钱）
     max_agent_tools: int = 4
 
+    # 工具阶段切分（module-058 / ADR-0012 方案 A，原 module-059 并入）：
+    # 按 ctx.phase 状态机只暴露当前阶段工具（检索组 7 / 生成组 4，re_search
+    # 双组）——省 schema token + 结构性防误调（检索阶段调不到 generate/
+    # verify，不再靠工具内部字符串防御）。默认 true；false 回退全量 10 个
+    # 零回归（逃生口）。测试环境由 conftest autouse fixture 钉住 false。
+    tool_phase_split: bool = True
+
+    # 请求可观测性（module-058 WP-C）：trace_id + 阶段计时 + token 用量 +
+    # 缓存命中 → request_logs 落库（init_db 自愈幂等 DDL）。默认 true；
+    # false 时零埋点零落库（中间件不初始化观测上下文、helper 直接返回）。
+    # 测试环境由 conftest autouse fixture 钉住 false（测试不污染落库）。
+    request_logs_enabled: bool = True
+
     # 长期记忆（module-033/035）：提取 / 去重 / 动态K 阈值（参考 llm-push/19-Agent记忆管理）
     memory_importance_threshold: float = 0.6    # 提取事实 importance < 0.6 丢弃
     # module-035 校准：真实 bge-m3 同义改写 cosine≈0.88，0.95 太严导致漏去重 → 下调 0.85

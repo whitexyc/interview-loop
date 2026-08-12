@@ -31,10 +31,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
 from src.database import async_session_factory
+from src import observability
 from rag.retrieval.embeddings import EmbeddingService, embedding_service as default_embedding_service
 from rag.retrieval.text_tokenizer import tokenize
 
 logger = logging.getLogger(__name__)
+
+
+async def _timed_channel(coro, label: str):
+    """通道级计时包装：记录单路检索耗时到观测上下文（module-058 WP-C）
+
+    仅用于并行融合主路径（FTS/向量/图谱各自计时）；降级串行/快路径不单独
+    计时（观测缺失不中断）。异常原样抛出，由 gather(return_exceptions=True)
+    捕获——计时逻辑不改变降级语义。
+    """
+    import time
+    _t = time.perf_counter()
+    try:
+        return await coro
+    finally:
+        observability.timing(label, time.perf_counter() - _t)
 
 
 class RetrievalException(Exception):
@@ -312,10 +328,17 @@ class HybridRetriever:
             )
         else:
             # 默认路径：FTS / 向量各开独立 session（module-026 并发修复）
+            # module-058（WP-C）：两通道各自计时（retrieve_fts/retrieve_vector）
             try:
                 async with async_session_factory() as fts_sess, async_session_factory() as vec_sess:
-                    fts_task = self._fts_search(query, fetch_k, fts_sess, source_pattern)
-                    vector_task = self._vector_search(query_embedding, fetch_k, vec_sess, source_pattern)
+                    fts_task = _timed_channel(
+                        self._fts_search(query, fetch_k, fts_sess, source_pattern),
+                        "retrieve_fts",
+                    )
+                    vector_task = _timed_channel(
+                        self._vector_search(query_embedding, fetch_k, vec_sess, source_pattern),
+                        "retrieve_vector",
+                    )
                     fts_results, vector_results = await asyncio.gather(
                         fts_task, vector_task, return_exceptions=True,
                     )
@@ -470,11 +493,20 @@ class HybridRetriever:
                 )
         else:
             # 默认路径：FTS / 向量各开独立 session + 图谱并行（module-026 同款并发修复）
+            # module-058（WP-C）：三通道各自计时（retrieve_fts/retrieve_vector/retrieve_graph）
             try:
                 async with async_session_factory() as fts_sess, async_session_factory() as vec_sess:
-                    fts_task = self._fts_search(query, fetch_k, fts_sess, source_pattern)
-                    vector_task = self._vector_search(query_embedding, fetch_k, vec_sess, source_pattern)
-                    graph_task = self._retrieve_graph_only(query, fetch_k)
+                    fts_task = _timed_channel(
+                        self._fts_search(query, fetch_k, fts_sess, source_pattern),
+                        "retrieve_fts",
+                    )
+                    vector_task = _timed_channel(
+                        self._vector_search(query_embedding, fetch_k, vec_sess, source_pattern),
+                        "retrieve_vector",
+                    )
+                    graph_task = _timed_channel(
+                        self._retrieve_graph_only(query, fetch_k), "retrieve_graph",
+                    )
                     fts_results, vector_results, graph_results = await asyncio.gather(
                         fts_task, vector_task, graph_task, return_exceptions=True,
                     )

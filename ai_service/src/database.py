@@ -50,13 +50,51 @@ async def ensure_feedback_table() -> None:
         await session.commit()
 
 
+# request_logs 表 DDL（module-058 WP-C 可观测性）：与 feedback 表同款模式——
+# 独立建表 + 启动 init_db 自愈建表（CREATE TABLE IF NOT EXISTS，幂等）。
+# timings/usage 用 JSONB 存阶段耗时与 token 用量（按供应商），避免列爆炸；
+# 缓存命中/错误标记单列，供聚合查询（P50/P95 延迟、单问题成本分布）。
+REQUEST_LOGS_DDL = """
+CREATE TABLE IF NOT EXISTS request_logs (
+    id            BIGSERIAL    PRIMARY KEY,
+    trace_id      VARCHAR(64)  NOT NULL,
+    identity      VARCHAR(256) NOT NULL DEFAULT '',
+    endpoint      VARCHAR(128) NOT NULL DEFAULT '',
+    intent        VARCHAR(64)  NOT NULL DEFAULT '',
+    timings       JSONB        NOT NULL DEFAULT '{}',
+    usage         JSONB        NOT NULL DEFAULT '{}',
+    cache_hits    INTEGER      NOT NULL DEFAULT 0,
+    cache_misses  INTEGER      NOT NULL DEFAULT 0,
+    error         BOOLEAN      NOT NULL DEFAULT FALSE,
+    created_at    TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+COMMENT ON TABLE request_logs IS '请求观测日志（trace_id/阶段耗时/token用量/缓存命中/错误标记）';
+COMMENT ON COLUMN request_logs.trace_id IS '请求追踪 ID（UUID hex，贯穿日志与落库）';
+COMMENT ON COLUMN request_logs.identity IS '请求身份（user_id 优先，client_ip 兜底，对齐 048 口径）';
+COMMENT ON COLUMN request_logs.timings IS '各阶段耗时（毫秒）：意图/分诊改写/检索FTS·向量·图谱/rerank/反思/生成/幻觉检测';
+COMMENT ON COLUMN request_logs.usage IS 'token 用量（按供应商：{provider: {prompt, completion}}）';
+COMMENT ON COLUMN request_logs.error IS '请求错误标记（主链路异常时置 true）';
+"""
+
+
+async def ensure_request_logs_table() -> None:
+    """幂等创建 request_logs 表（与 feedback 表同款拆分执行模式）"""
+    statements = [s.strip() for s in REQUEST_LOGS_DDL.split(";") if s.strip()]
+    async with async_session_factory() as session:
+        for stmt in statements:
+            await session.execute(text(stmt))
+        await session.commit()
+
+
 async def init_db():
-    """初始化数据库：启用 pgvector 扩展 + 自愈建 feedback 表"""
+    """初始化数据库：启用 pgvector 扩展 + 自愈建 feedback / request_logs 表"""
     async with engine.begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         logger.info("pgvector extension 已就绪")
     await ensure_feedback_table()
     logger.info("feedback 表已就绪（module-048）")
+    await ensure_request_logs_table()
+    logger.info("request_logs 表已就绪（module-058）")
 
 
 async def get_db() -> AsyncSession:
