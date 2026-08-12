@@ -12,14 +12,25 @@
     eval/contradiction_annotation_guide.md —— 标注指南（"什么是矛盾"判定标准）
 
 样本构成（人工构造，来源=知识库真实文档段落，SUFFICIENCY_DATASET 同源）:
-    - contradiction 31 条（≥30 达标）：
-        claim_vs_doc          16 条 —— 文档支持 X，答案声称 not-X（断言反转）
-        internal_contradiction 15 条 —— claim 单句内同时出现 X 与 not-X（自相矛盾）
-    - entailment 16 条 —— 正例对照（一致样本，断言与文档一致，约 1:2 比例）
-    - neutral    9 条  —— 文档与 claim 主题无关或信息不足（对照；含 AOF fsync
-                          改标样本：两半句主语为不同配置 no-fsync vs everysec，
-                          非同一主语 X/not-X，按规则 3 判 neutral）
-    合计 56 条。
+    module-054 首版 56 条（保持原序原样，供同口径复测对比）:
+        - contradiction 31 条（≥30 达标）：
+            claim_vs_doc          16 条 —— 文档支持 X，答案声称 not-X（断言反转）
+            internal_contradiction 15 条 —— claim 单句内同时出现 X 与 not-X（自相矛盾）
+        - entailment 16 条 —— 正例对照（一致样本，断言与文档一致，约 1:2 比例）
+        - neutral    9 条  —— 文档与 claim 主题无关或信息不足（对照；含 AOF fsync
+                              改标样本：两半句主语为不同配置 no-fsync vs everysec，
+                              非同一主语 X/not-X，按规则 3 判 neutral）
+    module-057 扩充 30 条（追加在首版之后，constructed[:56] 仍为 module-054 同集）:
+        - contradiction 新增 22 条（contradiction 合计 53 ≥ 50 达标）：
+            claim_vs_doc          新增 14 条（合计 30）——同款断言反转
+            internal_contradiction 新增 8 条（合计 23 ≥ 20）——**多句混合
+              "前真后假"样本**（前句为文档真断言、后句为反断言，以句号分隔，
+              供句级拆解逐子句判定——mDeBERTa 整句看混合断言倾向判 neutral，
+              拆句后后句单独与文档矛盾应判 contradiction）
+        - entailment 新增 6 条（合计 22）——多句一致样本（两子句均被文档支持，
+          验证"无矛盾有 entailment → entailment"聚合不误杀）
+        - neutral 新增 2 条（合计 11）——多句无关样本
+    合计 86 条。
 
 JSON 与 golden_factcheck 兼容（question/documents/label）:
     golden_factcheck 每条 = {question, documents:[{title,content}], label}，
@@ -448,7 +459,233 @@ NEUTRALS: list[dict] = [
     },
 ]
 
+# ── module-057 扩充样本（追加在首版之后，constructed[:56] 保持 module-054 同集）──
+
+NEW_CLAIM_VS_DOC: list[dict] = [
+    {
+        "question": "Redis 缓存穿透、击穿、雪崩有什么区别？分别怎么解决？",
+        "claim": "缓存雪崩是单个热点 key 过期瞬间大量请求打到数据库。",
+        "doc": "三大问题区分：穿透——查不存在的数据；击穿——热点 key 过期瞬间大量请求打到 DB；雪崩——大量 key 同时过期。穿透解决：布隆过滤器 + 空值缓存；击穿解决：互斥锁；雪崩解决：过期时间加随机值。",
+        "doc_title": "13-Redis缓存三大问题与解决方案_2026-07-24",
+        "note": "文档明言击穿是单个热点 key 过期、雪崩是大量 key 同时过期；claim 把击穿当雪崩（断言反转）",
+    },
+    {
+        "question": "Spring事务的传播行为有哪些？",
+        "claim": "Spring 事务的默认传播行为是 REQUIRES_NEW，会挂起当前事务新建独立事务。",
+        "doc": "Spring 事务传播行为：REQUIRED（默认，有则加入无则新建）、REQUIRES_NEW（挂起当前新建独立事务）、NESTED（嵌套事务，Savepoint 回滚）、SUPPORTS、NOT_SUPPORTED、MANDATORY、NEVER。",
+        "doc_title": "17-Spring事务管理与传播行为_2026-07-28",
+        "note": "文档明言默认是 REQUIRED；claim 反转为 REQUIRES_NEW",
+    },
+    {
+        "question": "Netty 粘包拆包问题是怎么解决的？",
+        "claim": "Netty 最常用的粘包拆包方案是定长解码器 FixedLengthFrameDecoder。",
+        "doc": "Netty 解决方式：1）定长解码器 FixedLengthFrameDecoder；2）分隔符解码器 LineBasedFrameDecoder/DelimiterBasedFrameDecoder；3）长度域解码器 LengthFieldBasedFrameDecoder（最常用，头 4 字节存长度）；4）自定义 ByteToMessageDecoder。",
+        "doc_title": "20-Netty编解码与粘包拆包_2026-07-31",
+        "note": "文档明言长度域解码器最常用；claim 反转为定长解码器",
+    },
+    {
+        "question": "JWT 认证的流程是怎样的？和 Session 有什么区别？",
+        "claim": "JWT 认证需要服务端保存会话状态才能校验每次请求。",
+        "doc": "JWT 流程：用户登录 → 服务端签发 JWT（Header.Payload.Signature 三段）→ 客户端携带 Authorization: Bearer <token> → 服务端验签通过即信任载荷。无状态：服务端不存会话。",
+        "doc_title": "22-JWT认证机制详解_2026-08-02",
+        "note": "文档明言 JWT 无状态服务端不存会话；claim 反转为需保存会话状态",
+    },
+    {
+        "question": "分布式场景下 Session 共享怎么解决？",
+        "claim": "Session 存 Redis 后，多实例仍然无法共享同一份 Session 数据。",
+        "doc": "分布式 Session 共享方案：1）Session 存 Redis（最常用，spring-session-data-redis），多实例读取同一份数据；2）粘性会话；3）客户端存储；4）Session 同步广播。",
+        "doc_title": "23-分布式Session共享方案_2026-08-03",
+        "note": "文档明言多实例读取同一份数据；claim 反转为无法共享",
+    },
+    {
+        "question": "服务熔断和降级的原理是什么？",
+        "claim": "熔断器打开后所有请求仍会继续打到下游服务。",
+        "doc": "熔断（Circuit Breaker）：统计调用失败率，超过阈值（如 50%）熔断器打开，后续请求直接快速失败（Fallback），不再打到下游，给下游恢复时间。",
+        "doc_title": "33-熔断降级与Sentinel原理_2026-08-13",
+        "note": "文档明言熔断后不再打到下游；claim 反转为仍会打到下游",
+    },
+    {
+        "question": "Kafka 消息是怎么分区和路由的？",
+        "claim": "Kafka 未指定分区时，相同 key 的消息会被随机路由到不同分区。",
+        "doc": "Kafka 分区路由：producer 发送消息时——指定 partition 则直接使用；未指定但 key 存在则 key.hashCode() % 分区数（保证相同 key 进同一分区，消息有序）。",
+        "doc_title": "29-Kafka分区与路由机制_2026-08-09",
+        "note": "文档明言相同 key 进同一分区保序；claim 反转为随机路由到不同分区",
+    },
+    {
+        "question": "LoRA (Low-Rank Adaptation)微调的原理是什么？",
+        "claim": "LoRA 微调会更新预训练模型的所有参数。",
+        "doc": "LoRA 是一种在几乎不改动预训练大模型本体参数的前提下，通过给每个目标权重矩阵外挂一对小型低秩矩阵，让模型快速学会下游任务的参数高效微调方法（PEFT）。",
+        "doc_title": "5-LoRA低秩适配微调_2026-07-15",
+        "note": "文档明言几乎不改动本体参数；claim 反转为更新所有参数",
+    },
+    {
+        "question": "CMS垃圾收集器的原理和缺陷是什么？",
+        "claim": "CMS 垃圾收集器在标记阶段会长时间停止所有用户线程。",
+        "doc": "CMS（Concurrent Mark Sweep）以最短回收停顿为目标，四个阶段：初始标记（STW）、并发标记、重新标记（STW）、并发清除。全程与用户线程并发执行，停顿低。",
+        "doc_title": "3-CMS垃圾收集器原理与缺陷分析_2026-07-13",
+        "note": "文档明言并发标记与用户线程并发、停顿低；claim 反转为长时间停止所有用户线程",
+    },
+    {
+        "question": "AQS (AbstractQueuedSynchronizer) 的工作原理是什么？",
+        "claim": "ReentrantLock 底层与 AQS 无关，基于 synchronized 实现。",
+        "doc": "AQS（AbstractQueuedSynchronizer）是 Doug Lea 写的一套用来构建锁和同步器的基础框架：Java 里用到的几乎所有锁（ReentrantLock、Semaphore、CountDownLatch、ReentrantReadWriteLock、CyclicBarrier），底层都是基于 AQS 实现的。",
+        "doc_title": "15-AQS抽象队列同步器与ReentrantLock实现原理_2026-07-26",
+        "note": "文档明言 ReentrantLock 基于 AQS；claim 反转为与 AQS 无关基于 synchronized",
+    },
+    {
+        "question": "什么是G1垃圾收集器？它的核心创新是什么？",
+        "claim": "G1 的每个 Region 只能固定扮演 Eden 一种角色。",
+        "doc": "G1（Garbage First）垃圾收集器是 JDK 9 之后的默认垃圾收集器。核心设计是把堆划分为大小相等的 Region 区域，每个 Region 可独立扮演 Eden、Survivor 或 Old 角色，实现增量回收。",
+        "doc_title": "1-G1垃圾收集器的Region分区机制与MixedGC全流程_2026-07-11",
+        "note": "文档明言 Region 可独立扮演 Eden/Survivor/Old 角色；claim 反转为只能扮演 Eden",
+    },
+    {
+        "question": "ZGC的特点和适用场景是什么？",
+        "claim": "ZGC 使用写屏障在对象写入时修正指针，不使用读屏障。",
+        "doc": "ZGC 是追求超低停顿的垃圾收集器，目标停顿时间不随堆大小增长（10ms 级别）。核心机制：着色指针（Colored Pointers）把 GC 状态编码进指针高位，读屏障（Load Barrier）在对象访问时修正指针。",
+        "doc_title": "2-ZGC超低停顿垃圾收集器原理_2026-07-12",
+        "note": "文档明言使用读屏障；claim 反转为使用写屏障不使用读屏障",
+    },
+    {
+        "question": "ThreadPoolExecutor的核心参数和工作流程是什么？",
+        "claim": "线程池核心线程满后新任务会立即被拒绝。",
+        "doc": "ThreadPoolExecutor 工作流程：任务提交 → 核心线程未满直接执行 → 队列未满入队 → 扩容到最大线程数 → 队列满且超最大线程执行拒绝策略。",
+        "doc_title": "6-Java线程池ThreadPoolExecutor核心参数与工作原理_2026-07-16",
+        "note": "文档明言核心线程满后先入队再扩容；claim 反转为立即拒绝",
+    },
+    {
+        "question": "MySQL 的事务隔离级别有哪些？各自解决什么问题？",
+        "claim": "MySQL InnoDB 默认隔离级别无法解决幻读问题。",
+        "doc": "MySQL 四种隔离级别：读未提交（脏读）、读已提交（不可重复读）、可重复读（默认，幻读）、串行化（全隔离但性能差）。InnoDB 可重复读下通过 MVCC 快照读解决不可重复读，通过间隙锁/临键锁解决幻读。",
+        "doc_title": "9-MySQL事务与隔离级别_2026-07-19",
+        "note": "文档明言可重复读下通过间隙锁/临键锁解决幻读；claim 反转为无法解决",
+    },
+]
+
+NEW_INTERNAL_MULTI_SENTENCE: list[dict] = [
+    {
+        "question": "什么是G1垃圾收集器？它的核心创新是什么？",
+        "claim": "G1 垃圾收集器是 JDK 9 之后的默认垃圾收集器。从 JDK 10 开始 G1 已经被完全移除了。",
+        "doc": "G1（Garbage First）垃圾收集器是 JDK 9 之后的默认垃圾收集器。核心设计是把堆划分为大小相等的 Region 区域，每个 Region 可独立扮演 Eden、Survivor 或 Old 角色，实现增量回收。",
+        "doc_title": "1-G1垃圾收集器的Region分区机制与MixedGC全流程_2026-07-11",
+        "note": "多句混合前真后假：前句为文档真断言，后句反断言（已被移除），句号分隔供句级拆解",
+    },
+    {
+        "question": "Kafka的ISR机制是如何保证消息可靠性的？",
+        "claim": "配置 acks=all 并配合 min.insync.replicas 可以保证消息不丢失。生产环境中 Leader 宕机时消息依然会丢失。",
+        "doc": "生产端可靠性配置：acks=all 要求 ISR 所有副本写入，配合 min.insync.replicas=2 与 retries 重试参数，实现不丢消息。",
+        "doc_title": "5-Kafka消息可靠性与高吞吐设计_2026-07-15 > 板块2 > 生产端配置",
+        "note": "多句混合前真后假：前句真断言（acks=all 不丢），后句反断言（Leader 宕机仍丢）",
+    },
+    {
+        "question": "volatile关键字的作用和实现原理是什么？",
+        "claim": "volatile 可以保证变量的可见性和有序性。volatile 同时也能保证 i++ 复合操作的原子性。",
+        "doc": "volatile 是 Java 提供的轻量级同步机制，两大作用：1）可见性——写 volatile 变量会插入 StoreStore/StoreLoad 内存屏障，强制刷新到主内存；2）有序性——禁止指令重排序。volatile 不保证原子性，复合操作（如 i++）仍需 synchronized 或原子类。",
+        "doc_title": "16-volatile与Java内存模型JMM_2026-07-27",
+        "note": "多句混合前真后假：前句真断言（可见性/有序性），后句反断言（保证原子性）",
+    },
+    {
+        "question": "ThreadPoolExecutor的核心参数和工作流程是什么？",
+        "claim": "ThreadPoolExecutor 默认的拒绝策略是 AbortPolicy。线程池满了之后新任务会被静默丢弃而不抛异常。",
+        "doc": "四种拒绝策略：AbortPolicy 直接抛 RejectedExecutionException（默认）；CallerRunsPolicy 由提交线程自己执行（降速背压）；DiscardPolicy 静默丢弃；DiscardOldestPolicy 丢弃最旧任务。",
+        "doc_title": "6-Java线程池ThreadPoolExecutor核心参数与工作原理_2026-07-16 > 板块2 > 拒绝策略",
+        "note": "多句混合前真后假：前句真断言（默认 AbortPolicy），后句反断言（静默丢弃不抛异常）",
+    },
+    {
+        "question": "Redis哨兵模式是怎么实现高可用的？",
+        "claim": "Redis 哨兵集群需要至少 3 个实例来防止脑裂。只部署 2 个哨兵实例也足以防止脑裂。",
+        "doc": "哨兵（Sentinel）实现高可用：主节点客观下线（多数哨兵同意）后触发故障转移。哨兵集群自身至少 3 个（奇数）防脑裂，客户端通过哨兵获取最新主节点地址。",
+        "doc_title": "14-Redis高可用架构：主从+哨兵_2026-07-25",
+        "note": "多句混合前真后假：前句真断言（至少 3 个防脑裂），后句反断言（2 个足以）",
+    },
+    {
+        "question": "HashMap的底层实现原理是什么？",
+        "claim": "HashMap 链表长度超过 8 且数组容量大于等于 64 时会树化为红黑树。只要链表长度超过 8 就会立即树化，与数组容量无关。",
+        "doc": "HashMap 底层是数组 + 链表 + 红黑树：key 经 hashCode 扰动后定位数组槽位，冲突时链式挂载；链表长度超 8 且数组容量 ≥64 时树化为红黑树（查找 O(log n)）。",
+        "doc_title": "12-HashMap与ConcurrentHashMap底层原理_2026-07-23",
+        "note": "多句混合前真后假：前句真断言（含容量条件），后句反断言（只论链表长度）",
+    },
+    {
+        "question": "ThreadLocal 的实现原理是什么？为什么会内存泄漏？",
+        "claim": "ThreadLocalMap 的 Entry key 是弱引用。value 也是弱引用，因此不会导致内存泄漏。",
+        "doc": "内存泄漏根因：Entry 的 value 是强引用，key 是弱引用——ThreadLocal 被回收后 key 变 null，但 value 仍被线程的 map 持有（线程池线程长期存活则永不释放）。解决：用完 remove()。",
+        "doc_title": "43-ThreadLocal原理与内存泄漏_2026-08-23",
+        "note": "多句混合前真后假：前句真断言（key 弱引用），后句反断言（value 弱引用不会泄漏）",
+    },
+    {
+        "question": "令牌桶和漏桶限流算法有什么区别？",
+        "claim": "令牌桶算法以固定速率生成令牌存入桶中。漏桶算法允许请求以任意突发速率通过。",
+        "doc": "漏桶：请求先进桶排队，桶按固定速率出水——输出速率恒定，天然削峰，但无法应对突发流量（恒定速率限制）。令牌桶：以固定速率生成令牌存桶（桶容量 = 最大突发），允许一定突发。",
+        "doc_title": "34-限流算法：令牌桶与漏桶_2026-08-14",
+        "note": "多句混合：前句真断言（令牌桶固定速率生成令牌），后句反断言（漏桶允许任意突发——文档明言漏桶无法应对突发）",
+    },
+]
+
+NEW_ENTAILMENT_POSITIVES: list[dict] = [
+    {
+        "question": "什么是G1垃圾收集器？它的核心创新是什么？",
+        "claim": "G1 垃圾收集器是 JDK 9 之后的默认垃圾收集器。它的核心设计是把堆划分为大小相等的 Region 区域。",
+        "doc": "G1（Garbage First）垃圾收集器是 JDK 9 之后的默认垃圾收集器。核心设计是把堆划分为大小相等的 Region 区域，每个 Region 可独立扮演 Eden、Survivor 或 Old 角色，实现增量回收。",
+        "doc_title": "1-G1垃圾收集器的Region分区机制与MixedGC全流程_2026-07-11",
+        "note": "多句正例：两个子句均被文档支持，验证聚合不误杀",
+    },
+    {
+        "question": "Kafka的ISR机制是如何保证消息可靠性的？",
+        "claim": "Kafka 生产端配置 acks=all 可以保证消息不丢失。它要求 ISR 中所有副本都写入成功。",
+        "doc": "生产端可靠性配置：acks=all 要求 ISR 所有副本写入，配合 min.insync.replicas=2 与 retries 重试参数，实现不丢消息。",
+        "doc_title": "5-Kafka消息可靠性与高吞吐设计_2026-07-15 > 板块2 > 生产端配置",
+        "note": "多句正例：两个子句均被文档支持",
+    },
+    {
+        "question": "volatile关键字的作用和实现原理是什么？",
+        "claim": "volatile 可以保证可见性和有序性。它不保证原子性，复合操作仍需同步机制。",
+        "doc": "volatile 是 Java 提供的轻量级同步机制，两大作用：1）可见性；2）有序性。volatile 不保证原子性，复合操作（如 i++）仍需 synchronized 或原子类。",
+        "doc_title": "16-volatile与Java内存模型JMM_2026-07-27",
+        "note": "多句正例：两个子句均被文档支持",
+    },
+    {
+        "question": "Redis的持久化方式RDB和AOF有什么区别？如何选择？",
+        "claim": "AOF 默认每秒 fsync，最多丢 1 秒数据。AOF 文件会不断增大，需要定期重写压缩。",
+        "doc": "AOF 追加写命令日志，默认 everysec 每秒 fsync，最多丢 1 秒数据，文件会不断增大需 AOF 重写压缩。",
+        "doc_title": "10-Redis持久化机制_2026-07-20",
+        "note": "多句正例：两个子句均被文档支持",
+    },
+    {
+        "question": "HashMap的底层实现原理是什么？",
+        "claim": "HashMap 底层是数组加链表加红黑树。链表长度超 8 且容量大于等于 64 时树化。",
+        "doc": "HashMap 底层是数组 + 链表 + 红黑树：key 经 hashCode 扰动后定位数组槽位，冲突时链式挂载；链表长度超 8 且数组容量 ≥64 时树化为红黑树（查找 O(log n)）。",
+        "doc_title": "12-HashMap与ConcurrentHashMap底层原理_2026-07-23",
+        "note": "多句正例：两个子句均被文档支持",
+    },
+    {
+        "question": "双亲委派模型是什么？为什么要这么设计？",
+        "claim": "类加载请求先交给父加载器处理。父加载器加载不了才由子加载器加载。",
+        "doc": "双亲委派：类加载请求先交给父加载器（应用加载器 → 扩展加载器 → 引导加载器），父加载不了才由子加载。",
+        "doc_title": "37-JVM类加载机制与双亲委派_2026-08-17",
+        "note": "多句正例：两个子句均被文档支持",
+    },
+]
+
+NEW_NEUTRALS: list[dict] = [
+    {
+        "question": "什么是G1垃圾收集器？它的核心创新是什么？",
+        "claim": "Spring 事务默认传播行为是 REQUIRED。Netty 的 Boss 线程负责 accept 新连接。",
+        "doc": "G1（Garbage First）垃圾收集器是 JDK 9 之后的默认垃圾收集器。核心设计是把堆划分为大小相等的 Region 区域，每个 Region 可独立扮演 Eden、Survivor 或 Old 角色，实现增量回收。",
+        "doc_title": "1-G1垃圾收集器的Region分区机制与MixedGC全流程_2026-07-11",
+        "note": "多句无关对照：两个子句主题（Spring/Netty）均与文档（G1）无关",
+    },
+    {
+        "question": "MySQL 的事务隔离级别有哪些？各自解决什么问题？",
+        "claim": "Docker 镜像分层通过 OverlayFS 堆叠。TLS 1.3 将握手精简为 1 次往返。",
+        "doc": "MySQL 四种隔离级别：读未提交（脏读）、读已提交（不可重复读）、可重复读（默认，幻读）、串行化。InnoDB 可重复读下通过 MVCC 快照读解决不可重复读，通过间隙锁解决幻读。",
+        "doc_title": "9-MySQL事务与隔离级别_2026-07-19",
+        "note": "多句无关对照：两个子句主题（Docker/TLS）均与文档（MySQL）无关",
+    },
+]
+
 # 构造样本（part="constructed"），verdict 为人工三分类标注
+# 顺序纪律：首版 56 条在前（module-054 同集，供 constructed[:56] 同口径复测对比），
+# module-057 扩充 30 条追加在后
 CONSTRUCTED_SAMPLES: list[dict] = []
 for item in CONTRADICTIONS_CLAIM_VS_DOC:
     item = dict(item)
@@ -466,6 +703,26 @@ for item in ENTAILMENT_POSITIVES:
                  "part": "constructed"})
     CONSTRUCTED_SAMPLES.append(item)
 for item in NEUTRALS:
+    item = dict(item)
+    item.update({"verdict": "neutral", "contradiction_type": "neutral",
+                 "part": "constructed"})
+    CONSTRUCTED_SAMPLES.append(item)
+for item in NEW_CLAIM_VS_DOC:
+    item = dict(item)
+    item.update({"verdict": "contradiction", "contradiction_type": "claim_vs_doc",
+                 "part": "constructed"})
+    CONSTRUCTED_SAMPLES.append(item)
+for item in NEW_INTERNAL_MULTI_SENTENCE:
+    item = dict(item)
+    item.update({"verdict": "contradiction", "contradiction_type": "internal_contradiction",
+                 "part": "constructed"})
+    CONSTRUCTED_SAMPLES.append(item)
+for item in NEW_ENTAILMENT_POSITIVES:
+    item = dict(item)
+    item.update({"verdict": "entailment", "contradiction_type": "positive",
+                 "part": "constructed"})
+    CONSTRUCTED_SAMPLES.append(item)
+for item in NEW_NEUTRALS:
     item = dict(item)
     item.update({"verdict": "neutral", "contradiction_type": "neutral",
                  "part": "constructed"})
@@ -507,28 +764,38 @@ GUIDE_MD = """# 矛盾样本标注指南（module-054 / ADR-0010 P1-③ 复测�
 
 ## 2. 两类矛盾（contradiction 细分）
 
-### ① claim_vs_doc（断言与文档矛盾，16 条）
+### ① claim_vs_doc（断言与文档矛盾，30 条）
 doc 支持 X，claim 声称 not-X。构造方法：取知识库真实文档中的明确陈述 X，
 把 X 反转成 not-X 作 claim（注意反转要语义精确，不能模糊成"不完全一样"）。
 
 例：doc="G1 是 JDK 9 之后的默认垃圾收集器" → claim="G1 是 JDK 8 及之前的
 默认垃圾收集器，JDK 9 之后已被 CMS 取代"。
 
-### ② internal_contradiction（claim 内部自相矛盾，15 条）
-claim 单句内同时出现 X 与 not-X（或互相排斥的两种状态）。构造方法：把
-"X（真）" 与 "not-X（构造）" 拼进同一句断言，让句子在逻辑上不可能为真。
+### ② internal_contradiction（claim 内部自相矛盾，23 条）
+
+**单句混合（15 条，module-054 首版）**：claim 单句内同时出现 X 与 not-X
+（或互相排斥的两种状态）。构造方法：把"X（真）"与"not-X（构造）"拼进
+同一句断言，让句子在逻辑上不可能为真。
 
 例："G1 是 JDK 9 之后的默认垃圾收集器，但它自 JDK 9 起就不再被使用"。
 
+**多句混合"前真后假"（8 条，module-057 扩充）**：以句号（。！？；）分隔的
+多句 claim，前句为文档真断言（X），后句为反断言（not-X）。此类样本是句级
+拆解的目标场景：整句看混合断言 mDeBERTa 倾向判 neutral，拆成子句后后句
+单独与文档矛盾应判 contradiction。
+
+例："G1 是 JDK 9 之后的默认垃圾收集器。从 JDK 10 开始 G1 已经被完全移除了。"
+
 ## 3. 正例对照（一致样本）
 
-entailment 16 条（≈ 矛盾数 31 的 1/2）：claim 为 doc 原文陈述（逐字或近义），
-验证模型"矛盾扫描"不会把支持样本误判为矛盾（防误杀）。
+entailment 22 条（module-054 首版 16 + module-057 扩充 6 条多句正例）：
+claim 为 doc 原文陈述（逐字或近义）；扩充的多句正例两个子句均被文档支持，
+验证"无矛盾有 entailment → entailment"聚合不会误杀一致样本。
 
-neutral 9 条：claim 与 doc 主题无关或信息不足（含 AOF fsync 改标样本——
-两半句主语为不同配置 no-fsync vs everysec，非同一主语 X/not-X，按规则 3
-判 neutral），验证模型不会把无关/不冲突当矛盾（防"一切不符即矛盾"的过激
-倾向）。
+neutral 11 条（module-054 首版 9 + module-057 扩充 2 条多句无关对照）：
+claim 与 doc 主题无关或信息不足（含 AOF fsync 改标样本——两半句主语为
+不同配置 no-fsync vs everysec，非同一主语 X/not-X，按规则 3 判 neutral），
+验证模型不会把无关/不冲突当矛盾（防"一切不符即矛盾"的过激倾向）。
 
 ## 4. 构造方法
 
@@ -578,7 +845,8 @@ def main() -> None:
     # 落盘 JSON（含头部元信息）
     payload = {
         "meta": {
-            "description": "矛盾样本集（module-054 / ADR-0010 P1-③ 复测）",
+            "description": "矛盾样本集（module-054 首版 56 条 + module-057 扩充 30 条，"
+                           "ADR-0010 P1-③ 复测 v2：句级拆解 + 阈值校准）",
             "created_by": "eval/build_contradiction_dataset.py",
             "created_at": "2026-08-12",
             "total": len(CONSTRUCTED_SAMPLES),

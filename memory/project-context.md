@@ -4,7 +4,7 @@
 - 项目名称: personal-interview-website
 - 项目简介: 融合简历展示与 Agentic RAG 知识库问答的个人网站系统（双语言微服务架构：Java Spring Boot + Python FastAPI + React 前端）
 - 创建时间: 2026-07-29
-- 最后更新: 2026-08-12（module-056 完成 + Review 修复）
+- 最后更新: 2026-08-12（module-057 完成）
 
 ## 2. 技术栈
 > 详见 `tech-stack.md`，此处仅保留摘要。
@@ -72,18 +72,19 @@
 | module-054 | 检索降级修复（reranker 三级 dirname 路径修复 + RRF 向量化降级方案 A/B）+ mDeBERTa 矛盾复测（矛盾样本 32+对照 24 + 真实答案句子 + DB 检索片段 → kappa 0.4991 < 0.7 未达放行门槛 → 降级双轨，结论入 ADR-0010） | 0.54.0-module-054 | 2026-08-12 | ✅ 完成（全量 667/0；重排真实加载冒烟 PASS；vector_only 保持抛错语义声明） |
 | module-055 | 提示词评估优化（ADR-0011 第一步：eval/prompt_variants.py 变体对比表 + check_sufficiency prompt 可注入参数）+ E2E 3 问题修复（intent 漏检：L2 无条件触发 + 停用词 43 词数据驱动扩充 + 规则表短路 / HHEM 超时：交叉对数上限 8×2 + 截断 500 + 预算 20s + 启动预热 / RRF abs_cosine：L3 只对实测低分标记）+ rrf 切默认（hybrid 保留回退开关） | 0.55.0-module-055 | 2026-08-12 | ✅ 完成（全量 688/0；真实 E2E chat+stream 默认 rrf 验证 3 问题场景全修复；golden intent 实测 0.98——2 条 realtime→knowledge 系 LLM 自判非 L2 所致） |
 | module-056 | L4 意图分类器上岗（ADR-0003 L4 达标启用）：人造标注集 337 条（knowledge 132/casual 105/realtime 100，边界易混 32 含 E2E bug 类 G1 query + 专有术语 40 + 口语化 24，与评测集字符串零重叠防泄漏）+ golden.json 112 题重训（test split Accuracy 1.0000 vs 旧 0.89）+ golden_intent 100 条真实对比 LLM vs 分类器**双 1.0000**（eval_runs id=23/24，knowledge Recall 双 1.0，casual/realtime 30+20 零重叠纯泛化全对）→ **PW_INTENT_CLASSIFIER_ENABLED 默认开**（加载/推理失败回退 LLM，保留开关） | 0.56.0-module-056 | 2026-08-12 | ✅ 完成（全量 699/0 + 新增 11；真实 HTTP 冒烟：分类器路径 G1 E2E bug query 0.92 正确路由 + casual 直判 + 模型改名回退 LLM 路径 200；训练/评测分离：load_golden_intent_samples 移出训练管线；**Review 修复**：--compare-classifier LLM 侧钉住 L4 防自污染（eval_runs 快照含 intent_classifier_enabled 运行时字段）+ 文档口径同步（router/intent_classifier/train 脚本 docstring、changelog 重叠量化 1/50 全等/23/50 余弦>0.95）；修复后全量 700/0） |
+| module-057 | 数据验证批（5 个硬数字）：**① 矛盾复测 v2**（句级拆解 + 阈值校准 + 样本扩至 86 条/contradiction 53，eval_runs id=26 'nli_retest_v2'）：全量 110 对 kappa **0.4311**（t=0.80）、同口径旧 80 对 **0.3754 < 基线 0.5167（-0.1413）**——改进未达门槛且低于基线，最严聚合误杀 9 条 + 真实检索子集崩至 0.0957，降级双轨维持，结论入 ADR-0010（下一轮方向：中文专用/更大 NLI、微调、保守矛盾门控）；**② 图谱消融**（eval_runs id=27 graph_only Hit@5 0.7333 / id=28 hybrid rrf 0.9905，--ablate 同跑 0.7429→0.9810 delta **+0.2381**，rrf 三通道口径）——图谱单通道能力与融合增量分列；**③ 改写真实增益**（id=29，rrf 口径 n=104）：Hit@5 **+0.0096** / Recall@5 +0.0048 / MRR **-0.0353**（improved 3/worsened 10）——基线近饱和改写无净收益；**④ RRF k 扫描**（id=30 benchmark_rrf_k.py 新建）：k=20-100 全平坦 Hit@5 **0.9810**，两通道 0.9714，**图谱净增益 +0.0096**——k 不敏感 k=60 保持不改默认；**⑤ 飞轮冒烟**（flywheel_smoke.py 新建：真实 chat + POST /ai/feedback + 落库验证 + 防重复如实记录——后端无幂等防重在前端已评态；6 行 feedback 保留为飞轮种子 identity=203.0.113.66/message_id 990001-990005 构造标识） | 0.57.0-module-057 | 2026-08-13 | ✅ 完成（全量 740/0 = 700 基线 + 40 新增；详见 specs/module-057-data-validation-batch/changelog.md） |
 
 ## 4. 架构决策记录（ADR）索引
 | ADR 编号 | 决策标题 | 状态 | 日期 |
 |----------|----------|------|------|
 | adr-003 | Intent 正确性校验四层方案（L1 评测/L2 确定性信号确认/L3 后置反证/L4 bge-m3+逻辑回归分类器） | ✅ 已实施（L1-L3 module-043/047/055；**L4 已启用 module-056：人造 337 条重训 Accuracy 1.0 + golden_intent 真实对比 LLM vs 分类器双 1.0000 → PW_INTENT_CLASSIFIER_ENABLED 默认开，失败回退 LLM**） | 2026-08-08（2026-08-12 更新） |
 | adr-009 | Query 改写优化方案（分诊式改写 + 保真校验 + 评测闭环） | ✅ 已实施（module-049：静态 FTS 分诊 + 保真预检 + 并行检索择优 + golden_query_rewrite 评测闭环） | 2026-08-10 |
-| adr-010 | 幻觉检测升级方案（HHEM 专职裁判 + 逐句报分 + 矛盾扫描） | ✅ P0-② 已实施（module-051：裁判切换完成，kappa 0.3252 未达门槛如实标注）；P1-③ 前置决策完成（module-052：mDeBERTa-v3 替换方向推荐——kappa 0.4711 vs HHEM 0.1351 同批 100 对，三态映射/复测/阈值校准计划见 ADR 选型结论节）；P1-③ 复测完成（module-054：kappa 三分类 0.4991 < 0.7 未达放行门槛 → **降级双轨（NLI 只做矛盾扫描，不替换 HHEM 主裁判）**，eval_runs id=21；internal_contradiction 判别是核心短板） | 2026-08-11（2026-08-12 更新） |
+| adr-010 | 幻觉检测升级方案（HHEM 专职裁判 + 逐句报分 + 矛盾扫描） | ✅ P0-② 已实施（module-051：裁判切换完成，kappa 0.3252 未达门槛如实标注）；P1-③ 前置决策完成（module-052：mDeBERTa-v3 替换方向推荐——kappa 0.4711 vs HHEM 0.1351 同批 100 对，三态映射/复测/阈值校准计划见 ADR 选型结论节）；P1-③ 复测完成（module-054：kappa 三分类 0.4991 < 0.7 未达放行门槛 → **降级双轨（NLI 只做矛盾扫描，不替换 HHEM 主裁判）**，eval_runs id=21；internal_contradiction 判别是核心短板）；P1-③ 复测 v2 完成（module-057：句级拆解 + 阈值校准后 kappa 0.4311 全量/0.3754 同口径旧 80 对 < 0.7 且低于基线 0.5167（-0.1413）——**改进不成立，降级双轨维持**，eval_runs id=26；下一轮方向：中文专用/更大 NLI、针对性微调、两阶段拆句+保守矛盾门控） | 2026-08-11（2026-08-12 更新） |
 | adr-011 | 提示词评估优化（四维评估 + 业界工具扫描 + 四代算法三步落地：变体测试→OPRO→DSPy） | ✅ 第一步已实施（module-055：eval/prompt_variants.py 变体对比表 + check_sufficiency prompt 可注入参数，只度量不替换）；第二/三步（OPRO/DSPy）按数据决定 | 2026-08-12 |
 
 ## 5. 当前迭代状态
-- 当前迭代版本: v0.53.0（module-052/053 已完成，见模块清单行）
-- 正在进行的模块: 无（v0.51 批次全部收尾）
+- 当前迭代版本: v0.57.0（module-057 数据验证批已完成，见模块清单行）
+- 正在进行的模块: 无（v0.56/057 批次全部收尾）
 - 下一个待开发模块: 待定（按 roadmap-next-phase.md）
 
 ## 7. 关键技术决策记录

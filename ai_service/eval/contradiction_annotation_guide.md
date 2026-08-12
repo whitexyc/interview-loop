@@ -29,28 +29,38 @@
 
 ## 2. 两类矛盾（contradiction 细分）
 
-### ① claim_vs_doc（断言与文档矛盾，16 条）
+### ① claim_vs_doc（断言与文档矛盾，30 条）
 doc 支持 X，claim 声称 not-X。构造方法：取知识库真实文档中的明确陈述 X，
 把 X 反转成 not-X 作 claim（注意反转要语义精确，不能模糊成"不完全一样"）。
 
 例：doc="G1 是 JDK 9 之后的默认垃圾收集器" → claim="G1 是 JDK 8 及之前的
 默认垃圾收集器，JDK 9 之后已被 CMS 取代"。
 
-### ② internal_contradiction（claim 内部自相矛盾，15 条）
-claim 单句内同时出现 X 与 not-X（或互相排斥的两种状态）。构造方法：把
-"X（真）" 与 "not-X（构造）" 拼进同一句断言，让句子在逻辑上不可能为真。
+### ② internal_contradiction（claim 内部自相矛盾，23 条）
+
+**单句混合（15 条，module-054 首版）**：claim 单句内同时出现 X 与 not-X
+（或互相排斥的两种状态）。构造方法：把"X（真）"与"not-X（构造）"拼进
+同一句断言，让句子在逻辑上不可能为真。
 
 例："G1 是 JDK 9 之后的默认垃圾收集器，但它自 JDK 9 起就不再被使用"。
 
+**多句混合"前真后假"（8 条，module-057 扩充）**：以句号（。！？；）分隔的
+多句 claim，前句为文档真断言（X），后句为反断言（not-X）。此类样本是句级
+拆解的目标场景：整句看混合断言 mDeBERTa 倾向判 neutral，拆成子句后后句
+单独与文档矛盾应判 contradiction。
+
+例："G1 是 JDK 9 之后的默认垃圾收集器。从 JDK 10 开始 G1 已经被完全移除了。"
+
 ## 3. 正例对照（一致样本）
 
-entailment 16 条（≈ 矛盾数 31 的 1/2）：claim 为 doc 原文陈述（逐字或近义），
-验证模型"矛盾扫描"不会把支持样本误判为矛盾（防误杀）。
+entailment 22 条（module-054 首版 16 + module-057 扩充 6 条多句正例）：
+claim 为 doc 原文陈述（逐字或近义）；扩充的多句正例两个子句均被文档支持，
+验证"无矛盾有 entailment → entailment"聚合不会误杀一致样本。
 
-neutral 9 条：claim 与 doc 主题无关或信息不足（含 AOF fsync 改标样本——
-两半句主语为不同配置 no-fsync vs everysec，非同一主语 X/not-X，按规则 3
-判 neutral），验证模型不会把无关/不冲突当矛盾（防"一切不符即矛盾"的过激
-倾向）。
+neutral 11 条（module-054 首版 9 + module-057 扩充 2 条多句无关对照）：
+claim 与 doc 主题无关或信息不足（含 AOF fsync 改标样本——两半句主语为
+不同配置 no-fsync vs everysec，非同一主语 X/not-X，按规则 3 判 neutral），
+验证模型不会把无关/不冲突当矛盾（防"一切不符即矛盾"的过激倾向）。
 
 ## 4. 构造方法
 
