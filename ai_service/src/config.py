@@ -108,8 +108,11 @@ class Settings(BaseSettings):
     memory_promote_window_days: int = 7         # 升级窗口（天）：最近提及在窗口内才升级
 
     # 意图分类（module-043 L4）：true 时 router 尝试加载 bge-m3+逻辑回归分类器
-    #（模型缺失/加载失败自动回退 LLM 分类，零影响）；默认 false = 保持 LLM
-    intent_classifier_enabled: bool = False
+    #（模型缺失/加载失败自动回退 LLM 分类，零影响）。
+    # module-056 达标启用：人造标注集 337 条重训 + golden_intent 100 条真实
+    # 评测（LLM 1.0000 / 分类器 1.0000，eval_runs id=23/24）→ 默认开；
+    # 回退开关：PW_INTENT_CLASSIFIER_ENABLED=false 保持 LLM 路径
+    intent_classifier_enabled: bool = True
 
     # 反思充分性自洽性检查（module-044 层 2）：true 时 check_sufficiency 对
     # 同一 query 用两个不同温度各判一次，两次不一致 → 保守判充分（防漏检）；

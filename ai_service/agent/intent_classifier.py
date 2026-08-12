@@ -11,12 +11,15 @@ L4 意图分类器 — bge-m3 冻结特征 + 逻辑回归头（ADR-0003）
      CPU 毫秒级推理，比 LLM API 调用便宜几个数量级
   2. 输出经训练校准的**真概率**（sigmoid/softmax），从根上解决
      LLM 自报 confidence 不可信的问题（ADR-0003 修订版依据之一）
-  3. 可解释：权重可分析；golden 集即训练集
+  3. 可解释：权重可分析（训练源口径见下方数据约束）
 
 数据约束（已知边界）：
-  - 真实飞轮数据（前端 👍/👎）未积累，先以 golden 评测集训练
-  - 飞轮接口预留：fit() 接受 (query, label) 样本列表，数据到位后
-    并入样本增量重训即可，无需改推理路径
+  - 训练源（module-056 训练/评测分离口径）：人造标注集
+    eval/intent_train_dataset.json + golden.json knowledge 天然样本；
+    golden_intent 100 条评测集只作评测不进训练（防泄漏）
+  - 真实飞轮数据（前端 👍/👎）未积累，人造集为方向性验证；飞轮接口预留：
+    fit() 接受 (query, label) 样本列表，数据到位后并入样本增量重训即可，
+    无需改推理路径
   - 训练/加载失败一律由调用方（router）回退 LLM 分类，零影响
 
 依赖：sklearn / joblib（惰性导入，仅 fit/load 时用到；主链路不硬依赖）。
@@ -73,8 +76,10 @@ class IntentClassifier:
         """用标注样本训练逻辑回归头（可选落盘）
 
         Args:
-            samples: [(query, intent_label), ...]，来源 golden_intent 评测集 +
-                手工闲聊/实时样本（飞轮 👍/👎 数据回流后并入重训）
+            samples: [(query, intent_label), ...]，来源人造标注集
+                intent_train_dataset.json + golden.json knowledge 天然样本
+                （module-056 训练/评测分离口径：golden_intent 评测集不进
+                训练）；飞轮 👍/👎 数据回流后并入重训
             save: 是否落盘 joblib 模型（--no-save 评估场景可跳过）
 
         Returns:
@@ -85,7 +90,7 @@ class IntentClassifier:
             样本/嵌入失败时抛异常，由调用方（训练脚本）处理
         """
         from sklearn.linear_model import LogisticRegression
-        from sklearn.metrics import accuracy_score, classification_report
+        from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
         from sklearn.model_selection import train_test_split
 
         queries = [q for q, _ in samples]
@@ -108,11 +113,14 @@ class IntentClassifier:
                         len(samples))
 
         pred = model.predict(X_te)
+        # module-056: 补充混淆矩阵（训练脚本对比输出用，additive 兼容旧调用方）
+        cm = confusion_matrix(y_te, pred, labels=list(model.classes_)).tolist()
         return {
             "classes": list(model.classes_),
             "n_samples": len(samples),
             "accuracy": round(float(accuracy_score(y_te, pred)), 4),
             "report": classification_report(y_te, pred, zero_division=0),
+            "confusion_matrix": {"classes": list(model.classes_), "matrix": cm},
         }
 
     async def predict_proba(self, query: str) -> dict[str, float]:

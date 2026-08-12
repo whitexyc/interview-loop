@@ -27,3 +27,17 @@ def disable_rate_limit(monkeypatch):
         "check_rate_limit",
         lambda client_ip, **kwargs: (True, 0),
     )
+
+
+@pytest.fixture(autouse=True)
+def default_intent_classifier_disabled(monkeypatch):
+    """测试环境统一钉住 L4 分类器开关=关闭（module-056）
+
+    生产默认已开启（PW_INTENT_CLASSIFIER_ENABLED 默认 true），但单测需
+    hermetic：不依赖真实模型文件 models/intent_clf.joblib（非仓库产物），
+    存量 LLM 路径用例不受影响。测试体内显式 setattr True 的用例
+    （如 test_intent_dataset.py 的 L4 回退用例）后写覆盖本钉住值。
+    """
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "intent_classifier_enabled", False)
