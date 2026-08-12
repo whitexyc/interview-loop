@@ -735,8 +735,20 @@ class RAGEngine:
                             timeout=15,
                         )
                     except Exception as e:
-                        logger.warning("round 0 三通道融合检索失败，降级为空结果: %s", e)
-                        docs = []
+                        # module-054 方案 B 防御：retrieve() 仍抛 RetrievalException
+                        # （方案 A 未覆盖的异常，如 DB 不可用）时补一次图谱兜底——
+                        # 复用 _retrieve_graph_only（实体提取 + 图查询 + 失败降级
+                        # 为空，与 hybrid 分支图回退同语义）。B 是防御层，方案 A
+                        # 修复后正常路径不会触发（零开销）。
+                        logger.warning("round 0 三通道融合检索失败，引擎补图兜底: %s", e)
+                        try:
+                            docs = await asyncio.wait_for(
+                                hybrid_retriever._retrieve_graph_only(query, top_k),
+                                timeout=15,
+                            )
+                        except Exception as e2:
+                            logger.warning("图兜底失败，降级为空结果: %s", e2)
+                            docs = []
                 else:
                     # 实体提取失败时 graph_extractor 内部降级返回空列表
                     query_entities = await graph_extractor.extract_from_query(query)

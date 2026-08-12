@@ -112,7 +112,10 @@ class HybridRetriever:
         try:
             query_embedding = await self._embedding_service.embed_text(query)
         except Exception as e:
-            raise RetrievalException("查询向量化失败", cause=e)
+            # module-054 方案 A：hybrid/rrf/weighted 向量化失败 → 向量路降级为空
+            # （不抛整体异常）；vector_only 保持抛错（消融语义，见 _dispatch_mode）
+            logger.warning("查询向量化失败，向量路降级为空（hybrid/rrf/weighted）: %s", e)
+            query_embedding = None
 
         fetch_k = top_k * 2  # 扩大召回，取 2 倍候选给 rerank 更大提升空间
         # module-053：fusion 模式仅 round 0 语义启用图谱三通道（见 docstring）
@@ -269,7 +272,8 @@ class HybridRetriever:
 
         Args:
             query: 用户查询
-            query_embedding: 查询向量
+            query_embedding: 查询向量；None 表示查询向量化失败（module-054
+                方案 A 降级），仅 FTS 一路检索（向量路为空，见上方快路径）
             fetch_k: 召回候选数（top_k 的 2 倍）
             top_k: 最终返回数
             session: 外部数据库会话（可选，不传则两路各建独立 session）
@@ -278,10 +282,30 @@ class HybridRetriever:
         Returns:
             融合排序后的检索结果列表（含 fts_score / vector_score / hybrid_score）
         """
+        # module-054 方案 A 快路径：query_embedding=None（查询向量化失败，warning
+        # 已在 retrieve() 打出）→ 向量路降级为空，仅 FTS 一路照常检索——不建向量
+        # session、不调 _vector_search（正常降级路径零额外调用）。
+        if query_embedding is None:
+            if session is not None:
+                try:
+                    fts_results = await self._fts_search(
+                        query, fetch_k, session, source_pattern)
+                except Exception as e:
+                    logger.warning("全文检索失败，降级为空: %s", e)
+                    fts_results = []
+            else:
+                try:
+                    async with async_session_factory() as fts_sess:
+                        fts_results = await self._fts_search(
+                            query, fetch_k, fts_sess, source_pattern)
+                except Exception as e:
+                    logger.warning("独立 session 创建/检索失败，降级为空: %s", e)
+                    fts_results = []
+            vector_results = []
         # Step 2: 并行执行 FTS 和向量检索
         # 用 asyncio.gather 同时查询两个通道，性能提升约 2x。
         # return_exceptions=True：一路失败不影响另一路。
-        if session is not None:
+        elif session is not None:
             # 外部 session：共享连接上串行执行（asyncpg 单连接禁止并发）
             fts_results, vector_results = await self._search_serial(
                 query, query_embedding, fetch_k, session, source_pattern,
@@ -410,7 +434,28 @@ class HybridRetriever:
             融合排序后的检索结果列表（含 fts_score / vector_score /
             graph_score / hybrid_score；rrf 模式另含 rrf_score 原始分）
         """
-        if session is not None:
+        if query_embedding is None:
+            # module-054 方案 A 快路径：向量化失败 → 向量路降级为空，FTS 与图谱
+            # 两路照常融合（warning 已在 retrieve() 打出）；不建向量 session、
+            # 不调 _vector_search（正常降级路径零额外调用）。
+            if session is not None:
+                try:
+                    fts_results = await self._fts_search(
+                        query, fetch_k, session, source_pattern)
+                except Exception as e:
+                    logger.warning("全文检索失败，降级为空: %s", e)
+                    fts_results = []
+            else:
+                try:
+                    async with async_session_factory() as fts_sess:
+                        fts_results = await self._fts_search(
+                            query, fetch_k, fts_sess, source_pattern)
+                except Exception as e:
+                    logger.warning("独立 session 创建/检索失败，降级为空: %s", e)
+                    fts_results = []
+            vector_results = []
+            graph_results = await self._retrieve_graph_only(query, fetch_k)
+        elif session is not None:
             # 外部 session：共享连接上串行执行 FTS/向量（asyncpg 单连接禁并发），
             # 图谱通道自建 session，与之串行
             try:

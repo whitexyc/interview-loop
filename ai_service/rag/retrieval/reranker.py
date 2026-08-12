@@ -31,8 +31,12 @@ from sentence_transformers import CrossEncoder
 logger = logging.getLogger(__name__)
 
 # 本地模型路径（必须完整：含 model.safetensors / pytorch_model.bin）
+# module-050 目录细分后本文件位于 rag/retrieval/ 下，需三级 dirname 才回到
+# ai_service/ 根（对齐 embeddings.py:27-32 同款修法）；二级 dirname 会落在
+# rag/ 下解析出 rag/models/... 导致模型缺失——module-053 曾致向量通道全断，
+# 本模块（module-054）修复重排通道同款回归。
 _LOCAL_MODEL_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)),
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     "models", "bge-reranker-v2-m3",
 )
 # 权重文件名候选（safetensors 优先，兼容 pytorch bin）
