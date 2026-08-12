@@ -20,6 +20,7 @@ RAG 知识库引擎 — 核心编排层
 import asyncio
 import hashlib
 import logging
+import re
 
 from sqlalchemy import select
 
@@ -29,18 +30,19 @@ from llm.client import LLMFactory
 from src.cache import cache
 from rag.schemas import SearchRequest, SearchResponse, ChatRequest, ChatResponse, ChatSteps
 from rag.models import Document
-from rag.embeddings import embedding_service
-from rag.text_tokenizer import tokenize
-from rag.retriever import hybrid_retriever
-from rag.reranker import reranker
-from rag.chunker import chunker
+from rag.retrieval.embeddings import embedding_service
+from rag.retrieval.text_tokenizer import tokenize
+from rag.retrieval.retriever import hybrid_retriever
+from rag.retrieval.reranker import reranker
+from rag.retrieval.chunker import chunker
 from agent.router import router_agent
 from agent.reflector import reflector
-from rag.graph_store import graph_store
-from rag.graph_extractor import graph_extractor
-from rag.memory import memory_service, format_memory_line
-from rag.memory_extractor import extract_facts
-from rag.session_memory import session_memory_service
+from rag.graph.graph_store import graph_store
+from rag.graph.graph_extractor import graph_extractor
+from rag.memory.memory import memory_service, format_memory_line
+from rag.memory.memory_extractor import extract_facts
+from rag.memory.session_memory import session_memory_service
+from rag.retrieval import query_rewrite
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +84,15 @@ _RETRIEVE_BUDGET_SECONDS = 30.0  # 整链路检索总预算（秒），超预算
 _MIN_DOCS_SKIP_REFLECT = 3       # round 0 已收集文档数达到该值，跳过反思与后续轮次
 _HYDE_CACHE_TTL = 300            # HyDE 缓存 TTL（秒），与检索结果缓存一致
 
+# ── L3 后置校验（module-043 / ADR-0003）配置 ──
+_L3_ABS_COSINE_THRESHOLD = 0.3   # 精排 top-1 绝对余弦低于该值 → 疑似误判标记
+                                 #（复用 module-037 的 abs_cosine 字段口径）
+
+# ── 记忆进化（module-046 / ADR-0007 问题 2 ③）：用户明确"记住" → 强制沉淀长期层 ──
+# 正则匹配"记住""记住这个""记住一下"前缀 + 内容（plan 3.2；用 (?:这个|一下)?
+# 分组替代规格中的字符类写法，语义一致且避免吞掉内容首字）
+_REMEMBER_RE = re.compile(r"记住(?:这个|一下)?\s*(.+?)\s*$")
+
 
 def _hyde_cache_key(query: str) -> str:
     """生成 HyDE 缓存键：仅由 query 决定，与检索结果缓存 key 独立
@@ -110,6 +121,42 @@ class RAGEngine:
     注意：本类不持有状态，所有请求都是独立的（无状态设计），
     方便横向扩展和测试。
     """
+
+    @staticmethod
+    def _check_suspected_misclassify(
+        docs: list[dict], threshold: float = _L3_ABS_COSINE_THRESHOLD,
+    ) -> tuple[bool, float]:
+        """L3 后置校验：精排 top-1 绝对余弦 < 阈值 → 疑似误判
+
+        复用 module-037 的 abs_cosine 字段：仅向量通道命中的文档有该字段
+        （retriever 归一化前存档）；FTS/图谱独有命中文档缺字段。
+        module-055 修订缺字段语义（行为升级，E2E 实测支撑）：
+          - rrf 三通道融合下图谱通道返回父块文档（无向量分数）可排 top-1
+            （HyDE 查询场景实测复现）——缺字段 ≠ 低分，"缺→按 0.0 标记"
+            令其恒误触发 suspected_misclassify（module-054 E2E 实测
+            top_abs_cosine=0.0 + 误标记；图谱实体命中本身就是相关证据）
+          - 向量通道整体降级（module-054 方案 A）全组缺字段同理
+        → 只对"实测到的低分"标记：top-1 无 abs_cosine（缺向量分数）→ 不标记。
+        只度量不打干预：标记写入 ChatSteps，不改回答路径（先度量后干预）。
+        module-045 WP2c: 返回 (flag, top1_abs) 二元组——top1_abs 与判定同源，
+        供 chat 在父块映射前存档（WP2b：映射重建 dict 会丢 abs_cosine，
+        同源存档保证 ChatSteps 展示真实值而非恒 0.0）。
+
+        Args:
+            docs: 精排后的文档列表（首项为 top-1）
+            threshold: 绝对余弦阈值（默认 0.3）
+
+        Returns:
+            (flag, top1_abs)：flag 为疑似误判标记；top1_abs 为 top-1 绝对
+            余弦（空列表/top-1 无 abs_cosine 返回 (False, 0.0)）
+        """
+        if not docs:
+            return False, 0.0
+        top1_abs = docs[0].get("abs_cosine")
+        if top1_abs is None:
+            # 无向量分数（FTS/图谱独有命中排首或向量通道降级）→ 无低分可判
+            return False, 0.0
+        return float(top1_abs) < threshold, float(top1_abs)
 
     async def search(self, request: SearchRequest) -> SearchResponse:
         """知识库检索：混合检索 → Rerank
@@ -211,13 +258,53 @@ class RAGEngine:
             current_query = request.query
             all_docs: list[dict] = []
             seen_ids: set[int] = set()
+            # module-049 分诊式改写（前置增强）：静态分诊（FTS 术语命中 →
+            # 精确 query 直接检索）+ 模糊 query 走 LLM 改写 + 保真预检 +
+            # 并行检索择优。rewrite_round0 非 None 时 = 并行择优结果，
+            # round 0 直接使用（不重复检索）；改写链路任何一环失败 →
+            # 回退原 query（与现状行为完全一致，零回归）。HyDE/反思兜底
+            # 均保留，本增强只把"改写时机"提前。
+            rewrite_round0: list[dict] | None = None
+            if settings.query_rewrite_enabled:
+                current_query, rewrite_round0, rewrite_info = await query_rewrite.prepare(
+                    request.query,
+                    lambda q: asyncio.wait_for(
+                        hybrid_retriever.retrieve(q, top_k=20), timeout=15,
+                    ),
+                )
+                if rewrite_info.get("mode") != "precise":
+                    logger.info("Query 改写: mode=%s, used_rewrite=%s, query=%s",
+                                rewrite_info.get("mode"),
+                                rewrite_info.get("used_rewrite", "-"),
+                                request.query[:50])
+            # module-043 L3 后置校验：精排 top-1 绝对余弦 < 0.3 → 疑似误判标记
+            #（先度量后干预：只写入 ChatSteps 可观测，不阻塞、不改回答路径）
+            # module-045 WP2b/c：判定与展示同源——round 0 判定处由
+            # _check_suspected_misclassify 返回 (flag, top1_abs)，top1_abs
+            # 先存档（_expand_to_parents 重建 dict 会丢 abs_cosine），
+            # ChatSteps 展示存档值，父块映射后不丢真实值
+            suspected_misclassify = False
+            top1_abs = 0.0
 
             for round_num in range(3):
-                docs = await asyncio.wait_for(
-                    hybrid_retriever.retrieve(current_query, top_k=20),
-                    timeout=15,
-                )
+                if round_num == 0 and rewrite_round0 is not None:
+                    # 分诊式改写已做并行择优（module-049），round 0 直接用
+                    # 择优结果，不再重复检索（rewrite_round0 为空列表时也
+                    # 直接进入无结果降级，与现状一致）
+                    docs = rewrite_round0
+                else:
+                    docs = await asyncio.wait_for(
+                        hybrid_retriever.retrieve(current_query, top_k=20),
+                        timeout=15,
+                    )
                 docs = await reranker.rerank(current_query, docs, top_k=5)
+                if round_num == 0:
+                    suspected_misclassify, top1_abs = self._check_suspected_misclassify(docs)
+                    if suspected_misclassify:
+                        logger.info(
+                            "L3 反证: top-1 abs_cosine=%.3f < %.1f → suspected_misclassify, query=%s",
+                            top1_abs, _L3_ABS_COSINE_THRESHOLD, request.query[:50],
+                        )
                 for d in docs:
                     doc_id = d.get("id")
                     if doc_id and doc_id not in seen_ids:
@@ -261,6 +348,8 @@ class RAGEngine:
             answer = await reflector.generate_answer(
                 request.query, docs, history=effective_history, memory=memory_text,
             )
+            # module-039：证据链验证——逐句检查答案是否被检索文档支持
+            verified = await reflector.verify_answer(answer, docs)
             # module-033：knowledge 路径生成答案后异步触发长期记忆自动写入
             #（fire-and-forget，不阻塞响应；casual_chat/realtime 已在分支提前返回）
             self._schedule_persist(request, answer, identity)
@@ -277,17 +366,34 @@ class RAGEngine:
                     "ref_index": i + 1,
                 })
 
-            return ChatResponse(answer=answer, sources=sources, message="ok")
+            # module-043 L3 后置校验：疑似误判标记写入 ChatSteps（可观测）。
+            # intent 段展示 L2 修正后的最终意图；retrieval 段带 top-1 绝对
+            # 余弦与疑似误判标记。旧字段不变，仅新增键（前端管线面板可见）。
+            steps = ChatSteps(
+                intent={
+                    "label": intent,
+                    "confidence": intent_result.get("confidence", 0.0),
+                },
+                retrieval={
+                    "count": len(docs),
+                    "top_abs_cosine": round(top1_abs, 4) if docs else None,
+                    "suspected_misclassify": suspected_misclassify,
+                },
+            )
+
+            return ChatResponse(answer=answer, sources=sources, verified_claims=verified,
+                                message="ok", steps=steps)
 
         except Exception as e:
             logger.error("RAG chat 失败: %s", e, exc_info=True)
             return ChatResponse(
                 answer="抱歉，我暂时无法回答这个问题，请稍后重试。",
                 sources=[],
+                verified_claims=None,
                 message="internal_error" if not settings.debug else f"error: {e}",
             )
 
-    async def _recall_memory(self, query: str, identity: str, top_k: int = 3) -> str:
+    async def _recall_memory(self, query: str, identity: str, top_k: int = 5) -> str:
         """召回长期记忆 + 短期记忆并格式化为生成 prompt 片段
 
         module-023/033：长期记忆（"历史记忆"段，'[长期记忆 - YYYY-MM-DD]：内容'）。
@@ -320,6 +426,9 @@ class RAGEngine:
             logger.warning("长期记忆召回失败，跳过注入: %s", e)
         short_text = ""
         try:
+            # module-046：短期→长期升级触发接线——升级检测内嵌于 recall_short
+            #（plan 3.2 召回侧 ③，mention_count≥2 且最近提及 7 天内 → 复制长期 +
+            # 删短期副本，幂等），本调用即触发点；提及刷新/衰减加权同样在内部完成
             short_memories = await asyncio.wait_for(
                 memory_service.recall_short(query, identity, top_k=top_k),
                 timeout=5,
@@ -368,6 +477,20 @@ class RAGEngine:
         """
         if not answer or not answer.strip():
             return  # 空答案不提取（防御：调用方已按 answer 非空触发）
+        # module-046：用户明确"记住" → 直接沉淀长期层（跳过短期与 LLM 提取）。
+        # 正则命中即内容为事实本身（"记住我喜欢吃辣" → 存"我喜欢吃辣"）；
+        # 保存失败仅日志降级；无有效内容（纯"记住"）→ 落回正常提取路径
+        remember = _REMEMBER_RE.search(query or "")
+        if remember:
+            remember_content = remember.group(1).strip()
+            if remember_content:
+                try:
+                    await memory_service.save(remember_content, identity, dedup=True)
+                    logger.info("记住检测命中，直接写入长期记忆: identity=%s, content=%.20s",
+                                identity, remember_content[:20])
+                except Exception as e:
+                    logger.warning("记住记忆写入失败（降级）: %s", e)
+                return
         try:
             facts = await extract_facts(query, answer, history or [])
         except Exception as e:
@@ -403,12 +526,20 @@ class RAGEngine:
         存在 → 用它作生成历史（刷新/换设备不丢）；否则回退当前请求 history（与
         module-034 之前行为完全一致）。恢复失败/超时/身份为空 → 回退当前请求。
 
+        module-046 WP2 分层注入：持久化会话存在且有早期会话摘要（仅当会话曾
+        超过 memory_session_max_messages 触发滚动删除时才有）→ 摘要段前置注入
+        （history = 早期摘要段 + 最近 20 条原样）。无摘要/摘要读取失败 → 跳过
+        摘要段，返回持久化会话原样（会话 ≤20 条时无摘要行，与旧行为逐字节一致，
+        零回归）。摘要段 role='assistant'（API 兼容：ReAct 路径会把 history 原样
+        透传 LLM，system 角色中断列表会被部分供应商拒绝）+ content 自带
+        '[早期会话摘要]' 前缀自描述。
+
         Args:
             identity: 请求身份（user_id 优先，否则 client_ip）
             request_history: 当前请求携带的历史
 
         Returns:
-            用于生成的有效历史列表（持久化会话优先）
+            用于生成的有效历史列表（持久化会话优先；有摘要时 = 摘要段 + 最近 N 条）
         """
         if not identity:
             return request_history or []
@@ -422,6 +553,19 @@ class RAGEngine:
             logger.warning("会话恢复失败，使用当前请求 history: %s", e)
             persisted = []
         if persisted:
+            summary = ""
+            try:
+                summary = await asyncio.wait_for(
+                    session_memory_service.get_session_summary(identity),
+                    timeout=3,
+                )
+            except Exception as e:
+                logger.warning("会话摘要读取失败，跳过摘要段: %s", e)
+            if summary:
+                return [
+                    {"role": "assistant", "content": f"[早期会话摘要]\n{summary}"},
+                    *persisted,
+                ]
             return persisted
         return request_history or []
 
@@ -554,9 +698,28 @@ class RAGEngine:
         all_docs: list[dict] = []
         existing_ids: set[int] = set()
         current_query = query
+        # module-049 分诊式改写（流式路径，查询级）：分诊（FTS 术语命中 →
+        # 直接检索）+ 模糊 query 走 LLM 改写 + 保真门控。不并行（round 0
+        # 已有向量+图并行与 HyDE 扩展，叠加成本翻倍且语义重叠）；改写通过
+        # 保真后作为 HyDE 扩展的基础 query（改写与 HyDE 正交），失败一律
+        # 回退原 query（零回归）
+        if settings.query_rewrite_enabled:
+            current_query, _rewrite_info = await query_rewrite.prepare_query(query)
+            if _rewrite_info.get("mode") != "precise":
+                logger.info("Query 改写(流式): mode=%s, query=%s",
+                            _rewrite_info.get("mode"), query[:50])
+
+        # 改写后再次检查检索预算：LLM 改写（≤10s）可能消耗大部分预算，若
+        # 已超预算则回退原 query——改写 query 的收益尚未验证，不应让预算超支
+        # 导致 round 0 直接 break 返回空结果（保守降级：宁用原 query 检索
+        # 也不跳过检索）
+        if current_query != query and loop.time() >= deadline:
+            logger.warning("Query 改写后检索预算已耗尽 (%.0fs)，回退原 query 继续检索",
+                           _RETRIEVE_BUDGET_SECONDS)
+            current_query = query
 
         # HyDE 查询扩展：首轮用假设回答检索（语义更接近文档），后续轮次用反射改写查询
-        hyde_query = await self._hyde_expand(query)
+        hyde_query = await self._hyde_expand(current_query)
 
         for round_num in range(3):  # 最多 3 轮
             # 超预算检查：到点不再发起新一轮检索，用已收集 docs 进入生成
@@ -569,37 +732,70 @@ class RAGEngine:
 
             # Round 0: 并行向量检索 + 图搜索
             if round_num == 0:
-                # 实体提取失败时 graph_extractor 内部降级返回空列表
-                query_entities = await graph_extractor.extract_from_query(query)
-                vector_task = asyncio.wait_for(
-                    hybrid_retriever.retrieve(search_text, top_k=top_k),
-                    timeout=15,
-                )
-                graph_task = asyncio.wait_for(
-                    graph_store.search_related(query_entities, top_k=top_k),
-                    timeout=15,
-                )
-                vector_docs, graph_docs = await asyncio.gather(
-                    vector_task, graph_task, return_exceptions=True,
-                )
-                # 单路失败降级为另一路（与混合检索降级哲学一致）：
-                # 向量超时/失败 → 仅图结果；图超时/失败 → 仅向量结果；
-                # 两路都失败 → 空列表，不整链路崩溃
-                if isinstance(vector_docs, Exception):
-                    logger.warning("round 0 向量检索失败，降级为仅图结果: %s", vector_docs)
-                    vector_docs = []
-                if isinstance(graph_docs, Exception):
-                    logger.warning("round 0 图检索失败，降级为仅向量结果: %s", graph_docs)
-                    graph_docs = []
-                # 合并：向量结果优先，图结果追加去重
-                docs = list(vector_docs) if vector_docs else []
-                for gd in (graph_docs or []):
-                    if gd.get("id") and gd["id"] not in {d.get("id") for d in docs}:
-                        docs.append(gd)
+                if settings.retrieval_fusion_mode != "hybrid":
+                    # module-053：三通道融合模式（rrf/weighted）下，图谱通道由
+                    # retriever 内部并行完成（round 0 语义），引擎不再重复查图
+                    # （避免双倍 LLM 实体提取与图查询）。单路失败由 retriever
+                    # 内部降级（该路不参与融合），融合异常回退 hybrid。
+                    try:
+                        docs = await asyncio.wait_for(
+                            hybrid_retriever.retrieve(
+                                search_text, top_k=top_k, round_num=0,
+                            ),
+                            timeout=15,
+                        )
+                    except Exception as e:
+                        # module-054 方案 B 防御：retrieve() 仍抛 RetrievalException
+                        # （方案 A 未覆盖的异常，如 DB 不可用）时补一次图谱兜底——
+                        # 复用 _retrieve_graph_only（实体提取 + 图查询 + 失败降级
+                        # 为空，与 hybrid 分支图回退同语义）。B 是防御层，方案 A
+                        # 修复后正常路径不会触发（零开销）。
+                        logger.warning("round 0 三通道融合检索失败，引擎补图兜底: %s", e)
+                        try:
+                            docs = await asyncio.wait_for(
+                                hybrid_retriever._retrieve_graph_only(query, top_k),
+                                timeout=15,
+                            )
+                        except Exception as e2:
+                            logger.warning("图兜底失败，降级为空结果: %s", e2)
+                            docs = []
+                else:
+                    # 实体提取失败时 graph_extractor 内部降级返回空列表
+                    query_entities = await graph_extractor.extract_from_query(query)
+                    vector_task = asyncio.wait_for(
+                        hybrid_retriever.retrieve(search_text, top_k=top_k, round_num=0),
+                        timeout=15,
+                    )
+                    graph_task = asyncio.wait_for(
+                        graph_store.search_related(query_entities, top_k=top_k),
+                        timeout=15,
+                    )
+                    vector_docs, graph_docs = await asyncio.gather(
+                        vector_task, graph_task, return_exceptions=True,
+                    )
+                    # 单路失败降级为另一路（与混合检索降级哲学一致）：
+                    # 向量超时/失败 → 仅图结果；图超时/失败 → 仅向量结果；
+                    # 两路都失败 → 空列表，不整链路崩溃
+                    if isinstance(vector_docs, Exception):
+                        logger.warning("round 0 向量检索失败，降级为仅图结果: %s", vector_docs)
+                        vector_docs = []
+                    if isinstance(graph_docs, Exception):
+                        logger.warning("round 0 图检索失败，降级为仅向量结果: %s", graph_docs)
+                        graph_docs = []
+                    # 合并：向量结果优先，图结果追加去重
+                    docs = list(vector_docs) if vector_docs else []
+                    for gd in (graph_docs or []):
+                        if gd.get("id") and gd["id"] not in {d.get("id") for d in docs}:
+                            docs.append(gd)
             else:
                 try:
                     docs = await asyncio.wait_for(
-                        hybrid_retriever.retrieve(search_text, top_k=top_k),
+                        # module-053：round 1/2 传 round_num>0——fusion 模式下
+                        # retriever 保持单路混合（FTS+向量，无图谱），与引擎层
+                        # "图谱仅 round 0 查一次"语义一致
+                        hybrid_retriever.retrieve(
+                            search_text, top_k=top_k, round_num=round_num,
+                        ),
                         timeout=15,
                     )
                 except asyncio.TimeoutError:
@@ -684,8 +880,9 @@ class RAGEngine:
             child_docs: 子块检索结果列表，每项必须包含 parent_id 字段
 
         Returns:
-            去重父块列表，字段包含 id, title, content, source, hybrid_score
-            按 hybrid_score 降序排列
+            去重父块列表，字段包含 id, title, content, source, hybrid_score,
+            abs_cosine（module-045 WP2b 透传，子块最大值）；按 hybrid_score
+            降序排列
         """
         if not child_docs:
             return []
@@ -694,6 +891,10 @@ class RAGEngine:
         # 子块文档（parent_id=NOT NULL）映射到父块，去重后取最佳分数
         output: list[dict] = []
         parent_scores: dict[int, float] = {}
+        # module-045 WP2b: 父块重建 dict 原本丢 abs_cosine（L3 绝对余弦），
+        # 此处与 hybrid_score 同策略保留子块最大值——跨父块映射透传，
+        # chat/_retrieve 的 ChatSteps 展示值不恒 0.0
+        parent_abs_cosines: dict[int, float] = {}
         for doc in child_docs:
             pid = doc.get("parent_id")
             if pid is None:
@@ -704,6 +905,9 @@ class RAGEngine:
                 score = doc.get("hybrid_score", doc.get("score", 0.0))
                 if pid not in parent_scores or score > parent_scores[pid]:
                     parent_scores[pid] = score
+                abs_cosine = doc.get("abs_cosine") or 0.0
+                if pid not in parent_abs_cosines or abs_cosine > parent_abs_cosines[pid]:
+                    parent_abs_cosines[pid] = abs_cosine
 
         if not parent_scores:
             return output  # 没有子块需要展开，直接返回旧格式文档
@@ -723,6 +927,8 @@ class RAGEngine:
                 "content": p.content,
                 "source": p.source,
                 "hybrid_score": parent_scores.get(p.id, 0.0),
+                # module-045 WP2b: abs_cosine 跨父块映射透传（子块最大值）
+                "abs_cosine": parent_abs_cosines.get(p.id, 0.0),
             })
 
         # 按 ID 去重 + 按分数降序

@@ -1,5 +1,5 @@
 """
-AI 推理服务入口 — 张三个人网站
+AI 推理服务入口
 FastAPI + pgvector + LangChain 多供应商 LLM
 """
 import logging
@@ -23,10 +23,10 @@ from src.identity import parse_jwt, resolve_identity
 from rag.engine import rag_engine
 from rag.schemas import (
     SearchRequest, SearchResponse, ChatRequest, ChatResponse,
-    MemorySaveRequest, MemoryRecallRequest,
+    MemorySaveRequest, MemoryRecallRequest, FeedbackRequest,
 )
-from rag.models import Document
-from rag.memory import memory_service
+from rag.models import Document, Feedback
+from rag.memory.memory import memory_service
 from llm.client import LLMFactory
 
 
@@ -37,6 +37,12 @@ from llm.client import LLMFactory
 # 本内存 dict 保留为会话内即时兜底缓存（/ai/chat/sessions 等端点即时读取）。
 IP_SESSION_MESSAGES: dict[str, list[dict]] = defaultdict(list)
 MAX_MESSAGES_PER_IP = 50
+MAX_ANSWER_LEN = 10000  # module-042: 答案最大长度，超出截断并附加提示
+
+# module-055 minor 修复：持有 HHEM 后台预热任务引用（lifespan 内赋值），
+# 防服务在预热期间关闭时任务被 GC 触发 "Task was destroyed but it is pending"
+# 告警（fail-soft，仅持引用不 await/不取消，语义与无预热行为一致）
+_HHEM_WARMUP_TASK: Optional[asyncio.Task] = None
 
 logging.basicConfig(
     level=logging.INFO,
@@ -96,7 +102,7 @@ async def lifespan(app: FastAPI):
     await init_db()
 
     # 预热 embedding 模型 + LLM 客户端，避免首次请求卡顿
-    from rag.embeddings import embedding_service
+    from rag.retrieval.embeddings import embedding_service
     logger.info("预热 embedding 模型中...")
     await embedding_service.embed_text("warmup")
     logger.info("embedding 模型已就绪")
@@ -119,6 +125,25 @@ async def lifespan(app: FastAPI):
             logger.info("%s 客户端已预热", label)
         except Exception as e:
             logger.warning("%s 预热失败（可接受）: %s", label, e)
+
+    # module-055: 后台预热 HHEM 裁判模型（fail-soft，不阻塞启动）。
+    # 依据（changelog 实测）：冷加载独立进程 ≈9s、服务进程（CPU 争用）≈17-19s，
+    # 首请求 verify 的 20s 预算内"加载+推理"超时 → verified_claims=0（E2E 复现）；
+    # 预热后 predict 纯推理（实测 0.11-0.5s/对）。后台任务通常先于首个验证请求
+    # 完成；失败仅告警（首次验证请求退回冷加载路径，与无预热行为一致）。
+    import asyncio as _asyncio
+
+    async def _warmup_hhem() -> None:
+        try:
+            from rag.retrieval.factcheck_judge import hhem_judge
+            scores = await hhem_judge.predict(["warmup"], ["warmup"])
+            if scores is not None:
+                logger.info("HHEM 裁判模型已预热")
+        except Exception as e:
+            logger.warning("HHEM 预热失败（可接受，首个验证请求将含冷加载）: %s", e)
+
+    global _HHEM_WARMUP_TASK
+    _HHEM_WARMUP_TASK = _asyncio.create_task(_warmup_hhem())
 
     yield
     logger.info("AI 服务关闭")
@@ -318,7 +343,7 @@ async def search(request: SearchRequest):
 
 @app.post("/ai/rag/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, fastapi_req: Request):
-    """RAG 知识库问答（自动保存会话到 IP 缓存）
+    """RAG 知识库问答
 
     将请求身份（user_id 优先，否则 client_ip）传给 rag_engine.chat，
     用于按身份隔离检索长期记忆（module-032；匿名降级 client_ip，零回归）。
@@ -326,6 +351,9 @@ async def chat(request: ChatRequest, fastapi_req: Request):
     client_ip = getattr(fastapi_req.state, "client_ip", "unknown")
     identity = resolve_identity(fastapi_req)
     result = await rag_engine.chat(request, identity=identity)
+    # module-042: 答案截断保护（不影响 sources）
+    if len(result.answer) > MAX_ANSWER_LEN:
+        result.answer = result.answer[:MAX_ANSWER_LEN] + "\n\n[答案过长，已截断]"
     # 保存消息到 IP 会话缓存（仅知识库路径保存；内存态，module-034 降级为兜底缓存）
     if result.message not in ("casual_chat", "realtime_not_implemented") and result.answer:
         save_messages_to_session(client_ip, request.query, result.answer, result.sources)
@@ -376,7 +404,7 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
                 from llm.client import LLMFactory
                 client = LLMFactory.get_client()
                 async for token in client.generate_stream(
-                    f"你是张三个人网站的 AI 助手。\n用户: {request.query}"
+                    f"你是个人网站的 AI 助手。\n用户: {request.query}"
                 ):
                     yield f"event: token\ndata: {json.dumps(token)}\n\n"
                 yield "event: done\ndata: {}\n\n"
@@ -386,6 +414,11 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
             t0 = _t()
             docs = await rag_engine._retrieve(request.query, top_k=20)
             retrieval_count = len(docs)
+            # module-045 WP3: L3 标记接入流式路径（对齐非流式 engine.chat）——
+            # 检索 top-1 绝对余弦 < 0.3 → suspected_misclassify（先度量后干预，
+            # 只写入 step 事件可观测）。_retrieve 已做父块映射，abs_cosine 经
+            # WP2b 透传（子块最大值），流式路径不再恒 0.0 恒标记
+            suspected_misclassify, top1_abs = rag_engine._check_suspected_misclassify(docs)
             # 预览文档（前5条标题+摘要）
             previews = []
             # module-035 (P2)：移除失真阈值——hybrid_score 是 min-max 相对分
@@ -403,7 +436,10 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
                     })
             step_data = json.dumps({
                 "step": "retrieval",
-                "data": {"count": retrieval_count, "relevant": relevant_count, "previews": previews},
+                "data": {"count": retrieval_count, "relevant": relevant_count,
+                         "top_abs_cosine": round(top1_abs, 4) if docs else None,
+                         "suspected_misclassify": suspected_misclassify,
+                         "previews": previews},
                 "timing_ms": int((_t() - t0) * 1000),
             })
             yield f"event: step\ndata: {step_data}\n\n"
@@ -459,9 +495,17 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
             memory = await rag_engine._recall_memory(request.query, identity)
             history = await rag_engine._resolve_session_history(identity, request.history)
             answer_parts = []
+            total_len = 0
             async for token in reflector.generate_answer_stream(request.query, docs, history=history, memory=memory):
                 answer_parts.append(token)
+                total_len += len(token)
                 yield f"event: token\ndata: {json.dumps(token)}\n\n"
+                # module-042: 答案长度保护 — 超出上限停止流式输出并追加截断提示
+                if total_len >= MAX_ANSWER_LEN:
+                    truncation_note = "\n\n[答案过长，已截断]"
+                    answer_parts.append(truncation_note)
+                    yield f"event: token\ndata: {json.dumps(truncation_note)}\n\n"
+                    break
 
             # ====== Step 6: 引用溯源 ======
             sources = []
@@ -478,7 +522,17 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
             schedule_stream_persist(intent, request.query, "".join(answer_parts), identity, request.history)
             # module-034：会话持久化为主（异步写库，不阻塞 SSE 响应）
             rag_engine._schedule_session_persist(identity, request.query, "".join(answer_parts))
-            yield f"event: done\ndata: {json.dumps({'sources': sources})}\n\n"
+
+            # ====== Step 7: 证据链验证（module-039） ======
+            full_answer = "".join(answer_parts)
+            # module-042: 剥离截断标记后验证，避免标记文本误导置信度评估
+            clean_answer = full_answer.replace("\n\n[答案过长，已截断]", "")
+            verified = await reflector.verify_answer(clean_answer, docs)
+            if verified.get("claims"):
+                yield f"event: verified\ndata: {json.dumps({'claims': verified['claims'], 'overall_confidence': verified['overall_confidence'], 'total_claims': verified['total_claims'], 'supported': verified['supported'], 'inferred': verified['inferred'], 'unsupported': verified['unsupported']}, ensure_ascii=False)}\n\n"
+                yield f"event: done\ndata: {json.dumps({'sources': sources, 'verified': True, 'overall_confidence': verified['overall_confidence']})}\n\n"
+            else:
+                yield f"event: done\ndata: {json.dumps({'sources': sources, 'verified': False})}\n\n"
 
         except Exception as e:
             logger.error("流式问答失败: %s", e, exc_info=True)
@@ -511,11 +565,15 @@ async def chat_agent(request: ChatRequest, fastapi_req: Request):
     async def event_stream():
         from agent.react import ReactContext, _build_messages, react_loop
         try:
-            ctx = ReactContext(request.query, identity, request.history)
+            # module-036：会话恢复优先持久化（刷新/换设备不丢）；无持久化会话
+            # 则回退当前请求 history（零回归），与 chat_stream Step 5 一致
+            effective_history = await rag_engine._resolve_session_history(identity, request.history)
+            ctx = ReactContext(request.query, identity, effective_history)
             budget = settings.max_agent_tools
             answer = ""
             tool_count = 0
-            async for evt in react_loop(ctx, _build_messages(ctx), budget):
+            async for evt in react_loop(ctx, _build_messages(ctx), budget,
+                                        max_answer_len=MAX_ANSWER_LEN):
                 t = evt["type"]
                 if t == "tool_call":
                     yield f"event: tool_call\ndata: {json.dumps({'name': evt['name'], 'args': evt['args'], 'tool_count': evt['tool_count']}, ensure_ascii=False)}\n\n"
@@ -538,6 +596,9 @@ async def chat_agent(request: ChatRequest, fastapi_req: Request):
                     "source": doc.get("source", ""),
                     "ref_index": i + 1,
                 })
+            # module-036：Agent 对话完成后异步持久化会话轮次（fire-and-forget，
+            # 不阻塞 SSE；内部 guard 空 answer 不写，与 chat_stream 一致）
+            rag_engine._schedule_session_persist(identity, request.query, answer)
             yield f"event: done\ndata: {json.dumps({'answer': answer, 'sources': sources, 'tool_count': tool_count, 'budget': budget}, ensure_ascii=False)}\n\n"
         except Exception as e:
             logger.error("Agent 问答失败: %s", e, exc_info=True)
@@ -572,11 +633,15 @@ async def chat_agent_langgraph(request: ChatRequest, fastapi_req: Request):
             ReactContext, _build_messages, langgraph_react_loop,
         )
         try:
-            ctx = ReactContext(request.query, identity, request.history)
+            # module-036：会话恢复优先持久化（刷新/换设备不丢）；无持久化会话
+            # 则回退当前请求 history（零回归），与 chat_stream Step 5 一致
+            effective_history = await rag_engine._resolve_session_history(identity, request.history)
+            ctx = ReactContext(request.query, identity, effective_history)
             budget = settings.max_agent_tools
             answer = ""
             tool_count = 0
-            async for evt in langgraph_react_loop(ctx, _build_messages(ctx), budget):
+            async for evt in langgraph_react_loop(ctx, _build_messages(ctx), budget,
+                                                  max_answer_len=MAX_ANSWER_LEN):
                 t = evt["type"]
                 if t == "tool_call":
                     yield f"event: tool_call\ndata: {json.dumps({'name': evt['name'], 'args': evt['args'], 'tool_count': evt['tool_count']}, ensure_ascii=False)}\n\n"
@@ -599,6 +664,9 @@ async def chat_agent_langgraph(request: ChatRequest, fastapi_req: Request):
                     "source": doc.get("source", ""),
                     "ref_index": i + 1,
                 })
+            # module-036：Agent 对话完成后异步持久化会话轮次（fire-and-forget，
+            # 不阻塞 SSE；内部 guard 空 answer 不写，与 chat_stream 一致）
+            rag_engine._schedule_session_persist(identity, request.query, answer)
             yield f"event: done\ndata: {json.dumps({'answer': answer, 'sources': sources, 'tool_count': tool_count, 'budget': budget}, ensure_ascii=False)}\n\n"
         except Exception as e:
             logger.error("LangGraph Agent 问答失败: %s", e, exc_info=True)
@@ -651,6 +719,39 @@ async def memory_recall(request: MemoryRecallRequest, fastapi_req: Request):
     except Exception as e:
         logger.error("记忆检索失败: %s", e, exc_info=True)
         return {"code": 1, "data": {"memories": []}, "message": "记忆检索失败"}
+
+
+# ─── 用户反馈 API（module-048 反馈飞轮）───
+
+
+@app.post("/ai/feedback")
+async def submit_feedback(request: FeedbackRequest, fastapi_req: Request):
+    """提交用户反馈（👍/👎，module-048 反馈飞轮）
+
+    feedback 表是层 4 分类器（intent/充分性）再训练的数据源：前端每条
+    AI 回复可点赞/点踩 + 可选评论，落库累积标注数据。
+
+    identity 从 request.state 取（user_id 优先 client_ip 兜底，对齐现有
+    中间件注入与 /ai/rag/chat 口径）。Pydantic 已校验 rating ∈ {1,-1}、
+    comment ≤500（非法值 422 拦截，防落库污染）；落库失败返回 500，
+    前端降级 Toast 提示，不阻塞聊天（降级验收 §6.1）。
+    """
+    try:
+        identity = resolve_identity(fastapi_req)
+        async with async_session_factory() as session:
+            session.add(Feedback(
+                message_id=request.message_id,
+                rating=request.rating,
+                comment=request.comment,
+                identity=identity,
+            ))
+            await session.commit()
+        logger.info("反馈落库: message_id=%d, rating=%d, identity=%s",
+                    request.message_id, request.rating, identity)
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error("反馈落库失败: %s", e, exc_info=True)
+        return JSONResponse(status_code=500, content={"message": "反馈保存失败"})
 
 
 @app.post("/ai/rag/documents")

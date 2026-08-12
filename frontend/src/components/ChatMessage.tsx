@@ -22,23 +22,58 @@
  * ## 为什么气泡用 max-width 72%？
  * 太宽的文字行在阅读时容易跳行，72% 在桌面和移动端都能保持舒适的阅读体验。
  */
-import { Typography } from 'antd';
+import { useState } from 'react';
+import { Button, Typography, message } from 'antd';
+// 注：本仓库 @ant-design/icons@5.6.1 无 ThumbUp/ThumbDown 图标，👍/👎 用同形 Like/Dislike
 import { LikeOutlined, DislikeOutlined } from '@ant-design/icons';
-import type { SourceItem } from '../types/rag';
+import { submitFeedback } from '../services/ragService';
+import type { SourceItem, VerifiedClaim } from '../types/rag';
 
 interface ChatMessageProps {
   role: 'user' | 'assistant';
   content: string;
   sources?: SourceItem[];
   onCitationClick?: (refIndex: number) => void;
-  /** 消息在列表中的索引，用于 feedback 标识 */
-  messageIndex?: number;
+  /** 持久化消息 ID（module-048：仅含 message_id 的 AI 回复展示反馈按钮） */
+  messageId?: number;
   /** 是否正在流式输出（仅 AI 消息使用） */
   isStreaming?: boolean;
-  /** 当前反馈状态 */
-  feedbackRating?: 'up' | 'down' | null;
-  /** 反馈回调 */
-  onFeedback?: (messageIndex: number, rating: 'up' | 'down') => void;
+  /** 证据链验证结果（module-039；无验证数据时退化纯文本） */
+  verifiedClaims?: {
+    claims: VerifiedClaim[];
+    overall_confidence: number;
+    total_claims: number;
+    supported: number;
+    inferred: number;
+    unsupported: number;
+  } | null;
+}
+
+/**
+ * 已反馈消息记录（module-048 反馈飞轮）：key = 持久化消息 id，value = 评级。
+ * 模块级 Map + localStorage 双记录：组件重挂载（切会话）、页面刷新后
+ * 同一 message_id 仍保持已评态，防止重复/冲突提交污染飞轮训练数据。
+ */
+const RATED_FEEDBACK_KEY = 'rag_feedback_rated';
+const ratedMessages = loadRatedMessages();
+
+function loadRatedMessages(): Map<number, 'up' | 'down'> {
+  try {
+    const raw = localStorage.getItem(RATED_FEEDBACK_KEY);
+    if (!raw) return new Map();
+    const parsed = JSON.parse(raw) as Record<string, 'up' | 'down'>;
+    return new Map(Object.entries(parsed).map(([id, value]) => [Number(id), value]));
+  } catch {
+    return new Map();
+  }
+}
+
+function persistRatedMessages(): void {
+  try {
+    localStorage.setItem(RATED_FEEDBACK_KEY, JSON.stringify(Object.fromEntries(ratedMessages)));
+  } catch {
+    /* localStorage 不可用时静默降级（本次会话内模块级 Map 仍生效） */
+  }
 }
 
 /**
@@ -85,17 +120,49 @@ function parseCitations(
   return parts;
 }
 
+/** 从 evidence 字段提取引用编号（如 "[1]" → 1） */
+function parseEvidenceRef(evidence: string): number | null {
+  const m = evidence.match(/^\[(\d+)\]$/);
+  return m ? Number.parseInt(m[1], 10) : null;
+}
+
 export default function ChatMessage({
   role,
   content,
   sources,
   onCitationClick,
-  messageIndex,
+  messageId,
   isStreaming,
-  feedbackRating,
-  onFeedback,
+  verifiedClaims,
 }: ChatMessageProps) {
   const isUser = role === 'user';
+
+  /** 已评态（module-048）：组件 state 记录，初始值从模块级 Map 恢复 */
+  const [rating, setRating] = useState<'up' | 'down' | null>(() =>
+    messageId !== undefined ? ratedMessages.get(messageId) ?? null : null,
+  );
+  const [submitting, setSubmitting] = useState<'up' | 'down' | null>(null);
+
+  /**
+   * 提交反馈：👍 → rating=1，👎 → rating=-1
+   * 成功后写入已评态（模块级 Map + localStorage），重复点击不重复提交；
+   * 失败 Toast 提示且不置已评态（可重试），不阻塞聊天。
+   */
+  const handleRate = async (value: 'up' | 'down') => {
+    if (messageId === undefined || rating !== null || submitting !== null) return;
+    setSubmitting(value);
+    try {
+      await submitFeedback({ message_id: messageId, rating: value === 'up' ? 1 : -1 });
+      ratedMessages.set(messageId, value);
+      persistRatedMessages();
+      setRating(value);
+      message.success('感谢反馈');
+    } catch {
+      message.error('反馈提交失败，请重试');
+    } finally {
+      setSubmitting(null);
+    }
+  };
 
   return (
     <>
@@ -221,6 +288,128 @@ export default function ChatMessage({
                 }}
               />
             )}
+            {/* 证据链验证面板（module-039：逐句可信度 + 整体置信度进度条） */}
+            {!isUser && !isStreaming && verifiedClaims && verifiedClaims.claims.length > 0 && (
+              <div
+                style={{
+                  marginTop: 12,
+                  paddingTop: 10,
+                  borderTop: '1px solid #e2e8f0',
+                }}
+              >
+                <Typography.Text
+                  style={{ fontSize: 12, fontWeight: 600, color: '#64748b', display: 'block', marginBottom: 6 }}
+                >
+                  可信度验证
+                </Typography.Text>
+                {verifiedClaims.claims.map((claim, i) => {
+                  const isSupported = claim.verdict === 'supported';
+                  const isInferred = claim.verdict === 'inferred';
+                  const color = isSupported ? '#16a34a' : isInferred ? '#ca8a04' : '#dc2626';
+                  const badge = isSupported ? '✓' : isInferred ? '~' : '✗';
+                  const bg = isSupported ? '#f0fdf4' : isInferred ? '#fefce8' : '#fef2f2';
+                  const refNum = parseEvidenceRef(claim.evidence);
+                  return (
+                    <div
+                      key={i}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'baseline',
+                        gap: 6,
+                        marginBottom: 3,
+                        fontSize: 13,
+                        lineHeight: 1.6,
+                        padding: '2px 6px',
+                        borderRadius: 4,
+                        background: bg,
+                      }}
+                    >
+                      <span
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          width: 18,
+                          height: 18,
+                          borderRadius: 9,
+                          background: color,
+                          color: '#fff',
+                          fontSize: 11,
+                          fontWeight: 700,
+                          flexShrink: 0,
+                        }}
+                        title={claim.verdict}
+                      >
+                        {badge}
+                      </span>
+                      <span style={{ color: '#0f172a' }}>{claim.claim}</span>
+                      {refNum !== null && onCitationClick && (
+                        <span
+                          style={{
+                            display: 'inline-block',
+                            padding: '0 4px',
+                            fontSize: 11,
+                            background: '#dbeafe',
+                            color: '#1e40af',
+                            border: '1px solid #93c5fd',
+                            borderRadius: 3,
+                            cursor: 'pointer',
+                            lineHeight: '16px',
+                            flexShrink: 0,
+                            transition: 'all 0.15s ease',
+                          }}
+                          onClick={(e) => { e.stopPropagation(); onCitationClick(refNum); }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.background = '#bfdbfe';
+                            e.currentTarget.style.borderColor = '#60a5fa';
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.background = '#dbeafe';
+                            e.currentTarget.style.borderColor = '#93c5fd';
+                          }}
+                        >
+                          [{refNum}]
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+                {/* 整体置信度进度条 */}
+                <div style={{ marginTop: 8 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
+                    <Typography.Text style={{ fontSize: 11, color: '#94a3b8' }}>
+                      supported={verifiedClaims.supported} inferred={verifiedClaims.inferred} unsupported={verifiedClaims.unsupported}
+                    </Typography.Text>
+                    <Typography.Text style={{ fontSize: 11, fontWeight: 600, color: '#0f172a' }}>
+                      {Math.round(verifiedClaims.overall_confidence * 100)}% 可信
+                    </Typography.Text>
+                  </div>
+                  <div
+                    style={{
+                      width: '100%',
+                      height: 5,
+                      background: '#f1f5f9',
+                      borderRadius: 3,
+                      overflow: 'hidden',
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: `${Math.round(verifiedClaims.overall_confidence * 100)}%`,
+                        height: '100%',
+                        background: verifiedClaims.overall_confidence >= 0.8
+                          ? 'linear-gradient(90deg, #16a34a, #22c55e)'
+                          : verifiedClaims.overall_confidence >= 0.5
+                            ? 'linear-gradient(90deg, #ca8a04, #eab308)'
+                            : 'linear-gradient(90deg, #dc2626, #ef4444)',
+                        borderRadius: 3,
+                        transition: 'width 0.3s ease',
+                      }}
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
             {/* 引用来源列表（气泡底部） */}
             {sources && sources.length > 0 && (
               <div
@@ -237,39 +426,28 @@ export default function ChatMessage({
                 </Typography.Text>
               </div>
             )}
-            {/* 反馈按钮（仅在完整 AI 回复中显示） */}
-            {!isUser && !isStreaming && onFeedback && messageIndex !== undefined && (
+            {/* 反馈按钮（module-048 反馈飞轮：仅含 message_id 的已持久化 AI 回复展示，
+                👍=1 / 👎=-1；已评态置灰 + 选中高亮，不重复提交） */}
+            {!isUser && !isStreaming && messageId !== undefined && (
               <div style={{ marginTop: 8, display: 'flex', gap: 4 }}>
-                <span
-                  onClick={() => onFeedback(messageIndex, 'up')}
-                  style={{
-                    cursor: 'pointer',
-                    padding: '2px 6px',
-                    borderRadius: 4,
-                    background: feedbackRating === 'up' ? '#dbeafe' : 'transparent',
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    transition: 'all 0.15s ease',
-                  }}
+                <Button
+                  size="small"
+                  type={rating === 'up' ? 'primary' : 'text'}
+                  icon={<LikeOutlined />}
                   title="有帮助"
-                >
-                  <LikeOutlined style={{ fontSize: 14, color: feedbackRating === 'up' ? '#1e40af' : '#94a3b8' }} />
-                </span>
-                <span
-                  onClick={() => onFeedback(messageIndex, 'down')}
-                  style={{
-                    cursor: 'pointer',
-                    padding: '2px 6px',
-                    borderRadius: 4,
-                    background: feedbackRating === 'down' ? '#fee2e2' : 'transparent',
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    transition: 'all 0.15s ease',
-                  }}
+                  disabled={rating !== null || submitting !== null}
+                  loading={submitting === 'up'}
+                  onClick={() => handleRate('up')}
+                />
+                <Button
+                  size="small"
+                  type={rating === 'down' ? 'primary' : 'text'}
+                  icon={<DislikeOutlined />}
                   title="无帮助"
-                >
-                  <DislikeOutlined style={{ fontSize: 14, color: feedbackRating === 'down' ? '#dc2626' : '#94a3b8' }} />
-                </span>
+                  disabled={rating !== null || submitting !== null}
+                  loading={submitting === 'down'}
+                  onClick={() => handleRate('down')}
+                />
               </div>
             )}
           </div>

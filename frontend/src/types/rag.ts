@@ -14,6 +14,16 @@
  * 3. 可空字段不加 ?（后端保证字段一定存在）
  */
 
+/** 证据链验证单条声明 — 模块 module-039 */
+export interface VerifiedClaim {
+  /** 陈述文本（1-2 句话） */
+  claim: string;
+  /** 可信度判定 */
+  verdict: 'supported' | 'inferred' | 'unsupported';
+  /** 证据引用编号（如 "[1]"；unsupported 时为 "N/A"） */
+  evidence: string;
+}
+
 /** 聊天请求 — 对应 Python RAGEngine.chat() 的入参 */
 export interface ChatRequest {
   /** 用户问题 */
@@ -46,6 +56,15 @@ export interface ChatResponse {
   message: string;
   /** 各步骤中间数据（后端 RAG 链路执行结果） */
   steps?: PipelineSteps;
+  /** 证据链验证结果（module-039；无验证数据时为 null） */
+  verified_claims?: {
+    claims: VerifiedClaim[];
+    overall_confidence: number;
+    total_claims: number;
+    supported: number;
+    inferred: number;
+    unsupported: number;
+  } | null;
 }
 
 /** RAG 中间步骤数据 — 对应后端 ChatSteps 模型 */
@@ -161,4 +180,17 @@ export interface DocumentListResponse {
   total: number;
   page: number;
   page_size: number;
+}
+
+/**
+ * 反馈请求 — module-048 反馈飞轮：对应后端 POST /ai/feedback 入参
+ * （feedback 表是层 4 分类器再训练的数据源）
+ */
+export interface FeedbackRequest {
+  /** 持久化消息 ID（Java 后端消息主键；无 message_id 的历史消息不展示反馈按钮） */
+  message_id: number;
+  /** 评价：1 = 有帮助（👍），-1 = 无帮助（👎） */
+  rating: 1 | -1;
+  /** 可选评论（后端限制 ≤500 字符；前端当前不采集，留待后续扩展） */
+  comment?: string;
 }

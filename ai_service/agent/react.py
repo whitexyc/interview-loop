@@ -50,6 +50,9 @@ _SYSTEM_PROMPT = """你是张三个人网站的 Agentic RAG 问答助手。用�
 - extract_entities: 从查询/文本中提取技术实体
 - recall_memory: 召回该用户的跨会话长期记忆
 - generate_answer: 基于已检索到的全部文档生成带引用标注的最终答案
+- verify_answer: 逐句验证已生成答案是否被检索文档支持，标注可信度
+- re_search: 检索不足时自动改写查询重检
+- note_to_self: 记录中间发现或推理结论到工作笔记，后续轮次可参考
 
 使用规则：
 1. 优先用 search_knowledge 做一次检索；结果不足时再换 search_fts / search_vector /
@@ -57,7 +60,9 @@ _SYSTEM_PROMPT = """你是张三个人网站的 Agentic RAG 问答助手。用�
 2. 检索工具会自动累积已检索文档；信息足够后调用 generate_answer 生成带引用答案，
    或直接输出最终答案
 3. 工具返回空结果不代表出错，可能是知识库无相关内容，请判断是继续检索还是如实告知用户
-4. 用中文回答，严格基于检索到的文档内容，禁止编造"""
+4. 用中文回答，严格基于检索到的文档内容，禁止编造
+5. 检索结果与问题不相关时，调用 re_search 自动改写查询重检，
+   无需手动换 search_fts/search_vector（与 engine 流水线的自动反思对齐）"""
 
 
 class ReactContext:
@@ -65,20 +70,27 @@ class ReactContext:
 
     Attributes:
         query: 用户当前问题
-        client_ip: 用户 IP 标识（记忆按 IP 隔离）
+        identity: 请求身份标识（user_id 优先，否则 client_ip；记忆按身份隔离，
+            module-032/036 语义，原名 client_ip 已过时）
         history: 历史对话列表 [{"role", "content"}, ...]
         docs: 检索工具累积的文档（按 doc id 去重）
         memory: recall_memory 工具召回的记忆文本（供 generate_answer 使用）
+        scratchpad: note_to_self 工具记录的工作笔记列表，按写入序（module-041）
     """
 
-    def __init__(self, query: str, client_ip: str = "unknown",
+    def __init__(self, query: str, identity: str = "unknown",
                  history: Optional[list[dict]] = None):
         self.query = query
-        self.client_ip = client_ip
+        self.identity = identity
         self.history = history or []
         self.docs: list[dict] = []
         self._seen_ids: set = set()
         self.memory = ""
+        self.scratchpad: list[str] = []  # module-041: Agent 工作笔记，按写入序
+
+    def add_note(self, note: str) -> None:
+        """记录一条工作笔记到 scratchpad（module-041）"""
+        self.scratchpad.append(note.strip())
 
     def add_docs(self, docs: list[dict]) -> None:
         """按 doc id 去重累积检索文档（供 generate_answer / 兜底生成使用）"""
@@ -118,7 +130,7 @@ def _assistant_message(response: dict, executed_ids: set) -> dict:
 async def react_agent(
     query: str,
     history: Optional[list[dict]] = None,
-    client_ip: str = "unknown",
+    identity: str = "unknown",
     budget: Optional[int] = None,
     tools: Optional[ToolRegistry] = None,
 ) -> dict:
@@ -127,7 +139,7 @@ async def react_agent(
     Args:
         query: 用户问题
         history: 历史对话列表
-        client_ip: 用户 IP 标识（记忆隔离）
+        identity: 请求身份标识（user_id 优先，否则 client_ip；记忆按身份隔离）
         budget: 工具总调用次数上限，None 用 settings.max_agent_tools
         tools: 工具注册表，默认全局 registry
 
@@ -135,7 +147,7 @@ async def react_agent(
         {"answer": str, "tool_count": int,
          "tool_trace": [{"name", "args", "result"}, ...]}
     """
-    ctx = ReactContext(query, client_ip, history)
+    ctx = ReactContext(query, identity, history)
     budget = int(budget) if budget is not None else settings.max_agent_tools
     answer = ""
     tool_count = 0
@@ -162,6 +174,7 @@ async def react_loop(
     messages: list,
     budget: int,
     tools: Optional[ToolRegistry] = None,
+    max_answer_len: int = 0,
 ) -> AsyncGenerator[dict, None]:
     """ReAct 循环核心（异步生成器，逐事件产出，供 react_agent 与 SSE 端点复用）
 
@@ -170,6 +183,7 @@ async def react_loop(
         messages: 会话消息（system + history + 当前问题，会追加工具结果）
         budget: 工具总调用次数上限（≥0）
         tools: 工具注册表，默认全局 registry
+        max_answer_len: 答案最大长度（0=不限制），超出截断并附加标记
 
     Yields 事件:
       {"type": "tool_call",   "name": str, "args": dict, "tool_count": int}
@@ -184,11 +198,14 @@ async def react_loop(
     tools = tools or registry
     client = LLMFactory.get_client()
     budget = int(budget or 0)
+    max_answer_len = int(max_answer_len or 0)
     tool_count = 0
 
     # 预算=0：不调用工具，LLM 直接回答（验收 §1.2「预算=0：直接生成」）
     if budget <= 0:
         answer = await client.chat(messages)
+        if max_answer_len and len(answer) > max_answer_len:
+            answer = answer[:max_answer_len] + "\n\n[答案过长，已截断]"
         yield {"type": "done", "answer": answer, "tool_count": 0}
         return
 
@@ -200,6 +217,8 @@ async def react_loop(
         # 无 tool_call：LLM 认为信息足够，直接输出答案
         if not tool_calls:
             if content:
+                if max_answer_len and len(content) > max_answer_len:
+                    content = content[:max_answer_len] + "\n\n[答案过长，已截断]"
                 yield {"type": "token", "content": content}
             yield {"type": "done", "answer": content, "tool_count": tool_count}
             return
@@ -243,7 +262,10 @@ async def react_loop(
                    budget, len(ctx.docs))
     answer = await reflector.generate_answer(
         ctx.query, ctx.docs, history=ctx.history, memory=ctx.memory,
+        scratchpad=ctx.scratchpad,
     )
+    if max_answer_len and len(answer) > max_answer_len:
+        answer = answer[:max_answer_len] + "\n\n[答案过长，已截断]"
     if answer:
         yield {"type": "token", "content": answer}
     yield {"type": "done", "answer": answer, "tool_count": tool_count}

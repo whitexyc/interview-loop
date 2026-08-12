@@ -8,6 +8,7 @@ vi.mock('../services/ragService', () => ({
   chat: vi.fn(),
   search: vi.fn(),
   agentStream: vi.fn(),
+  submitFeedback: vi.fn(),
 }));
 
 describe('ChatPage', () => {
@@ -50,6 +51,13 @@ describe('ChatPage', () => {
 
     // User message should appear
     expect(screen.getByText('你好')).toBeInTheDocument();
+  });
+
+  it('should limit input to 2000 characters (module-048 WP3)', () => {
+    render(<ChatPage />);
+
+    const input = screen.getByPlaceholderText('输入您的问题...');
+    expect(input).toHaveAttribute('maxlength', '2000');
   });
 
   it('should render pipeline panel and upload section', () => {

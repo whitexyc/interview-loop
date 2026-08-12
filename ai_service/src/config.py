@@ -2,6 +2,8 @@
 应用配置管理
 使用 pydantic-settings 从环境变量读取配置
 """
+from typing import Literal
+
 from pydantic_settings import BaseSettings
 
 
@@ -57,6 +59,29 @@ class Settings(BaseSettings):
     # 混合检索
     hybrid_search_alpha: float = 0.3  # BM25 权重，向量权重为 1-alpha
 
+    # 检索融合模式（module-053 三通道融合验证，module-055 切默认 rrf）：
+    #   hybrid   —— 两通道 min-max 加权（FTS+向量），module-055 起为回退开关
+    #   rrf      —— 三通道（FTS/向量/图谱）Reciprocal Rank Fusion，
+    #                score(d) = Σ 1/(k + rank_i(d))，k=60 业界默认；
+    #                图谱通道仅 round 0 语义参与融合（引擎层 round 1/2 单路混合）
+    #   weighted —— 三通道 min-max 归一化 + 权重加权（retrieval_fusion_weights）
+    # module-053 实测（golden 112 题同口径，见 specs/module-053-rrf-fusion/
+    # changelog.md 对比表）：rrf Hit@5=0.9905 > 基线 hybrid 两通道 0.9714
+    # （+0.0191，0 回退）> 加权两组 = 基线 —— **rrf 放行**。
+    # module-054 清障：向量化降级方案 A/B（rrf 向量路失败 = FTS+图谱照常、
+    # 引擎补图兜底）+ 引擎 rrf 真实 HTTP E2E 通过（chat/stream 全链路）。
+    # module-055 决策：默认 hybrid→rrf（前置清障全部完成；存量 2 项降级
+    # 用例在 module-054 方案 A/B 落地后已消解，零断言改动）。回退方式：
+    # PW_RETRIEVAL_FUSION_MODE=hybrid 一键回退（保留开关）。
+    # minor 修复（module-053）：Literal 枚举校验——非法字符串（拼写错误）
+    # 启动即抛 ValidationError（fail-fast），防静默落入 rrf 分支（rrf 每次
+    # 知识库查询 +1 次 LLM 实体提取调用，静默走错分支代价高）。
+    retrieval_fusion_mode: Literal["hybrid", "rrf", "weighted"] = "rrf"
+    # 加权融合权重（逗号分隔：FTS,向量,图谱；仅 retrieval_fusion_mode=weighted 生效）
+    retrieval_fusion_weights: str = "0.3,0.6,0.1"
+    # RRF 常数 k（业界默认 60；本模块不做 k 扫描，扫 k 留后续）
+    rrf_constant_k: int = 60
+
     # Agent 工具化（module-028）：ReAct 循环工具总调用次数预算（防空转烧钱）
     max_agent_tools: int = 4
 
@@ -71,9 +96,56 @@ class Settings(BaseSettings):
     memory_recall_min_score: float = 0.4
 
     # 短期记忆 + 会话记忆（module-034）
-    memory_short_ttl_days: int = 7              # 短期记忆 TTL（天）：recall_short 召回时按 created_at 过滤过期
+    memory_short_ttl_days: int = 7              # 短期记忆 TTL（天）：module-046 起由衰减+硬上限替代，保留兼容
     memory_session_max_messages: int = 50       # 每 identity 会话持久化消息上限（超限滚动删除最旧）
     memory_session_history_limit: int = 20      # 会话恢复注入生成的最近消息数
+
+    # 短期记忆进化（module-046 / ADR-0007 问题 2）：强化/衰减/升级可配
+    memory_short_half_life: float = 3.0         # 平滑衰减半衰期（天）：decay = 0.5**(age_days/half_life)
+    memory_short_max_days: int = 30             # 硬上限（天）：last_mentioned_at/created_at 超上限不参与召回
+    memory_mention_boost_alpha: float = 0.2     # 提及加权系数：最终分 = 语义分×decay×(1+α×mention_count)
+    memory_promote_mentions: int = 2            # 短期→长期升级：mention_count ≥ 该值
+    memory_promote_window_days: int = 7         # 升级窗口（天）：最近提及在窗口内才升级
+
+    # 意图分类（module-043 L4）：true 时 router 尝试加载 bge-m3+逻辑回归分类器
+    #（模型缺失/加载失败自动回退 LLM 分类，零影响）。
+    # module-056 达标启用：人造标注集 337 条重训 + golden_intent 100 条真实
+    # 评测（LLM 1.0000 / 分类器 1.0000，eval_runs id=23/24）→ 默认开；
+    # 回退开关：PW_INTENT_CLASSIFIER_ENABLED=false 保持 LLM 路径
+    intent_classifier_enabled: bool = True
+
+    # 反思充分性自洽性检查（module-044 层 2）：true 时 check_sufficiency 对
+    # 同一 query 用两个不同温度各判一次，两次不一致 → 保守判充分（防漏检）；
+    # 默认 false = 零额外 LLM 调用（成本翻倍，按需开启）
+    sufficiency_self_check_enabled: bool = False
+
+    # 反思充分性硬闸门阈值（module-048，module-047 实测数据结论）：
+    # check_sufficiency 层 1 top-1 abs_cosine < 该值 → 直接判不充分（零 LLM）。
+    # module-047 阈值扫描：0.4 漏判 60% 不充分；0.55 切在分布间隙上缘
+    #（充分 min 0.490 / 不充分 max 0.550），F1=0.98 最优且误杀与 0.5 相同
+    #（1/50）。不得改回 0.4（红线）。
+    sufficiency_gate_threshold: float = 0.55
+
+    # 分诊式 Query 改写（module-049 / ADR-0009）：
+    # 静态分诊（FTS 术语命中 → 精确 query 直接检索，零成本不走改写）+ 模糊
+    # query 走 LLM 改写 + 保真预检（改写 vs 原 query 余弦 < 阈值 → 回退原话，
+    # 省一次检索）+ 并行检索择优（改写检索 top-1 绝对余弦 > 原检索 → 用改写
+    # 结果，否则回退原结果）。改写链路任何一环失败 → 回退原 query（零回归）。
+    # 默认关闭（与 intent_classifier_enabled 同款 opt-in 模式，保证零回归）；
+    # 开启方式：PW_QUERY_REWRITE_ENABLED=true
+    query_rewrite_enabled: bool = False
+    rewrite_fidelity_threshold: float = 0.6  # 保真预检阈值：改写与原 query 余弦低于该值 → 回退原话
+
+    # 答案验证裁判（module-051 / ADR-0010 P0-②）：
+    # verify_answer 的 verdict 判定模型——"hhem"（默认）：LLM 拆句 + HHEM-2.1-Open
+    # 批量判分（module-050 实测中文 Accuracy 0.77 显著胜出 MiniCheck 0.51，选型已定）；
+    # "llm"：完全不加载 HHEM，直走旧逻辑（零回归开关）。HHEM 不可用（缺失/加载失败/
+    # 推理异常）自动降级 LLM 判分，降级链保证默认 "hhem" 零风险。
+    verify_judge_model: str = "hhem"
+    # HHEM 三态映射阈值（经验值，标注集可校准）：每 claim 对每文档打分取 max →
+    # max_score ≥ high → supported；low ≤ max_score < high → inferred；< low → unsupported
+    verify_hhem_threshold_high: float = 0.7
+    verify_hhem_threshold_low: float = 0.3
 
     model_config = {"env_prefix": "PW_", "env_file": ".env"}
 

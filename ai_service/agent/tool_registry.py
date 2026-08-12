@@ -8,22 +8,24 @@ Agent 工具注册表 — ToolRegistry（module-028）
 
 设计要点：
   1. 注册表无状态（只存工具定义），执行时通过 AgentTool.run(args, ctx)
-     注入会话上下文 ctx（query/client_ip/history/累积 docs/记忆），
+     注入会话上下文 ctx（query/identity/history/累积 docs/记忆），
      故全局单例 registry 可被多会话并发复用，无共享可变状态。
   2. 工具失败由 AgentTool.run 统一捕获返回空串（降级哲学），
      LLM 自行判断是继续检索还是如实告知用户。
-  3. 内置 7 个工具：
+  3. 内置 10 个工具：
      search_knowledge / search_fts / search_vector / search_graph /
-     extract_entities / recall_memory / generate_answer
+     extract_entities / recall_memory / generate_answer / verify_answer /
+     re_search / note_to_self
 """
+import asyncio
 import json
 import logging
 from typing import Callable, Optional
 
 from rag.engine import rag_engine
-from rag.retriever import hybrid_retriever
-from rag.graph_store import graph_store
-from rag.graph_extractor import graph_extractor
+from rag.retrieval.retriever import hybrid_retriever
+from rag.graph.graph_store import graph_store
+from rag.graph.graph_extractor import graph_extractor
 from agent.reflector import reflector
 
 logger = logging.getLogger(__name__)
@@ -57,7 +59,10 @@ class AgentTool:
             工具结果文本；执行失败返回 ""
         """
         try:
-            return await self.func(ctx, args)
+            return await asyncio.wait_for(self.func(ctx, args), timeout=15)
+        except asyncio.TimeoutError:
+            logger.warning("工具 %s 超时 (15s)", self.name)
+            return f"(工具 {self.name} 执行超时)"
         except Exception as e:
             logger.warning("工具 %s 执行失败，返回空: %s", self.name, e)
             return ""
@@ -183,10 +188,10 @@ async def _extract_entities(ctx, args: dict) -> str:
 
 
 async def _recall_memory(ctx, args: dict) -> str:
-    """召回该用户的跨会话长期记忆（按 IP 隔离；无记忆返回提示）"""
+    """召回该用户的跨会话长期记忆（按身份隔离；无记忆返回提示）"""
     query = args.get("query") or ctx.query
     top_k = int(args.get("top_k", 3))
-    text = await rag_engine._recall_memory(query, ctx.client_ip, top_k=top_k)
+    text = await rag_engine._recall_memory(query, ctx.identity, top_k=top_k)
     if text:
         ctx.memory = text  # 供 generate_answer 工具拼入生成 prompt
     return text or "（无相关历史记忆）"
@@ -199,7 +204,67 @@ async def _generate_answer(ctx, args: dict) -> str:
     query = args.get("query") or ctx.query
     return await reflector.generate_answer(
         query, ctx.docs, history=ctx.history, memory=ctx.memory,
+        scratchpad=ctx.scratchpad,
     )
+
+
+async def _verify_answer(ctx, args: dict) -> str:
+    """逐句验证已生成答案是否被检索文档支持，标注可信度（module-039）"""
+    answer = args.get("answer")
+    if not answer:
+        return "（未提供答案文本，无法验证）"
+    if not ctx.docs:
+        return "（无检索文档，无法验证答案可信度；请先检索）"
+    result = await reflector.verify_answer(answer, ctx.docs)
+    if not result.get("claims"):
+        return "（验证失败，无法判定答案可信度）"
+    lines = []
+    for c in result["claims"]:
+        verdict_icon = {"supported": "✓", "inferred": "~", "unsupported": "✗"}.get(
+            c.get("verdict", ""), "?"
+        )
+        lines.append(f"[{verdict_icon}] {c.get('verdict')}: {c.get('claim')} (证据: {c.get('evidence')})")
+    lines.append(f"\n整体置信度: {result.get('overall_confidence', 0):.0%}")
+    lines.append(f"supported={result.get('supported', 0)} inferred={result.get('inferred', 0)} unsupported={result.get('unsupported', 0)}")
+    return "\n".join(lines)
+
+
+async def _re_search(ctx, args: dict) -> str:
+    """检索不足 → 改写 query 重检 → 新结果累积到 ctx.docs（module-040）
+
+    流程：
+      1. check_sufficiency 判断当前 ctx.docs 是否充分
+      2. 不充分 → 用 rewritten_query 重新混合检索
+      3. 新结果按 id 去重累积到 ctx.docs
+
+    降级：
+      - 无 ctx.docs → 提示先检索
+      - check_sufficiency 返回充分 → 提示无需重检
+      - 改写后仍无结果 → 提示知识库无相关内容
+      - check_sufficiency 自身失败（LLM 异常）→ reflector 内部默认充分
+    """
+    if not ctx.docs:
+        return "（尚未检索到文档，请先调用 search_knowledge 等检索工具）"
+    query = args.get("query") or ctx.query
+    result = await reflector.check_sufficiency(query, ctx.docs)
+    if result.get("sufficient"):
+        return "（当前检索结果已充分，无需重检）"
+    rewritten = result.get("rewritten_query", query)
+    docs = await hybrid_retriever.retrieve(rewritten, top_k=5, mode="hybrid")
+    ctx.add_docs(docs)
+    if not docs:
+        return f"改写查询 '{rewritten}' 后仍无结果，知识库可能无相关内容"
+    return f"改写查询 '{rewritten}' → 检索到 {len(docs)} 篇文档：\n" + _format_docs(docs)
+
+
+async def _note_to_self(ctx, args: dict) -> str:
+    """记录中间发现或推理结论到工作笔记（module-041）"""
+    note = args.get("note", "")
+    if not note or not note.strip():
+        return "（未提供笔记内容）"
+    note = note.strip()[:500]  # 截断过长笔记
+    ctx.add_note(note)
+    return f"已记录笔记 ({len(ctx.scratchpad)}): {note[:200]}"
 
 
 # ─── 内置工具注册 ───
@@ -234,9 +299,33 @@ _ANSWER_SCHEMA = {
     "required": ["query"],
 }
 
+_VERIFY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "query": {"type": "string", "description": "原始用户问题"},
+        "answer": {"type": "string", "description": "待验证的答案文本（通常由 generate_answer 产出）"},
+    },
+    "required": ["answer"],
+}
+
+_RE_SEARCH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "query": {"type": "string", "description": "原始用户问题，缺省用 ctx.query"},
+    },
+}
+
+_NOTE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "note": {"type": "string", "description": "要记录的笔记内容"},
+    },
+    "required": ["note"],
+}
+
 
 def register_builtin_tools(reg: Optional[ToolRegistry] = None) -> ToolRegistry:
-    """注册 7 个内置工具到注册表（默认全局 registry）
+    """注册 10 个内置工具到注册表（默认全局 registry）
 
     Args:
         reg: 目标注册表（测试可传入独立实例），None 用全局 registry
@@ -279,6 +368,21 @@ def register_builtin_tools(reg: Optional[ToolRegistry] = None) -> ToolRegistry:
         "generate_answer",
         "基于本次已检索到的全部文档生成带引用标注的最终答案。",
         _ANSWER_SCHEMA, _generate_answer,
+    )
+    reg.register(
+        "verify_answer",
+        "逐句验证已生成的答案是否被检索文档支持，标注每句的可信度（supported/inferred/unsupported），返回置信度。",
+        _VERIFY_SCHEMA, _verify_answer,
+    )
+    reg.register(
+        "re_search",
+        "检索不足时自动改写查询重检：检查已有文档是否充分，不充分则用改写后的查询重新混合检索，新结果累积到已有文档。",
+        _RE_SEARCH_SCHEMA, _re_search,
+    )
+    reg.register(
+        "note_to_self",
+        "记录中间发现或推理结论到工作笔记（草稿纸），后续轮次可参考。",
+        _NOTE_SCHEMA, _note_to_self,
     )
     return reg
 

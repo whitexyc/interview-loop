@@ -40,16 +40,20 @@ import {
   saveMessages,
 } from '../services/conversationService';
 
-/** 空状态提示词按钮 */
+/** 空状态提示词按钮
+ * - 技术类：知识库可真实回答（golden 集验证命中）
+ * - 个人类：仅留 2 个展示履历引导（库里无专门文档，走 LLM 兜底）
+ */
 const promptSuggestions = [
-  '我的学习情况',
-  '我的比赛经历',
-  '我在校表现',
-  '我最近在学什么',
   '什么是G1 GC',
   'Java线程池原理',
   '什么是MoE',
   'Kafka为什么快',
+  'Redis持久化RDB和AOF有什么区别',
+  'AQS的工作原理是什么',
+  'KV Cache是什么',
+  '张三的主要技术方向是什么',
+  '张三参加过哪些比赛',
 ];
 
 export default function ChatPage() {
@@ -70,29 +74,6 @@ export default function ChatPage() {
   // ── 会话管理状态（M9） ──
   const [conversations, setConversations] = useState<ConversationInfo[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<number | null>(null);
-
-  // ── 反馈状态（M10） ──
-  const [feedbackMap, setFeedbackMap] = useState<Record<string, 'up' | 'down' | null>>({});
-
-  /** 挂载时从 localStorage 加载反馈数据 */
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem('rag_feedback');
-      if (saved) setFeedbackMap(JSON.parse(saved));
-    } catch { /* 数据损坏时静默忽略 */ }
-  }, []);
-
-  /** 处理反馈（toggle 模式：同按钮再点取消，异按钮切换） */
-  const handleFeedback = useCallback((messageIndex: number, rating: 'up' | 'down') => {
-    const key = `${activeConversationId}:${messageIndex}`;
-    setFeedbackMap((prev) => {
-      const current = prev[key];
-      const newRating = current === rating ? null : rating;
-      const next = { ...prev, [key]: newRating };
-      try { localStorage.setItem('rag_feedback', JSON.stringify(next)); } catch { /* 静默降级 */ }
-      return next;
-    });
-  }, [activeConversationId]);
 
   // ── ref ──
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -245,7 +226,7 @@ export default function ChatPage() {
         const updated = [...prev];
         const lastIdx = updated.length - 1;
         if (lastIdx >= 0 && updated[lastIdx].role === 'assistant') {
-          updated[lastIdx] = { ...updated[lastIdx], sources: data.sources };
+          updated[lastIdx] = { ...updated[lastIdx], sources: data.sources, verifiedClaims: data.verified_claims };
         }
         return updated;
       });
@@ -321,7 +302,7 @@ export default function ChatPage() {
         const updated = [...prev];
         const lastIdx = updated.length - 1;
         if (lastIdx >= 0 && updated[lastIdx].role === 'assistant') {
-          updated[lastIdx] = { ...updated[lastIdx], sources: data.sources };
+          updated[lastIdx] = { ...updated[lastIdx], sources: data.sources, verifiedClaims: data.verified_claims };
         }
         return updated;
       });
@@ -540,18 +521,16 @@ export default function ChatPage() {
           {messages.map((msg, i) => {
             const isLastAssistant = msg.role === 'assistant' && i === messages.length - 1;
             const isStreaming = loading && isLastAssistant && msg.content.length > 0;
-            const feedbackKey = activeConversationId ? `${activeConversationId}:${i}` : '';
             return (
               <ChatMessage
                 key={i}
                 role={msg.role}
                 content={msg.content}
                 sources={msg.sources}
+                verifiedClaims={msg.verifiedClaims}
                 onCitationClick={handleCitationClick}
-                messageIndex={i}
+                messageId={msg.id}
                 isStreaming={isStreaming}
-                feedbackRating={feedbackMap[feedbackKey] ?? null}
-                onFeedback={handleFeedback}
               />
             );
           })}
@@ -645,6 +624,7 @@ export default function ChatPage() {
             <Input.TextArea
               value={input}
               onChange={(e) => setInput(e.target.value)}
+              maxLength={2000}
               onPressEnter={(e) => {
                 if (!e.shiftKey) {
                   e.preventDefault();

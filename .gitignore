@@ -39,8 +39,7 @@ prompt.md
 # Project docs / specs / shared memory (not source code)
 docs/
 specs/
-memory/
+/memory/
 
 # Models (download separately, not source code)
 ai_service/models/
-ai_service/test_m17.py
