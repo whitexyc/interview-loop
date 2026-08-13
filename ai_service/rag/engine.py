@@ -21,6 +21,7 @@ import asyncio
 import hashlib
 import logging
 import re
+import time
 
 from sqlalchemy import select
 
@@ -28,6 +29,7 @@ from src.config import settings
 from src.database import async_session_factory
 from llm.client import LLMFactory
 from src.cache import cache
+from src import observability
 from rag.schemas import SearchRequest, SearchResponse, ChatRequest, ChatResponse, ChatSteps
 from rag.models import Document
 from rag.retrieval.embeddings import embedding_service
@@ -229,7 +231,11 @@ class RAGEngine:
 
         try:
             # ========== 1. 意图识别 ==========
+            # module-058（WP-C）：意图路由/分诊改写/检索/重排/反思/生成/幻觉
+            # 检测各阶段计时落观测上下文（request_logs 可观测）
+            _t0 = time.perf_counter()
             intent_result = await router_agent.classify(request.query)
+            observability.timing("intent", time.perf_counter() - _t0)
             intent = intent_result.get("intent", "knowledge")
             intent_labels = {"knowledge": "知识库", "casual_chat": "闲聊", "realtime": "实时数据"}
 
@@ -266,12 +272,14 @@ class RAGEngine:
             # 均保留，本增强只把"改写时机"提前。
             rewrite_round0: list[dict] | None = None
             if settings.query_rewrite_enabled:
+                _rq_t0 = time.perf_counter()
                 current_query, rewrite_round0, rewrite_info = await query_rewrite.prepare(
                     request.query,
                     lambda q: asyncio.wait_for(
                         hybrid_retriever.retrieve(q, top_k=20), timeout=15,
                     ),
                 )
+                observability.timing("triage_rewrite", time.perf_counter() - _rq_t0)
                 if rewrite_info.get("mode") != "precise":
                     logger.info("Query 改写: mode=%s, used_rewrite=%s, query=%s",
                                 rewrite_info.get("mode"),
@@ -286,6 +294,7 @@ class RAGEngine:
             suspected_misclassify = False
             top1_abs = 0.0
 
+            _loop_t0 = time.perf_counter()
             for round_num in range(3):
                 if round_num == 0 and rewrite_round0 is not None:
                     # 分诊式改写已做并行择优（module-049），round 0 直接用
@@ -297,7 +306,9 @@ class RAGEngine:
                         hybrid_retriever.retrieve(current_query, top_k=20),
                         timeout=15,
                     )
+                _rr_t0 = time.perf_counter()
                 docs = await reranker.rerank(current_query, docs, top_k=5)
+                observability.timing("rerank", time.perf_counter() - _rr_t0)
                 if round_num == 0:
                     suspected_misclassify, top1_abs = self._check_suspected_misclassify(docs)
                     if suspected_misclassify:
@@ -312,10 +323,12 @@ class RAGEngine:
                         seen_ids.add(doc_id)
 
                 if round_num < 2:
+                    _cf_t0 = time.perf_counter()
                     check = await asyncio.wait_for(
                         reflector.check_sufficiency(current_query, docs),
                         timeout=10,
                     )
+                    observability.timing("reflection", time.perf_counter() - _cf_t0)
                     if check.get("sufficient", True):
                         break
                     rewritten = check.get("rewritten_query", "")
@@ -324,6 +337,7 @@ class RAGEngine:
                     else:
                         break
 
+            observability.timing("retrieve", time.perf_counter() - _loop_t0)
             docs = all_docs
 
             # 父块映射：子块命中 → 父块返回（完整 section 语义）
@@ -345,11 +359,15 @@ class RAGEngine:
             # module-034：会话恢复优先持久化（刷新/换设备不丢）；无持久化会话
             # 时回退当前请求 history（零回归）
             effective_history = await self._resolve_session_history(identity, request.history)
+            _gen_t0 = time.perf_counter()
             answer = await reflector.generate_answer(
                 request.query, docs, history=effective_history, memory=memory_text,
             )
+            observability.timing("generate", time.perf_counter() - _gen_t0)
             # module-039：证据链验证——逐句检查答案是否被检索文档支持
+            _vf_t0 = time.perf_counter()
             verified = await reflector.verify_answer(answer, docs)
+            observability.timing("verify", time.perf_counter() - _vf_t0)
             # module-033：knowledge 路径生成答案后异步触发长期记忆自动写入
             #（fire-and-forget，不阻塞响应；casual_chat/realtime 已在分支提前返回）
             self._schedule_persist(request, answer, identity)
@@ -682,11 +700,14 @@ class RAGEngine:
 
         # ── Redis 缓存检查 ──
         # key 纳入 top_k/min_score：不同参数生成不同 key，避免错误复用缓存
+        # module-058（WP-C）：缓存命中/未命中计数（request_logs 可观测）
         cache_key = _retrieve_cache_key(query, top_k, min_score)
         cached = await cache.get(cache_key)
         if cached is not None:
+            observability.record_cache(hit=True)
             logger.info("检索缓存命中: key=%s, docs=%d", cache_key, len(cached))
             return cached
+        observability.record_cache(hit=False)
 
         # ── 整链路预算（module-024） ──
         # deadline 在 HyDE/循环前设定：HyDE 生成、实体提取、多轮检索全部
@@ -719,7 +740,9 @@ class RAGEngine:
             current_query = query
 
         # HyDE 查询扩展：首轮用假设回答检索（语义更接近文档），后续轮次用反射改写查询
+        _hy_t0 = time.perf_counter()
         hyde_query = await self._hyde_expand(current_query)
+        observability.timing("hyde", time.perf_counter() - _hy_t0)
 
         for round_num in range(3):  # 最多 3 轮
             # 超预算检查：到点不再发起新一轮检索，用已收集 docs 进入生成
@@ -822,10 +845,12 @@ class RAGEngine:
             if round_num < 2:
                 try:
                     # 反思检查始终使用原始 query（非 HyDE 查询）
+                    _cf_t0 = time.perf_counter()
                     check = await asyncio.wait_for(
                         reflector.check_sufficiency(query, docs),
                         timeout=10,
                     )
+                    observability.timing("reflection", time.perf_counter() - _cf_t0)
                     if check.get("sufficient", True):
                         break  # 充分则提前结束
                     rewritten = check.get("rewritten_query", current_query)

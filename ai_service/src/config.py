@@ -85,6 +85,19 @@ class Settings(BaseSettings):
     # Agent 工具化（module-028）：ReAct 循环工具总调用次数预算（防空转烧钱）
     max_agent_tools: int = 4
 
+    # 工具阶段切分（module-058 / ADR-0012 方案 A，原 module-059 并入）：
+    # 按 ctx.phase 状态机只暴露当前阶段工具（检索组 7 / 生成组 4，re_search
+    # 双组）——省 schema token + 结构性防误调（检索阶段调不到 generate/
+    # verify，不再靠工具内部字符串防御）。默认 true；false 回退全量 10 个
+    # 零回归（逃生口）。测试环境由 conftest autouse fixture 钉住 false。
+    tool_phase_split: bool = True
+
+    # 请求可观测性（module-058 WP-C）：trace_id + 阶段计时 + token 用量 +
+    # 缓存命中 → request_logs 落库（init_db 自愈幂等 DDL）。默认 true；
+    # false 时零埋点零落库（中间件不初始化观测上下文、helper 直接返回）。
+    # 测试环境由 conftest autouse fixture 钉住 false（测试不污染落库）。
+    request_logs_enabled: bool = True
+
     # 长期记忆（module-033/035）：提取 / 去重 / 动态K 阈值（参考 llm-push/19-Agent记忆管理）
     memory_importance_threshold: float = 0.6    # 提取事实 importance < 0.6 丢弃
     # module-035 校准：真实 bge-m3 同义改写 cosine≈0.88，0.95 太严导致漏去重 → 下调 0.85
@@ -106,6 +119,14 @@ class Settings(BaseSettings):
     memory_mention_boost_alpha: float = 0.2     # 提及加权系数：最终分 = 语义分×decay×(1+α×mention_count)
     memory_promote_mentions: int = 2            # 短期→长期升级：mention_count ≥ 该值
     memory_promote_window_days: int = 7         # 升级窗口（天）：最近提及在窗口内才升级
+
+    # 记忆冲突消解（module-061 / ADR-0007 P1）：true 时 _merge_duplicate 去重
+    # 命中后走 mDeBERTa NLI 判矛盾（contradiction → 旧父块标 superseded=true +
+    # 新内容按正常新增入库，替代"拼接共存"）；false 完全旧行为（追加拼接，零回归）。
+    # 默认 false = 不预设成功：评测（eval/memory_conflict_dataset.py 矛盾 P/R/F1）
+    # 达标（contradiction Recall≥0.8 且 Precision≥0.8）后才切 true，对齐
+    # ADR-0003 L4 / module-052 放行模式。NLI 不可用/超时 → 返回 None → 旧行为。
+    memory_conflict_enabled: bool = False
 
     # 意图分类（module-043 L4）：true 时 router 尝试加载 bge-m3+逻辑回归分类器
     #（模型缺失/加载失败自动回退 LLM 分类，零影响）。
@@ -146,6 +167,14 @@ class Settings(BaseSettings):
     # max_score ≥ high → supported；low ≤ max_score < high → inferred；< low → unsupported
     verify_hhem_threshold_high: float = 0.7
     verify_hhem_threshold_low: float = 0.3
+
+    # verify 异步化（module-060）：true（默认）——chat_stream 流式生成完不再
+    # 同步 await verify（15-50s 阻塞主链路尾部），改 submit 后台任务 + done 事件
+    # 带 verify_task_id + 前端轮询 GET /ai/rag/chat/verify/{task_id} 补结果，
+    # 结果落 verify_results 表持久化（done 不因重启丢失）。false 回退现状同步
+    # 路径（verified→done 事件逐字一致，逃生口）。测试环境由 conftest autouse
+    # fixture 钉住 false（存量 chat_stream 测试零漂移）。
+    verify_async_enabled: bool = True
 
     model_config = {"env_prefix": "PW_", "env_file": ".env"}
 

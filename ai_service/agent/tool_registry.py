@@ -39,14 +39,20 @@ class AgentTool:
         description: 工具用途描述（指导 LLM 何时使用）
         args_schema: JSON Schema（OpenAI function parameters 格式）
         func: 执行函数，签名 async def func(ctx, args) -> str
+        group: 所属执行阶段集合（module-058 / ADR-0012 方案 A）——
+            "retrieval" / "generation"，双组工具 ["retrieval","generation"]；
+            空集合 = 未分组，全阶段可见（向后兼容）
     """
 
     def __init__(self, name: str, description: str, args_schema: dict,
-                 func: Callable):
+                 func: Callable, group: Optional[list] = None):
         self.name = name
         self.description = description
         self.args_schema = args_schema
         self.func = func
+        # module-058：阶段归组（检索组 7 / 生成组 4，re_search 双组）。
+        # 只影响暴露逻辑（to_llm_schemas 过滤），工具本身行为一字不改。
+        self.group: set[str] = set(group) if group else set()
 
     async def run(self, args: dict, ctx) -> str:
         """执行工具；失败返回空结果，LLM 判断继续/放弃（module-028 降级哲学）
@@ -91,9 +97,15 @@ class ToolRegistry:
         self._tools: dict[str, AgentTool] = {}
 
     def register(self, name: str, description: str, args_schema: dict,
-                 func: Callable) -> "ToolRegistry":
-        """注册一个工具（同名覆盖，便于测试替换）"""
-        self._tools[name] = AgentTool(name, description, args_schema, func)
+                 func: Callable, group: Optional[list] = None) -> "ToolRegistry":
+        """注册一个工具（同名覆盖，便于测试替换）
+
+        module-058（ADR-0012 方案 A）：group 标注阶段归属（"retrieval" /
+        "generation"，双组传 ["retrieval","generation"]）；None = 未分组，
+        全阶段可见（向后兼容，测试自定义工具不受影响）。
+        """
+        self._tools[name] = AgentTool(name, description, args_schema, func,
+                                      group=group)
         return self
 
     def get(self, name: str) -> Optional[AgentTool]:
@@ -108,9 +120,18 @@ class ToolRegistry:
         """返回全部工具名"""
         return [t.name for t in self._tools.values()]
 
-    def to_llm_schemas(self) -> list[dict]:
-        """序列化为 OpenAI function calling 的 tool schema 列表"""
-        return [t.to_openai_schema() for t in self._tools.values()]
+    def to_llm_schemas(self, group: Optional[str] = None) -> list[dict]:
+        """序列化为 OpenAI function calling 的 tool schema 列表
+
+        module-058（ADR-0012 方案 A）阶段切分：
+        - group=None：返回全量（向后兼容，`test_agent_tools.py` len==10 不挂）
+        - group="retrieval"/"generation"：只返回该阶段可见工具（未分组工具
+          恒全阶段可见）——省 schema token + 结构性防误调
+        """
+        tools = self._tools.values()
+        if group is not None:
+            tools = [t for t in tools if not t.group or group in t.group]
+        return [t.to_openai_schema() for t in tools]
 
 
 # ─── 检索结果格式化 ───
@@ -327,6 +348,14 @@ _NOTE_SCHEMA = {
 def register_builtin_tools(reg: Optional[ToolRegistry] = None) -> ToolRegistry:
     """注册 10 个内置工具到注册表（默认全局 registry）
 
+    module-058（ADR-0012 方案 A）阶段归组（只动暴露逻辑，name/description/
+    args_schema 一字不改）：
+      - 检索组 7：search_knowledge / search_fts / search_vector /
+        search_graph / extract_entities / recall_memory / re_search
+      - 生成组 4：generate_answer / verify_answer / note_to_self / re_search
+        （re_search 双组：初次检索不足 + 生成后验证不充分两个时机都要用）
+    归组依据见 specs/adr/0012-tool-governance.md。
+
     Args:
         reg: 目标注册表（测试可传入独立实例），None 用全局 registry
 
@@ -337,52 +366,52 @@ def register_builtin_tools(reg: Optional[ToolRegistry] = None) -> ToolRegistry:
     reg.register(
         "search_knowledge",
         "混合检索：同时使用全文关键词与语义向量在知识库中检索相关文档，默认首选。",
-        _SEARCH_SCHEMA, _search_knowledge,
+        _SEARCH_SCHEMA, _search_knowledge, group=["retrieval"],
     )
     reg.register(
         "search_fts",
         "全文检索：按精确关键词匹配知识库文档（适合专有名词、代码、精确术语）。",
-        _SEARCH_SCHEMA, _search_fts,
+        _SEARCH_SCHEMA, _search_fts, group=["retrieval"],
     )
     reg.register(
         "search_vector",
         "向量检索：按语义相似度检索知识库文档（适合概念性、同义表述查询）。",
-        _SEARCH_SCHEMA, _search_vector,
+        _SEARCH_SCHEMA, _search_vector, group=["retrieval"],
     )
     reg.register(
         "search_graph",
         "知识图谱检索：从查询中提取实体，沿实体关系图遍历返回关联文档。",
-        _SEARCH_SCHEMA, _search_graph,
+        _SEARCH_SCHEMA, _search_graph, group=["retrieval"],
     )
     reg.register(
         "extract_entities",
         "从查询/文本中提取技术实体名称列表（返回 JSON）。",
-        _ENTITY_SCHEMA, _extract_entities,
+        _ENTITY_SCHEMA, _extract_entities, group=["retrieval"],
     )
     reg.register(
         "recall_memory",
         "召回该用户的跨会话长期记忆（历史问答沉淀，按用户隔离）。",
-        _MEMORY_SCHEMA, _recall_memory,
+        _MEMORY_SCHEMA, _recall_memory, group=["retrieval"],
     )
     reg.register(
         "generate_answer",
         "基于本次已检索到的全部文档生成带引用标注的最终答案。",
-        _ANSWER_SCHEMA, _generate_answer,
+        _ANSWER_SCHEMA, _generate_answer, group=["generation"],
     )
     reg.register(
         "verify_answer",
         "逐句验证已生成的答案是否被检索文档支持，标注每句的可信度（supported/inferred/unsupported），返回置信度。",
-        _VERIFY_SCHEMA, _verify_answer,
+        _VERIFY_SCHEMA, _verify_answer, group=["generation"],
     )
     reg.register(
         "re_search",
         "检索不足时自动改写查询重检：检查已有文档是否充分，不充分则用改写后的查询重新混合检索，新结果累积到已有文档。",
-        _RE_SEARCH_SCHEMA, _re_search,
+        _RE_SEARCH_SCHEMA, _re_search, group=["retrieval", "generation"],
     )
     reg.register(
         "note_to_self",
         "记录中间发现或推理结论到工作笔记（草稿纸），后续轮次可参考。",
-        _NOTE_SCHEMA, _note_to_self,
+        _NOTE_SCHEMA, _note_to_self, group=["generation"],
     )
     return reg
 

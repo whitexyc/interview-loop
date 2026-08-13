@@ -65,6 +65,33 @@ export interface ChatResponse {
     inferred: number;
     unsupported: number;
   } | null;
+  /**
+   * 异步 verify 任务 ID（module-060：done 事件携带 verify_task_id → 前端凭此
+   * 轮询 GET /ai/rag/chat/verify/{task_id} 补验证结果；答案先交付、验证后到。
+   * 无 task_id（提交失败/开关关闭）→ 不轮询、不显示验证面板，fail-open）。
+   */
+  verifyTaskId?: string;
+}
+
+/**
+ * 验证任务轮询结果（module-060 verify 异步后置）
+ * 对应后端 GET /ai/rag/chat/verify/{task_id} 返回。
+ */
+export interface VerifyTaskResult {
+  /** 任务状态：pending（进行中）/ done（完成）/ failed（失败） */
+  status: 'pending' | 'done' | 'failed';
+  /** 逐句验证结果（status=done 时有） */
+  claims?: VerifiedClaim[];
+  /** 整体置信度（status=done 时有） */
+  overall_confidence?: number;
+  total_claims?: number;
+  supported?: number;
+  inferred?: number;
+  unsupported?: number;
+  /** verify_answer 任务耗时（毫秒，status=done 时有） */
+  verified_in_ms?: number;
+  /** 失败原因（status=failed 时有） */
+  error?: string;
 }
 
 /** RAG 中间步骤数据 — 对应后端 ChatSteps 模型 */

@@ -29,6 +29,8 @@ export interface MessageDTO {
     inferred: number;
     unsupported: number;
   } | null;
+  /** 异步 verify 进行中（module-060：答案先交付、验证后到，轮询 pending 期间为 true） */
+  verifying?: boolean;
   sortOrder?: number;
   createdAt?: string;
 }

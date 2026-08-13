@@ -39,8 +39,68 @@ from langchain_anthropic import ChatAnthropic
 from langchain_openai import ChatOpenAI
 
 from src.config import settings
+from src import observability
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_usage(response) -> Optional[tuple]:
+    """从 LLM 响应提取 token usage（兼容各家格式），无 usage 返回 None
+
+    支持的形态：
+      - OpenAI 兼容：response.usage.prompt_tokens / completion_tokens
+        （langchain ChatOpenAI 的 response_metadata["token_usage"]）
+      - Anthropic：response.usage.input_tokens / output_tokens
+
+    module-058（WP-C）：token 用量采集（fallback 链各供应商），无 usage 记
+    跳过不中断（由调用方 _record_usage 处理 None）。
+
+    Args:
+        response: 供应商原始响应（对象或 dict）
+
+    Returns:
+        (prompt_tokens, completion_tokens) 或 None
+    """
+    try:
+        prompt = completion = None
+        if response is None:
+            return None
+        # OpenAI SDK ChatCompletion：raw.usage.prompt_tokens
+        usage = getattr(response, "usage", None)
+        if usage is not None and not isinstance(usage, dict):
+            prompt = getattr(usage, "prompt_tokens", None)
+            completion = getattr(usage, "completion_tokens", None)
+        if prompt is None and completion is None:
+            # langchain：response_metadata["token_usage"]（dict）
+            meta = getattr(response, "response_metadata", None) or {}
+            if isinstance(meta, dict):
+                tu = meta.get("token_usage") or {}
+                if isinstance(tu, dict):
+                    prompt = tu.get("prompt_tokens", prompt)
+                    completion = tu.get("completion_tokens", completion)
+        if prompt is None and completion is None and usage is not None:
+            # Anthropic：usage.input_tokens / output_tokens
+            prompt = getattr(usage, "input_tokens", None)
+            completion = getattr(usage, "output_tokens", None)
+        prompt = int(prompt) if prompt is not None else None
+        completion = int(completion) if completion is not None else None
+        if prompt is None and completion is None:
+            return None
+        return (prompt, completion)
+    except (TypeError, ValueError):
+        # 异常值（如测试 MagicMock）静默跳过，不中断主链路
+        return None
+
+
+def _record_usage(label: str, response) -> None:
+    """采集本次调用的 token usage 并累积到请求上下文（无 usage 静默跳过）
+
+    module-058（WP-C）：各供应商响应返回处调用；流式（generate_stream）不
+    采集——SSE 逐 token 场景供应商通常不返回 usage（口径见 changelog）。
+    """
+    usage = _extract_usage(response)
+    if usage is not None:
+        observability.record_usage(label, usage[0], usage[1])
 
 
 class LLMException(Exception):
@@ -112,6 +172,23 @@ class LLMClient(ABC):
             return await self._chat_with_tools_openai(messages, tools)
         return await self._chat_with_tools_bind(messages, tools)
 
+    def _provider_label(self) -> str:
+        """当前客户端供应商标签（chat_with_tools token 用量按供应商归属）
+
+        module-058（WP-C）Review 修复（MAJOR-2）：基类 chat_with_tools 不
+        感知具体供应商，旧实现恒标 "llm" 导致工具调用轮次用量无法按供应商
+        归属（fallback 链切换混在同一桶）。按实现类映射：
+        DeepSeekClient → "deepseek"；_ModelScopeBaseClient 系 → self._label
+        （qwen/zhipu/modelscope）；ClaudeClient（bind_tools 路径）→ "claude"。
+        """
+        if isinstance(self, DeepSeekClient):
+            return "deepseek"
+        if isinstance(self, _ModelScopeBaseClient):
+            return self._label
+        if isinstance(self, ClaudeClient):
+            return "claude"
+        return "llm"
+
     async def _chat_with_tools_openai(
         self, messages: list[dict], tools: list[dict],
     ) -> dict:
@@ -133,6 +210,9 @@ class LLMClient(ABC):
         if not raw.choices or not raw.choices[0].message:
             raise LLMException("llm", "工具调用返回为空")
 
+        # module-058（WP-C）：token 用量采集（OpenAI SDK usage 字段），
+        # 标签按供应商（_provider_label：deepseek/qwen/zhipu/modelscope）
+        _record_usage(self._provider_label(), raw)
         msg = raw.choices[0].message
         content = msg.content or ""
         assistant: dict = {"role": "assistant", "content": content}
@@ -166,6 +246,9 @@ class LLMClient(ABC):
             logger.error("LLM 工具调用失败: %s", e)
             raise LLMException("llm", "工具调用服务暂不可用", cause=e)
 
+        # module-058（WP-C）：token 用量采集（langchain response_metadata /
+        # anthropic usage 字段），标签按供应商（_provider_label：claude）
+        _record_usage(self._provider_label(), response)
         content = response.content or ""
         if isinstance(content, list):  # Claude 多模态内容块，提取文本段
             content = "".join(
@@ -232,6 +315,7 @@ class ClaudeClient(LLMClient):
         try:
             # ainvoke 是 LangChain 的异步调用方法
             response = await self._llm.ainvoke(prompt)
+            _record_usage("claude", response)
             return response.content
         except Exception as e:
             logger.error("Claude 调用失败: %s", e)
@@ -240,6 +324,7 @@ class ClaudeClient(LLMClient):
     async def chat(self, messages: list[dict]) -> str:
         try:
             response = await self._llm.ainvoke(messages)
+            _record_usage("claude", response)
             return response.content
         except Exception as e:
             logger.error("Claude chat 失败: %s", e)
@@ -281,6 +366,7 @@ class DeepSeekClient(LLMClient):
         logger.info("DeepSeek generate, model=%s, prompt_len=%d", settings.deepseek_model, len(prompt))
         try:
             response = await self._llm.ainvoke(prompt)
+            _record_usage("deepseek", response)
             return response.content
         except Exception as e:
             logger.error("DeepSeek 调用失败: %s", e)
@@ -289,6 +375,7 @@ class DeepSeekClient(LLMClient):
     async def chat(self, messages: list[dict]) -> str:
         try:
             response = await self._llm.ainvoke(messages)
+            _record_usage("deepseek", response)
             return response.content
         except Exception as e:
             logger.error("DeepSeek chat 失败: %s", e)
@@ -329,6 +416,7 @@ class _ModelScopeBaseClient(LLMClient):
         logger.info("%s generate, model=%s", self._label, self._model)
         try:
             response = await self._llm.ainvoke(prompt)
+            _record_usage(self._label, response)
             return response.content
         except Exception as e:
             logger.error("%s 调用失败: %s", self._label, e)
@@ -337,6 +425,7 @@ class _ModelScopeBaseClient(LLMClient):
     async def chat(self, messages: list[dict]) -> str:
         try:
             response = await self._llm.ainvoke(messages)
+            _record_usage(self._label, response)
             return response.content
         except Exception as e:
             logger.error("%s chat 失败: %s", self._label, e)

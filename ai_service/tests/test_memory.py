@@ -15,7 +15,7 @@
 module-046（记忆进化）：
 - 写入侧提及刷新：save_short 去重命中（status="updated"）→ mention_count+1 + last_mentioned_at
 - 召回侧进化：平滑衰减（0.5^(age/half_life)）+ 提及加权（1+α×count）+ 硬上限（30 天）
-- 升级：mention_count≥2 且最近提及 7 天内 → 复制长期 + 删短期副本（幂等）
+- 升级：mention_count≥2 且最近提及 7 天内 → 复制长期 + 保留短期副本（后悔药，module-061 P0；幂等）
 - 召回命中刷新提及（fire-and-forget UPDATE）
 - 存量行无新字段（NULL/0）→ 按 created_at 衰减、count=0 加权（零迁移 fail-open）
 - engine"记住"检测：query 含"记住" → 直接沉淀长期层（跳过短期与 LLM 提取）
@@ -530,8 +530,11 @@ class TestPromptZeroRegression:
         from agent.reflector import _GENERATE_PROMPT
         query = "什么是G1 GC"
         docs_detail = "[1] 标题\n来源: 知识库\n内容: 内容"
-        # 旧模板（module-023 之前）结构：{history_section}\n用户问题，
-        # history 为空时「列表」与「用户问题」之间是 2 个空行
+        # 期望模板（module-058 WP-B 定稿）：{sections}\n检索到的文档\n用户问题。
+        # 区块顺序由"用户问题 → 检索到的文档"改为"检索到的文档 → 用户问题"
+        #（docs 前移为前缀缓存铺路）；sections 空时无多余内容（逐字节一致语义
+        # 保留——sections/格式/标签一字不改，仅调换区块顺序，验收 §1 允许的
+        # 顺序预期变更）
         old_prompt = (
             "你是一个知识库问答助手。基于检索到的文档回答用户问题。\n\n"
             "要求：\n"
@@ -540,10 +543,10 @@ class TestPromptZeroRegression:
             "3. 回答后附带引用文档列表\n"
             "\n"
             "\n"
-            f"用户问题: {query}\n"
-            "\n"
             "检索到的文档:\n"
             f"{docs_detail}\n"
+            "\n"
+            f"用户问题: {query}\n"
             "\n"
             "回答："
         )
@@ -1346,7 +1349,13 @@ class TestPromotion:
     def _delete_sqls(session):
         return [s for s in TestPromotion._sql(session) if s.lstrip().upper().startswith("DELETE")]
 
-    def test_promotes_to_long_and_deletes_short(self):
+    def test_promotes_to_long_and_keeps_short(self):
+        """module-061 P0：升级保留短期副本（后悔药，AC §2 按验收许可更新）
+
+        旧行为'复制后删短期副本'改为'不删除'：短期层 30 天硬上限 + 衰减 + 提及
+        刷新（module-046）自然淘汰被取代副本；长期新条目带 superseded=false +
+        updated_at=now（可审计可回溯）。
+        """
         parent, children = self._parent_with_children(count=2)  # count≥2 且最近提及 5 天前（窗口内）
         expanded = [{"content": "常提及主题", "score": 0.9, "title": "t", "created_at": ""}]
         script = [
@@ -1355,22 +1364,25 @@ class TestPromotion:
             ("scalar", None),        # 幂等检查：长期层无同 content_hash 父块
         ]
         session = self._recall(script, expanded, parent)
-        # 复制到长期层：新父块（无向量）+ 子块（含向量），source='memory:42:'
+        # 复制到长期层：新父块（无向量）+ 子块（含向量），source='memory:42:'，
+        # superseded=false + updated_at=now
         assert len(session.added) == 3
         new_parent = session.added[0]
         assert new_parent.source == "memory:42:"
         assert new_parent.parent_id is None and new_parent.embedding is None
+        assert new_parent.superseded is False
+        assert new_parent.updated_at is not None
         for c in session.added[1:]:
             assert c.source == "memory:42:"
             assert c.parent_id == new_parent.id
             assert c.embedding is not None  # 子块向量保留
-        # 删除短期副本（父块 + 子块）
-        deletes = self._delete_sqls(session)
-        assert len(deletes) == 1
-        assert "IN (1, 2, 3)" in deletes[0]
+            assert c.superseded is False
+        # module-061 P0：不删除短期副本（后悔药，无 DELETE 语句）
+        assert self._delete_sqls(session) == []
 
-    def test_promotion_idempotent_skips_duplicate_copy(self):
-        """已升级过（长期层存在同 content_hash 父块）→ 不重复复制，仅清理短期副本"""
+    def test_promotion_idempotent_keeps_short_copy(self):
+        """module-061 P0：已升级过（长期层存在同 content_hash 父块）→ 不重复复制；
+        短期副本仍保留（后悔药，AC §2 按验收许可更新）"""
         parent, children = self._parent_with_children(count=2)
         expanded = [{"content": "常提及主题", "score": 0.9, "title": "t", "created_at": ""}]
         script = [
@@ -1379,8 +1391,8 @@ class TestPromotion:
             ("scalar", 99),   # 幂等命中：长期层已有同 hash 父块
         ]
         session = self._recall(script, expanded, parent)
-        assert session.added == []                  # 不产生新长期副本
-        assert len(self._delete_sqls(session)) == 1  # 仍清理短期副本
+        assert session.added == []                    # 不重复复制（不产生垃圾行）
+        assert self._delete_sqls(session) == []       # 短期副本保留（不删除）
 
     def test_no_promotion_below_mention_threshold(self):
         parent, _ = self._parent_with_children(count=1)  # count=1 < 2 阈值
