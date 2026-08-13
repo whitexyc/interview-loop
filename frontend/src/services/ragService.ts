@@ -32,6 +32,7 @@ import type {
   ToolResultEvent,
   VerifiedClaim,
   FeedbackRequest,
+  VerifyTaskResult,
 } from '../types/rag';
 import type { ApiResponse } from '../types/api';
 
@@ -93,6 +94,7 @@ export async function chatStream(
   let answer = '';
   let sources: { id: number; title: string; content: string; source: string; ref_index: number }[] = [];
   let verifiedClaims: { claims: VerifiedClaim[]; overall_confidence: number; total_claims: number; supported: number; inferred: number; unsupported: number } | null = null;
+  let verifyTaskId: string | undefined;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -125,9 +127,12 @@ export async function chatStream(
             continue;
           }
 
-          // done event has sources
+          // done event has sources (module-060: + verify_task_id 异步验证任务)
           if (parsed.sources) {
             sources = parsed.sources;
+            if (typeof parsed.verify_task_id === 'string') {
+              verifyTaskId = parsed.verify_task_id;
+            }
             continue;
           }
 
@@ -160,7 +165,34 @@ export async function chatStream(
     sources,
     message: 'ok',
     verified_claims: verifiedClaims,
+    verifyTaskId,
   } as ChatResponse;
+}
+
+/**
+ * 轮询 verify 后台任务结果 — module-060 verify 异步后置
+ *
+ * 对应后端 GET /ai/rag/chat/verify/{task_id}（DB 为准）。答案先交付后，
+ * 前端凭 chatStream done 事件返回的 verifyTaskId 每 ~2s 轮询本函数：
+ *   pending → 继续轮询
+ *   done   → 更新消息 verifiedClaims（ChatMessage 可信度面板）
+ *   failed → 停止轮询不显示面板（fail-open，与现状空 claims 不显示一致）
+ * 404（任务不存在/重启丢任务/过期）→ 返回 failed 哨兵停止轮询（fail-open）。
+ *
+ * @param taskId - verify_task_id
+ * @returns VerifyTaskResult；404 归一化为 {status: 'failed', error: 'task not found'}
+ */
+export async function fetchVerifyResult(taskId: string): Promise<VerifyTaskResult> {
+  const resp = await fetch(`/ai/rag/chat/verify/${encodeURIComponent(taskId)}`, {
+    headers: { ...authHeader() },
+  });
+  if (resp.status === 404) {
+    return { status: 'failed', error: 'task not found' };
+  }
+  if (!resp.ok) {
+    throw new Error('验证结果查询失败');
+  }
+  return (await resp.json()) as VerifyTaskResult;
 }
 
 /**

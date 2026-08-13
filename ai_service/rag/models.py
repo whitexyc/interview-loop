@@ -3,7 +3,7 @@ RAG 知识库文档 ORM 模型
 """
 import logging
 
-from sqlalchemy import Boolean, Column, Integer, String, Text, DateTime, ForeignKey, func
+from sqlalchemy import Boolean, Column, Integer, String, Text, DateTime, Float, ForeignKey, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase
 from pgvector.sqlalchemy import Vector
@@ -121,3 +121,47 @@ class RequestLog(Base):
 
     def __repr__(self) -> str:
         return f"<RequestLog id={self.id} trace_id={self.trace_id!r}>"
+
+
+class VerifyResult(Base):
+    """证据链验证任务与结果 — verify 异步化（module-060）
+
+    verify（幻觉检测）后台异步执行后的任务状态与结果，前端凭 task_id 轮询
+    DB 为准（不读内存任务池）：pending（进行中）/ done（完成，含逐句 claims）/
+    failed（异常）。done 结果永久保留不清理（飞轮数据源——答案可信度/幻觉
+    调优数据积累）。建表走 init_db 自愈幂等 DDL（src/database.py
+    VERIFY_RESULTS_DDL），字段与 DDL 对齐。
+    """
+
+    __tablename__ = "verify_results"
+
+    id = Column(Integer, primary_key=True, autoincrement=True, comment="记录 ID")
+    task_id = Column(String(64), nullable=False, unique=True, index=True,
+                     comment="验证任务 ID（UUID hex，前端轮询 key）")
+    trace_id = Column(String(64), nullable=False, default="",
+                      comment="请求追踪 ID（关联 request_logs）")
+    identity = Column(String(256), nullable=False, default="",
+                      comment="请求身份（user_id 优先，client_ip 兜底）")
+    endpoint = Column(String(128), nullable=False, default="chat_stream",
+                      comment="端点（当前仅 chat_stream 提交）")
+    query = Column(Text, nullable=False, default="",
+                   comment="用户问题（飞轮数据源可关联）")
+    status = Column(String(16), nullable=False, default="pending",
+                    comment="任务状态：pending/done/failed")
+    claims = Column(JSONB, nullable=True, comment="验证结果（claims 数组 JSONB）")
+    overall_confidence = Column(Float, nullable=True,
+                                comment="整体置信度（0.0-1.0）")
+    supported = Column(Integer, nullable=False, default=0, comment="supported 计数")
+    inferred = Column(Integer, nullable=False, default=0, comment="inferred 计数")
+    unsupported = Column(Integer, nullable=False, default=0, comment="unsupported 计数")
+    error = Column(Text, nullable=True, comment="失败原因（status=failed 时）")
+    verified_in_ms = Column(Integer, nullable=True, comment="verify 任务耗时（毫秒）")
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), comment="创建时间"
+    )
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), comment="更新时间"
+    )
+
+    def __repr__(self) -> str:
+        return f"<VerifyResult id={self.id} task_id={self.task_id!r} status={self.status!r}>"

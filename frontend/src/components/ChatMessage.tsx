@@ -47,6 +47,8 @@ interface ChatMessageProps {
     inferred: number;
     unsupported: number;
   } | null;
+  /** 异步 verify 进行中（module-060：答案先交付、验证后到，轮询 pending 期间） */
+  verifying?: boolean;
 }
 
 /**
@@ -134,6 +136,7 @@ export default function ChatMessage({
   messageId,
   isStreaming,
   verifiedClaims,
+  verifying,
 }: ChatMessageProps) {
   const isUser = role === 'user';
 
@@ -287,6 +290,21 @@ export default function ChatMessage({
                   animation: 'blink-cursor 0.8s infinite',
                 }}
               />
+            )}
+            {/* 异步 verify 进行中提示（module-060：答案先交付、验证后到；
+                轮询 pending 期间小字提示，done 后走下方验证面板） */}
+            {!isUser && !isStreaming && verifying && !verifiedClaims && (
+              <div
+                style={{
+                  marginTop: 12,
+                  paddingTop: 10,
+                  borderTop: '1px solid #e2e8f0',
+                }}
+              >
+                <Typography.Text style={{ fontSize: 12, color: '#94a3b8' }}>
+                  正在验证…
+                </Typography.Text>
+              </div>
             )}
             {/* 证据链验证面板（module-039：逐句可信度 + 整体置信度进度条） */}
             {!isUser && !isStreaming && verifiedClaims && verifiedClaims.claims.length > 0 && (

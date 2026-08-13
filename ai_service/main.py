@@ -21,6 +21,7 @@ from src.ratelimit import check_rate_limit, get_client_ip
 from src.cache import cache
 from src.identity import parse_jwt, resolve_identity
 from src import observability
+from src.verify_tasks import submit_verify_task, get_verify_task
 from rag.engine import rag_engine
 from rag.schemas import (
     SearchRequest, SearchResponse, ChatRequest, ChatResponse,
@@ -589,19 +590,37 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
             # module-034：会话持久化为主（异步写库，不阻塞 SSE 响应）
             rag_engine._schedule_session_persist(identity, request.query, "".join(answer_parts))
 
-            # ====== Step 7: 证据链验证（module-039） ======
+            # ====== Step 7: 证据链验证（module-039；module-060 异步后置） ======
             observability.timing("generate", _t() - gen_t0)
             full_answer = "".join(answer_parts)
             # module-042: 剥离截断标记后验证，避免标记文本误导置信度评估
             clean_answer = full_answer.replace("\n\n[答案过长，已截断]", "")
             vf_t0 = _t()
-            verified = await reflector.verify_answer(clean_answer, docs)
-            observability.timing("verify", _t() - vf_t0)
-            if verified.get("claims"):
-                yield f"event: verified\ndata: {json.dumps({'claims': verified['claims'], 'overall_confidence': verified['overall_confidence'], 'total_claims': verified['total_claims'], 'supported': verified['supported'], 'inferred': verified['inferred'], 'unsupported': verified['unsupported']}, ensure_ascii=False)}\n\n"
-                yield f"event: done\ndata: {json.dumps({'sources': sources, 'verified': True, 'overall_confidence': verified['overall_confidence']})}\n\n"
+            if settings.verify_async_enabled:
+                # module-060：异步 verify——答案先交付（done 带 verify_task_id、
+                # verified=False、不再发 verified 事件），验证后台跑、前端轮询
+                # GET /ai/rag/chat/verify/{task_id} 补结果，结果落 verify_results
+                # 表持久化。提交失败（DB 写失败）→ done 无 task_id，前端
+                # fail-open 不显示面板（与现状空 claims 不显示一致）。
+                verify_task_id = await submit_verify_task(
+                    clean_answer, docs, identity=identity,
+                    query=request.query,
+                    trace_id=getattr(fastapi_req.state, "trace_id", ""),
+                )
+                observability.timing("verify_submit", _t() - vf_t0)
+                if verify_task_id:
+                    yield f"event: done\ndata: {json.dumps({'sources': sources, 'verified': False, 'verify_task_id': verify_task_id})}\n\n"
+                else:
+                    yield f"event: done\ndata: {json.dumps({'sources': sources, 'verified': False})}\n\n"
             else:
-                yield f"event: done\ndata: {json.dumps({'sources': sources, 'verified': False})}\n\n"
+                # module-060 开关 false：现状同步路径（verified→done 顺序逐字一致，逃生口）
+                verified = await reflector.verify_answer(clean_answer, docs)
+                observability.timing("verify", _t() - vf_t0)
+                if verified.get("claims"):
+                    yield f"event: verified\ndata: {json.dumps({'claims': verified['claims'], 'overall_confidence': verified['overall_confidence'], 'total_claims': verified['total_claims'], 'supported': verified['supported'], 'inferred': verified['inferred'], 'unsupported': verified['unsupported']}, ensure_ascii=False)}\n\n"
+                    yield f"event: done\ndata: {json.dumps({'sources': sources, 'verified': True, 'overall_confidence': verified['overall_confidence']})}\n\n"
+                else:
+                    yield f"event: done\ndata: {json.dumps({'sources': sources, 'verified': False})}\n\n"
 
         except Exception as e:
             failed = True
@@ -617,6 +636,46 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
+
+
+@app.get("/ai/rag/chat/verify/{task_id}")
+async def get_verify_result(task_id: str):
+    """轮询 verify 后台任务结果（module-060 verify 异步化，**DB 为准**）
+
+    前端对 chat_stream done 事件返回的 verify_task_id 每 ~2s 轮询本端点，
+    答案先交付、验证后到；结果落 verify_results 表持久化（done 不因重启丢失）。
+
+    Returns:
+        200 pending → {"status": "pending"}
+        200 done   → {"status": "done", "claims", "overall_confidence",
+                      "total_claims", "supported", "inferred", "unsupported",
+                      "verified_in_ms"}
+        200 failed → {"status": "failed", "error"}
+        404        → {"detail": "task not found"}（重启丢未完成任务/过期 →
+                     前端停止轮询 fail-open，与现状空 claims 不显示一致）
+    """
+    try:
+        result = await get_verify_task(task_id)
+    except Exception as e:
+        logger.warning("verify 结果查询失败（按 404 处理）: %s", e)
+        return JSONResponse(status_code=404, content={"detail": "task not found"})
+    if result is None:
+        return JSONResponse(status_code=404, content={"detail": "task not found"})
+    if result["status"] == "pending":
+        return {"status": "pending"}
+    if result["status"] == "done":
+        claims = result.get("claims") or []
+        return {
+            "status": "done",
+            "claims": claims,
+            "overall_confidence": result.get("overall_confidence"),
+            "total_claims": len(claims),
+            "supported": result.get("supported", 0),
+            "inferred": result.get("inferred", 0),
+            "unsupported": result.get("unsupported", 0),
+            "verified_in_ms": result.get("verified_in_ms"),
+        }
+    return {"status": "failed", "error": result.get("error", "verify failed")}
 
 
 @app.post("/ai/rag/chat/agent")

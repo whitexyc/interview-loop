@@ -167,6 +167,8 @@
 | `specs/adr/0010-hallucination-detection-upgrade.md` | 幻觉检测升级方案（HHEM 专职裁判+逐句报分+矛盾扫描，P0 可先行） |
 | `specs/adr/0011-prompt-eval-optimization.md` | 提示词评估与自动优化（四维判断+四代优化算法+DSPy 选型+三步落地路径，📋 暂不实施） |
 | `specs/adr/0012-tool-governance.md` | 工具治理与分层工具选择（数量退化数据+A/B/C 三档方案，工具口径 10→7 已修正；📋 P1 已立项 module-059：阶段切分状态机） |
+| `specs/adr/0013-verify-async.md` | verify 异步化决策（✅ 已实施 module-060：轮询送达 + 落库持久化 + 非流式保持同步 + 计时口径变化） |
+| `specs/module-060-verify-async/` | verify 异步化（✅ 已实施：chat_stream 异步 verify + done 带 verify_task_id + 前端轮询补结果 + verify_results 表持久化，单测 17/0 + 前端 58/0；真实 E2E 待环境——本机无 PostgreSQL） |
 | `specs/module-052-nli-contradiction-scan/task-brief.md` | NLI 矛盾扫描前置决策任务简报（📋 复测进行中 module-057 v2，数据集 86 条，kappa 门槛判定中） |
 | `specs/module-053-rrf-fusion/` | 检索融合升级（✅ RRF 三通道已实施放行：Hit@5 0.9714→0.9905，加权否决，changelog 含放行决策表；上线 `PW_RETRIEVAL_FUSION_MODE=rrf` 一键开启，默认 hybrid 零回归） |
 | `specs/module-058-retrieval-chain-opt/task-brief.md` | 检索链优化+可观测性任务简报（📋 WP-A 拼标题+防扎堆 / WP-B prompt 顺序前缀缓存 / WP-C 可观测性，基线 Hit@5 0.9905 id=18） |
@@ -184,3 +186,12 @@
 - **token 用量采集**：llm/client.py `_extract_usage` 兼容 OpenAI SDK usage / langchain response_metadata.token_usage / Anthropic usage；非流式调用采集，流式（SSE 逐 token）不采集；无 usage 静默跳过不中断。
 - **工具阶段切分（ADR-0012 方案 A）**：10 工具按执行阶段暴露——检索组 7（search_* 4 + extract_entities + recall_memory + **re_search**）、生成组 4（generate_answer + verify_answer + note_to_self + **re_search 双组**）；ctx.phase 初始 retrieval，本轮调用过 generate_answer/verify_answer → **下一轮**切 generation（"本轮调用前"确定 schema，强制"先检后生"）；generation 内调 re_search **不回退**（单向前进防死循环）；判定以"是否已调用过生成工具"为界（非 docs 非空——保留补检能力）。收益：省 schema token + **结构性防误调**（检索阶段 schema 不含生成工具，替代工具内部"尚未检索"字符串防御）。开关 PW_TOOL_PHASE_SPLIT 默认 true、false 回退全量 10。
 - **工具数量毒害选择准确率（业界硬数据）**：~50 个工具选对率 84-95% → 200 个 41-83% → 740 个接近 0%；Lost in the Middle 效应（列表中间工具最易漏选）。升级路线三档：10-20 阶段切分（已实施）→ 20-50 分组路由（可复用 intent 路由）→ 50+ 动态工具检索（description 向量化进 pgvector，业界语义路由 86.4% vs 全量 <50%）。
+
+## verify 异步化（2026-08-13 module-060 追加，只增不删）
+
+- **verify 后置推送（答案先交付、验证后到）**：verify（证据链幻觉检测）原本同步阻塞在 chat_stream SSE 主链路尾部（15-50s：LLM 拆句 15s + HHEM 20s + LLM 判分 15s 降级），答案已流完但 done 事件卡在 verify 之后、前端 loading 空转。module-060 改为：流式生成完**立即发 done（带 verify_task_id、verified:false、不再发 verified 事件）→ 关闭连接 → loading 立即结束**；verify 走 `asyncio.create_task` 后台执行（fire-and-forget，对齐 `_schedule_persist` 成熟模式，内部沿用 15/20/15s 超时不会无限 hang）。
+- **前端轮询补结果**：前端凭 done 的 verify_task_id 每 2s 轮询 `GET /ai/rag/chat/verify/{task_id}`（60s/30 次上限）——pending 继续 / done 更新消息 verifiedClaims（ChatMessage 可信度面板）/ failed 或 404 停止轮询不显示面板（fail-open，与现状空 claims 不显示一致）。轮询 timer 在卸载/重试/切会话/新发送时清理。
+- **DB 为准 + 落库持久化（verify_results 表）**：submit 先插一条 pending 记录 → 后台跑完 UPDATE done/failed；轮询端点**读 DB 不读内存**。**重启丢未完成任务 → 404 → 前端 fail-open；已 done 结果 DB 不丢**。表 init_db 幂等 DDL（对齐 feedback/request_logs 模式），done 结果永久保留不清理（**飞轮数据源**——verify 含逐句 verdict 可支撑答案可信度/幻觉调优）。
+- **开关与逃生口**：`PW_VERIFY_ASYNC` 默认 true；false 时 chat_stream 走现状同步路径（verified→done 顺序逐字一致）。测试环境 conftest autouse 钉住 false（对齐 056/058 开关模式）。
+- **非流式端点保持同步**：/ai/rag/chat（engine.chat 同步 verify）**零改动**（前端已不用，契约稳定）；agent/agent-lg 端点不做 verify 零改动；request_logs 零改动。
+- **计时口径变化（如实记录）**：异步化后 request_logs 不再有 verify 阶段（module-058 有该字段预期）；verify 耗时改由轮询接口返回的 `verified_in_ms`（后台 `perf_counter` 计时）。

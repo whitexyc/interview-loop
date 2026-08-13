@@ -160,6 +160,14 @@ class Settings(BaseSettings):
     verify_hhem_threshold_high: float = 0.7
     verify_hhem_threshold_low: float = 0.3
 
+    # verify 异步化（module-060）：true（默认）——chat_stream 流式生成完不再
+    # 同步 await verify（15-50s 阻塞主链路尾部），改 submit 后台任务 + done 事件
+    # 带 verify_task_id + 前端轮询 GET /ai/rag/chat/verify/{task_id} 补结果，
+    # 结果落 verify_results 表持久化（done 不因重启丢失）。false 回退现状同步
+    # 路径（verified→done 事件逐字一致，逃生口）。测试环境由 conftest autouse
+    # fixture 钉住 false（存量 chat_stream 测试零漂移）。
+    verify_async_enabled: bool = True
+
     model_config = {"env_prefix": "PW_", "env_file": ".env"}
 
 

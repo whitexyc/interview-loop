@@ -68,3 +68,18 @@ def request_logs_disabled(monkeypatch):
     from src.config import settings
 
     monkeypatch.setattr(settings, "request_logs_enabled", False)
+
+
+@pytest.fixture(autouse=True)
+def default_verify_async_disabled(monkeypatch):
+    """测试环境统一钉住 verify 异步开关=关闭（module-060，对齐 056/058 模式）
+
+    生产默认已开启（PW_VERIFY_ASYNC 默认 true），但存量 chat_stream 测试以
+    现状同步路径（verified→done 顺序）为准——默认 true 会漂移走异步路径
+    （不再发 verified 事件）导致存量断言失败。钉住 false 是"存量测试全绿"
+    的真正保证；新测试（test_verify_tasks.py）体内显式 setattr True 验证
+    异步行为（配合 mock DB，不依赖真实 PG 落库）。
+    """
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "verify_async_enabled", False)

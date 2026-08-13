@@ -86,8 +86,52 @@ async def ensure_request_logs_table() -> None:
         await session.commit()
 
 
+# verify_results 表 DDL（module-060 verify 异步化）：与 feedback/request_logs
+# 同款模式——独立建表 + 启动 init_db 自愈建表（CREATE TABLE IF NOT EXISTS，幂等）。
+# claims 用 JSONB 存逐句验证结果（claim/verdict/evidence），overall_confidence/
+# supported/inferred/unsupported 单列供聚合；verified_in_ms 为 verify_answer
+# 任务耗时（口径对齐 module-058 计时，异步化后由轮询接口返回）。done 结果
+# 永久保留不清理（飞轮数据源——答案可信度/幻觉调优数据积累）。
+VERIFY_RESULTS_DDL = """
+CREATE TABLE IF NOT EXISTS verify_results (
+    id                  BIGSERIAL   PRIMARY KEY,
+    task_id             VARCHAR(64) NOT NULL UNIQUE,
+    trace_id            VARCHAR(64) NOT NULL DEFAULT '',
+    identity            VARCHAR(256) NOT NULL DEFAULT '',
+    endpoint            VARCHAR(128) NOT NULL DEFAULT 'chat_stream',
+    query               TEXT        NOT NULL DEFAULT '',
+    status              VARCHAR(16) NOT NULL DEFAULT 'pending',
+    claims              JSONB,
+    overall_confidence  DOUBLE PRECISION,
+    supported           INTEGER     NOT NULL DEFAULT 0,
+    inferred            INTEGER     NOT NULL DEFAULT 0,
+    unsupported         INTEGER     NOT NULL DEFAULT 0,
+    error               TEXT,
+    verified_in_ms      INTEGER,
+    created_at          TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at          TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+COMMENT ON TABLE verify_results IS '证据链验证任务与结果（异步 verify 落库，pending→done/failed）';
+COMMENT ON COLUMN verify_results.task_id IS '验证任务 ID（UUID hex，前端轮询 key）';
+COMMENT ON COLUMN verify_results.trace_id IS '请求追踪 ID（关联 request_logs）';
+COMMENT ON COLUMN verify_results.identity IS '请求身份（user_id 优先，client_ip 兜底，对齐 048 口径）';
+COMMENT ON COLUMN verify_results.status IS '任务状态：pending（进行中）/ done（完成）/ failed（失败）';
+COMMENT ON COLUMN verify_results.claims IS '验证结果（claims 数组 JSONB：claim/verdict/evidence）';
+COMMENT ON COLUMN verify_results.verified_in_ms IS 'verify_answer 任务耗时（毫秒，口径对齐 module-058 计时）';
+"""
+
+
+async def ensure_verify_results_table() -> None:
+    """幂等创建 verify_results 表（与 feedback/request_logs 同款拆分执行模式）"""
+    statements = [s.strip() for s in VERIFY_RESULTS_DDL.split(";") if s.strip()]
+    async with async_session_factory() as session:
+        for stmt in statements:
+            await session.execute(text(stmt))
+        await session.commit()
+
+
 async def init_db():
-    """初始化数据库：启用 pgvector 扩展 + 自愈建 feedback / request_logs 表"""
+    """初始化数据库：启用 pgvector 扩展 + 自愈建 feedback / request_logs / verify_results 表"""
     async with engine.begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         logger.info("pgvector extension 已就绪")
@@ -95,6 +139,8 @@ async def init_db():
     logger.info("feedback 表已就绪（module-048）")
     await ensure_request_logs_table()
     logger.info("request_logs 表已就绪（module-058）")
+    await ensure_verify_results_table()
+    logger.info("verify_results 表已就绪（module-060）")
 
 
 async def get_db() -> AsyncSession:
