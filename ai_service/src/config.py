@@ -173,6 +173,14 @@ class Settings(BaseSettings):
     # 评测（LLM 1.0000 / 分类器 1.0000，eval_runs id=23/24）→ 默认开；
     # 回退开关：PW_INTENT_CLASSIFIER_ENABLED=false 保持 LLM 路径
     intent_classifier_enabled: bool = True
+    # 意图分类多轮拼接（module-063 / WP-A）：true 时 router 给 L4 分类器传
+    # 最近一轮 user query 向量拼接（2048 维，训练时同构）。**当前落盘模型
+    # intent_clf.joblib 为单 query 1024 维训练**——置 true 需先重训（eval/
+    # train/train_intent_classifier.py 构造含 prev 的配对样本，模型维度对齐
+    # 2048）；未重训置 true 会令 L4 推理维度不匹配抛异常 → router 捕获回退
+    # LLM（fail-open 零回归，仅损失多轮场景 L4 成本优势）。默认 false =
+    # 存量模型零回归（多轮路由走 LLM 上下文 + 短句继承，见 ADR-0015）。
+    intent_classifier_multi_turn: bool = False
 
     # 反思充分性自洽性检查（module-044 层 2）：true 时 check_sufficiency 对
     # 同一 query 用两个不同温度各判一次，两次不一致 → 保守判充分（防漏检）；

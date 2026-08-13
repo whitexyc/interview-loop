@@ -84,7 +84,10 @@ async def classify_intent(state: RAGState) -> dict:
     """Step 1: 意图识别"""
     logger.info("Graph: classify_intent, query=%s", state["query"][:50])
     t0 = _t()
-    result = await router_agent.classify(state["query"])
+    # module-063（WP-A）：LangGraph 编排路径同步接 history（state 含 history，
+    # 空 history 零回归）
+    result = await router_agent.classify(
+        state["query"], history=state.get("history") or [])
     intent = result.get("intent", "knowledge")
     labels = {"knowledge": "知识库", "casual_chat": "闲聊", "realtime": "实时数据"}
 
