@@ -207,3 +207,11 @@
 - **标记+新增分两步（事务口径）**：`_merge_duplicate` 标记 superseded 提交后，save 正常新增路径插入新内容——新增失败旧记忆已标记但未删除（内容保留不丢数据 fail-open）。
 - **`is True` 判断（测试兼容）**：`_is_superseded` 用 `getattr(doc, "superseded", False) is True` 而非 truthy——MagicMock 缺字段时 `.superseded` 返回真值 MagicMock，truthy 判断会误伤全部存量测试父块。
 - **子包 import 注册（module-050 别名机制）**：`rag.memory` 被旧路径别名（rag/__init__ `_OLD_PATHS["memory"]`）覆盖为普通模块后，新子模块（nli_loader/nli_judge）必须在 `rag/memory/__init__.py` 导入一次注册进 sys.modules，否则 `from rag.memory.nli_judge import X` 报 "'rag.memory' is not a package"（实测坑：eval baseline 首跑 30/30 skip 系此原因）。
+
+## 记忆进化 2 领域（2026-08-13 讨论，module-062，ADR-0007 P2/P3）
+
+- **类型化衰减（P2，A-MAC 参考）**：短期记忆"一刀切同一半衰期 3 天"改为按记忆类型差异化——`documents.type`（preference/fact/event）+ `_evolve_recall` 按 type 选半衰期：**preference 30 天（慢，偏好长期有效）/ event 1 天（快，临时事件迅速过期）/ 其余（fact/未知/存量无 type）→ 现状 3 天**（存量零回归口径）。类比：人脑偏好记得久、具体临时安排忘得快。
+- **类型来源双方案（数据说话，谁达标谁上）**：方案 A bge-m3+LR 分类器（复用 module-056 intent 基建，人造 120 条训练，落盘 memory_type_clf.joblib）vs 方案 B LLM（extract_facts `_EXTRACT_PROMPT` 加 type few-shot 输出 `{"content","importance","type"}`，缺失/非法默认 fact）。同 30 条评测集实测：**clf 1.0000 / LLM 1.0000 双达标同分 → 取 clf**（零成本/确定性/离线，对齐 module-056 L4 分类器替代 LLM 哲学；LLM type 作 clf 失败兜底）。
+- **冷记忆降权（P3，Memory Decay）**：长期层"永久等权重"改为"久未召回降权不删除"——`documents.last_recalled_at` + `_apply_cold_decay`：距上次召回 <30 天 ×1.0，此后平滑渐降至 ×0.3 下限（30→100 天 1.0→0.3），**不删除可回溯**；召回命中 fire-and-forget 刷新 last_recalled_at=now（冷记忆升温）。顺序：检索 → 降权 → 动态 K 截断。短期层不降权（已有衰减）。
+- **矛盾检测启用（WP4，Precision≥0.8 者启用）**：自建 142 案例训练分类器（bge-m3 新旧两条嵌入→拼接+差值+绝对差 4096 维 + LR，contradiction Precision 0.9048/Recall 0.95）vs mDeBERTa（Precision 1.0000/Recall 0.5）同 30 条评测集对比——**双达标取 Precision 高者 → mDeBERTa(nli) 启用**（`PW_MEMORY_CONFLICT=true` + `PW_MEMORY_CONFLICT_JUDGE=nli`，覆盖 module-061 默认关）；保守方向"宁可漏检也不错标"（Recall 后续提升入 backlog，clf Recall 更高可 `PW_MEMORY_CONFLICT_JUDGE=clf` 一键切换）。
+- **`isinstance` 判断（module-062 测试兼容）**：`_memory_type_of`/`_cold_ref_time` 用显式 `isinstance(str/datetime)` 判断（对齐 `_is_superseded` 的 `is True` 技巧）——MagicMock 缺字段时自动属性是真值 MagicMock 非 str/datetime → 走"其余半衰期/不降权"，存量测试桩零回归。

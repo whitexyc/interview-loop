@@ -98,3 +98,27 @@ def default_memory_conflict_disabled(monkeypatch):
     from src.config import settings
 
     monkeypatch.setattr(settings, "memory_conflict_enabled", False)
+
+
+@pytest.fixture(autouse=True)
+def default_memory_evolution2_disabled(monkeypatch):
+    """测试环境统一钉住 module-062 新开关=保守值（对齐 056/058/060/061 模式）
+
+    生产默认：memory_type_mode='none'（类型注入待 WP1 达标后由 winner 决定）、
+    memory_type_decay_enabled=true（存量无 type → 走 memory_short_half_life=3 零
+    回归，故无需钉住）、memory_cold_decay_enabled=true（长期层冷降权）、
+    memory_conflict_judge='clf'（WP4 达标后 PW_MEMORY_CONFLICT=true 才生效）。
+    钉住原因：
+      - memory_type_mode='none'：类型注入不依赖真实分类器/LLM 判型（hermetic），
+        存量 _persist_memory 测试以 type 默认 fact 为准零漂移
+      - memory_cold_decay_enabled=False：存量长期 recall 测试不触发冷降权额外
+        DB 查询/刷新任务（冷降权测试体内显式 setattr True + mock）
+      - memory_conflict_judge='nli'：module-061 矛盾测试 mock NLI 断言 NLI 路径
+        语义，钉住 nli 保持其 hermetic；clf 裁判测试体内显式设 'clf' + mock
+    新测试（test_memory_evolution2.py）体内显式 setattr 覆盖验证各开关行为。
+    """
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "memory_type_mode", "none")
+    monkeypatch.setattr(settings, "memory_cold_decay_enabled", False)
+    monkeypatch.setattr(settings, "memory_conflict_judge", "nli")

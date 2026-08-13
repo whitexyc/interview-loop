@@ -214,6 +214,23 @@ async def real_judge(premise: str, hypothesis: str) -> str:
     return result
 
 
+async def clf_judge(premise: str, hypothesis: str) -> str:
+    """module-062 WP4 分类模型判定（bge-m3+LR 二分类 → 三分类口径）
+
+    二分类输出 contradiction / non_conflict → 映射三分类：contradiction 保持，
+    non_conflict 归入 neutral（非矛盾；entailment 的 3 类准确率会偏低，但
+    contradiction P/R/F1 主指标不受影响——达标线只看 Precision）。不可用 → 抛错。
+    """
+    from rag.memory.memory_conflict_clf import memory_conflict_clf
+    loaded = await memory_conflict_clf.load()
+    if not loaded:
+        raise RuntimeError("memory_conflict_clf 模型缺失/加载失败（先跑 train_memory_conflict_clf.py）")
+    verdict = await memory_conflict_clf.predict(premise, hypothesis)
+    if verdict is None:
+        raise RuntimeError("CLF 判定不可用（None）")
+    return verdict if verdict == "contradiction" else "neutral"
+
+
 # ──────────────────────────────────────────────────────────────
 # 运行
 # ──────────────────────────────────────────────────────────────
@@ -326,9 +343,11 @@ def print_report(scores: dict, per_question: list[dict], skipped: list[dict],
 
 async def main() -> None:
     parser = argparse.ArgumentParser(
-        description="记忆冲突 NLI 评测：mDeBERTa contradiction P/R/F1 + 达标判定")
+        description="记忆冲突 NLI 评测：mDeBERTa/分类模型 contradiction P/R/F1 + 达标判定")
     parser.add_argument("--fixture", action="store_true",
                         help="fixture 模式：关键词启发式（确定性，不依赖模型），仅演示管线")
+    parser.add_argument("--judge", choices=["nli", "clf"], default="nli",
+                        help="判定器：nli（module-061 mDeBERTa，默认）/ clf（module-062 bge-m3+LR 分类模型）")
     parser.add_argument("--no-save", action="store_true", help="不记录 eval_runs 表")
     parser.add_argument("--limit", type=int, default=None, help="只评估前 N 条（冒烟）")
     args = parser.parse_args()
@@ -338,6 +357,8 @@ async def main() -> None:
         async def _fixture(p: str, h: str) -> str:
             return fixture_judge(p, h)
         judge = _fixture
+    elif args.judge == "clf":
+        judge = clf_judge
     else:
         judge = real_judge
 

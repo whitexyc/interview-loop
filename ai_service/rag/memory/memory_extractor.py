@@ -19,26 +19,38 @@ from llm.client import LLMFactory
 
 logger = logging.getLogger(__name__)
 
+# 记忆类型契约（module-062 P2）：preference 偏好（慢衰减）/ fact 事实（中衰减）/
+# event 带时间临时事件（快衰减）。LLM 判型与分类模型共用同一标签集。
+MEMORY_TYPES = ("preference", "fact", "event")
+
 # 提取 prompt：明确"值得长期记住"的标准（偏好/事实/任务状态），
 # importance 为 0-1 数字（>= 0.6 才值得记住，阈值由配置控制）。
+# module-062：每条事实加 type（preference/fact/event）——按记忆类型差异化衰减
+#（ADR-0007 P2，A-MAC 参考：偏好慢衰减、事件快过期）。格式向后兼容：无 type
+# 容错默认 fact（存量调用方取 content/importance 不受影响）。
 _EXTRACT_PROMPT = """你是一个长期记忆管理员。从下面的对话中提取"值得长期记住"的事实，用于跨会话记忆。
 
 值得长期记住的标准：
-- 用户的偏好、习惯、兴趣（如"偏好简洁的回答风格"）
-- 关于用户的客观事实（职业、技能、背景、计划等）
-- 长期任务的状态或进展
-- 用户明确表达的需求或承诺
+- 用户的偏好、习惯、兴趣（如"偏好简洁的回答风格"）→ type=preference
+- 关于用户的客观事实（职业、技能、背景、计划等）→ type=fact
+- 长期任务的状态或进展、带时间的临时事件（如"下周去北京"）→ type=event
 
 不值得记住的：
 - 一次性问答、临时闲聊
 - 与用户无关的通用知识（如检索到的文档内容本身）
+
+type 取值：
+- preference：用户的喜好/习惯/偏好（长期有效，慢衰减）
+- fact：客观事实（较稳定，中衰减）
+- event：带时间的一次性/临时事件（迅速过期，快衰减）
+无法判断类型时默认 fact。
 
 用户问题: {query}
 助手回答: {answer}
 最近对话历史: {history}
 
 只返回 JSON，不要其他文字，格式如下：
-{{"facts": [{{"content": "事实内容", "importance": 0.8}}, ...]}}
+{{"facts": [{{"content": "事实内容", "importance": 0.8, "type": "preference"}}, ...]}}
 
 importance 表示该事实对长期记忆的重要性，范围 0-1，低于 0.6 的不应出现。
 JSON:"""
@@ -110,8 +122,9 @@ async def extract_facts(
         history: 最近对话历史（可选）
 
     Returns:
-        [{"content": str, "importance": float}, ...]
-        每条 importance >= settings.memory_importance_threshold 且 content 非空
+        [{"content": str, "importance": float, "type": str}, ...]
+        每条 importance >= settings.memory_importance_threshold 且 content 非空；
+        type ∈ {preference, fact, event}，缺失/非法 → "fact"（中性兜底，fail-open）
     """
     if not answer or not answer.strip():
         return []
@@ -136,7 +149,14 @@ async def extract_facts(
                 importance = 0.0
             # 过滤：importance < 阈值 或 content 空 → 丢弃
             if content and importance >= settings.memory_importance_threshold:
-                facts.append({"content": content, "importance": round(importance, 3)})
+                mtype = str(item.get("type") or "").strip().lower()
+                if mtype not in MEMORY_TYPES:
+                    mtype = "fact"  # 缺失/非法类型 → 默认 fact（中性兜底）
+                facts.append({
+                    "content": content,
+                    "importance": round(importance, 3),
+                    "type": mtype,
+                })
         logger.info("长期记忆事实提取: query=%s, facts=%d", query[:40], len(facts))
         return facts
     except asyncio.TimeoutError:

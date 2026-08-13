@@ -154,8 +154,31 @@ async def ensure_memory_superseded_columns() -> None:
         await session.commit()
 
 
+# documents 表加列 DDL（module-062 P2/P3 记忆进化 2）：与 module-061 同款模式——
+# init_db 自愈幂等 ALTER（ADD COLUMN IF NOT EXISTS，重复启动不报错）。
+# type 记忆类型（preference/fact/event，P2 类型化衰减依据）；last_recalled_at
+# 长期层最后召回时间（P3 冷记忆降权依据，久未召回降权不删除）。默认值兜底存量行
+#（type='fact' / last_recalled_at=NULL 不降权）零迁移 fail-open。本地开发库
+# schema 未迁移先决：手动跑 scripts/migrate_module062.py。
+MEMORY_TYPE_COLUMNS_DDL = """
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS type VARCHAR(16) NOT NULL DEFAULT 'fact';
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS last_recalled_at TIMESTAMP;
+COMMENT ON COLUMN documents.type IS '记忆类型：preference（偏好，慢衰减）/ fact（事实，中衰减）/ event（事件，快衰减）——module-062 P2 类型化衰减';
+COMMENT ON COLUMN documents.last_recalled_at IS '长期层最后召回时间——module-062 P3 冷记忆降权依据（久未召回降权不删除）';
+"""
+
+
+async def ensure_memory_type_columns() -> None:
+    """幂等补 documents 表 type/last_recalled_at 两列（与 superseded 同款拆分执行模式）"""
+    statements = [s.strip() for s in MEMORY_TYPE_COLUMNS_DDL.split(";") if s.strip()]
+    async with async_session_factory() as session:
+        for stmt in statements:
+            await session.execute(text(stmt))
+        await session.commit()
+
+
 async def init_db():
-    """初始化数据库：启用 pgvector 扩展 + 自愈建表/加列（feedback / request_logs / verify_results / superseded）"""
+    """初始化数据库：启用 pgvector 扩展 + 自愈建表/加列（feedback / request_logs / verify_results / superseded / type+last_recalled_at）"""
     async with engine.begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         logger.info("pgvector extension 已就绪")
@@ -167,6 +190,8 @@ async def init_db():
     logger.info("verify_results 表已就绪（module-060）")
     await ensure_memory_superseded_columns()
     logger.info("documents 表 superseded/updated_at 列已就绪（module-061）")
+    await ensure_memory_type_columns()
+    logger.info("documents 表 type/last_recalled_at 列已就绪（module-062）")
 
 
 async def get_db() -> AsyncSession:

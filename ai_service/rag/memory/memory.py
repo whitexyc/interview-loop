@@ -108,6 +108,56 @@ def _is_superseded(doc) -> bool:
     return getattr(doc, "superseded", False) is True
 
 
+def _memory_type_of(doc) -> str:
+    """提取记忆类型（module-062 P2 类型化衰减）：type 确为合法字符串才用，否则 ''
+
+    用显式 isinstance 判断防 MagicMock 真值误伤（对齐 _is_superseded 的 `is True`
+    技巧）：测试桩/MagicMock 的 `.type` 返回真值 MagicMock，不是 str → 返回 ''，
+    走"其余"半衰期（memory_short_half_life=3，存量/测试零回归）；真实 DB 行
+    type='preference'/'event' 才走差异化半衰期。
+
+    Args:
+        doc: Document 对象（真实 ORM 行或测试桩）
+
+    Returns:
+        小写 type 字符串（'preference'/'fact'/'event'）；缺失/非字符串 → ''
+    """
+    t = getattr(doc, "type", None)
+    if isinstance(t, str) and t.strip():
+        return t.strip().lower()
+    return ""
+
+
+def _cold_ref_time(doc):
+    """冷降权参考时间：last_recalled_at 优先，否则 created_at；两者皆非 datetime → None
+
+    显式 isinstance 判断防 MagicMock 真值误伤（对齐 _is_superseded）：测试桩/
+    MagicMock 的 last_recalled_at/created_at 是真值 MagicMock 非 datetime →
+    返回 None → cold_factor=1.0（存量无 last_recalled_at 不降权，零回归）。
+    naive → UTC 规范化（Review 修复，对齐 _evolve_recall memory.py:810-811 module-046
+    同款）：documents.last_recalled_at 列 DDL 为 TIMESTAMP（无 tz），_refresh_last_recalled
+    写入 aware UTC 后 PG 落库丢弃 tz、读回 naive；若不加时区，_apply_cold_decay 里
+    now(aware) - ref(naive) 抛 TypeError 被 except 吞掉 → 任何被召回过一次的记忆
+    后续冷降权都恒 ×1.0（刷新机制毒化降权算术，WP3 生产不成立）。统一在源头把
+    naive 按 UTC 解释，保证返回恒为 tz-aware。
+
+    Args:
+        doc: Document 对象（真实 ORM 行或测试桩）
+
+    Returns:
+        tz-aware datetime（last_recalled_at 或 created_at，naive 按 UTC 解释）；
+        不可用 → None
+    """
+    ref = getattr(doc, "last_recalled_at", None)
+    if not isinstance(ref, datetime):
+        ref = getattr(doc, "created_at", None)
+    if not isinstance(ref, datetime):
+        return None
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)  # 存量 naive 按 UTC 解释（对齐 _evolve_recall）
+    return ref
+
+
 def _escape_like(s: str) -> str:
     """转义 SQL LIKE 模式元字符（\\、%、_）（review #1 双保险）
 
@@ -226,8 +276,8 @@ class MemoryService:
     """
 
     async def save(self, content: str, identity: str = DEFAULT_IDENTITY,
-                   dedup: bool = True) -> dict:
-        """保存一条长期记忆（签名兼容 module-023/033）
+                   dedup: bool = True, memory_type: str = "fact") -> dict:
+        """保存一条长期记忆（签名兼容 module-023/033；module-062 加 memory_type）
 
         委托 _save（layer=''）执行分块/去重/入库；语义去重仅在长期层内查重。
 
@@ -235,6 +285,8 @@ class MemoryService:
             content: 记忆内容（不能为空）
             identity: 身份标识（user_id 优先，否则 client_ip；空/空白则默认 'unknown'）
             dedup: 写入前是否语义去重（默认 True）
+            memory_type: 记忆类型（preference/fact/event，module-062 P2 类型化衰减
+                依据；存量调用方缺省默认 'fact' 零回归）
 
         Returns:
             {"id": int, "title": str, "status": "saved"} 或 {"status": "updated"}
@@ -243,10 +295,11 @@ class MemoryService:
             ValueError: content 为空
             RuntimeError: 向量化或入库失败
         """
-        return await self._save(content, identity, layer="", dedup=dedup)
+        return await self._save(content, identity, layer="", dedup=dedup,
+                                memory_type=memory_type)
 
     async def save_short(self, content: str, identity: str = DEFAULT_IDENTITY,
-                         dedup: bool = True) -> dict:
+                         dedup: bool = True, memory_type: str = "fact") -> dict:
         """保存一条短期记忆（source='memory:<identity>:short:'，module-034）
 
         复用 _save 的分块/嵌入/入库全链路；语义去重仅在短期层内
@@ -259,6 +312,7 @@ class MemoryService:
             content: 短期记忆内容（不能为空）
             identity: 身份标识（user_id 优先，否则 client_ip；空/空白则默认 'unknown'）
             dedup: 写入前是否语义去重（默认 True）
+            memory_type: 记忆类型（preference/fact/event，module-062；缺省 'fact'）
 
         Returns:
             {"id": int, "title": str, "status": "saved"} 或 {"status": "updated"}
@@ -267,10 +321,11 @@ class MemoryService:
             ValueError: content 为空
             RuntimeError: 向量化或入库失败
         """
-        return await self._save(content, identity, layer="short", dedup=dedup)
+        return await self._save(content, identity, layer="short", dedup=dedup,
+                                memory_type=memory_type)
 
     async def _save(self, content: str, identity: str, layer: str,
-                    dedup: bool = True) -> dict:
+                    dedup: bool = True, memory_type: str = "fact") -> dict:
         """保存一条记忆（长期/短期共用，module-034 重构）
 
         流程（dedup=True 默认，module-033）：
@@ -332,9 +387,11 @@ class MemoryService:
         async with async_session_factory() as session:
             try:
                 # 1. 插入父块（无向量，供子块引用），flush 获取 DB ID
-                parent_objs = await self._insert_parents(session, parents, title, source)
+                parent_objs = await self._insert_parents(
+                    session, parents, title, source, memory_type=memory_type)
                 # 2. 子块向量化 + 插入（embedding 失败则整体 rollback，不留残缺记录）
-                await self._insert_children(session, children, parent_objs, title, source)
+                await self._insert_children(
+                    session, children, parent_objs, title, source, memory_type=memory_type)
                 await session.commit()
                 logger.info("记忆保存成功: title=%s, source=%s, chunks=%d",
                             title, source, len(parent_objs) + len(children))
@@ -481,19 +538,37 @@ class MemoryService:
             return None
 
     async def _judge_conflict(self, premise: str, hypothesis: str) -> str | None:
-        """NLI 判新事实 vs 旧记忆是否矛盾（module-061 P1）
+        """判新事实 vs 旧记忆是否矛盾（module-061 P1 + module-062 WP4 裁判切换）
 
-        复用生产封装 rag.memory.nli_judge.nli_judge（延迟加载 + to_thread +
-        超时/失败返回 None）。任何异常/None → 返回 None（上层降级旧行为——
-        保持追加拼接，零回归）。导入放函数内避免模块顶层依赖（延迟加载哲学）。
+        module-062 WP4 扩展：按 settings.memory_conflict_judge 选裁判——
+          clf：bge-m3+LR 二分类（自建 100+ 案例训练，返回 "contradiction"/
+               "non_conflict"；Precision≥0.8 达标后启用）；clf 不可用/异常 → 回退 NLI
+          nli：module-061 mDeBERTa NLI 三分类（entailment/neutral/contradiction）
+        返回 "contradiction"（矛盾）或其它标签/None（非矛盾 → 上层保持追加拼接，
+        零回归）。任何异常/None → 返回 None。导入放函数内避免模块顶层依赖
+        （延迟加载哲学）。
 
         Args:
             premise: 旧记忆内容（父块 content）
             hypothesis: 新记忆内容
 
         Returns:
-            "entailment" / "neutral" / "contradiction"；不可用 → None
+            "contradiction"（矛盾）/"non_conflict"（clf）/"entailment"/"neutral"
+            （nli）；不可用 → None
         """
+        if settings.memory_conflict_judge == "clf":
+            try:
+                from rag.memory.memory_conflict_clf import memory_conflict_clf
+                # 先 load（幂等：首次加载落盘模型并缓存；缺失/损坏 → 回退 NLI）
+                if not await memory_conflict_clf.load():
+                    logger.warning("CLF 矛盾模型缺失，回退 NLI")
+                else:
+                    verdict = await memory_conflict_clf.predict(premise, hypothesis)
+                    if verdict is not None:
+                        return verdict  # "contradiction" / "non_conflict"
+                    logger.warning("CLF 矛盾判定不可用（None），回退 NLI")
+            except Exception as e:
+                logger.warning("CLF 矛盾判定异常，回退 NLI: %s", e)
         try:
             from rag.memory.nli_judge import nli_judge
             return await nli_judge.predict(premise, hypothesis)
@@ -503,6 +578,7 @@ class MemoryService:
 
     async def _insert_parents(
         self, session, parents: list[dict], title: str, source: str,
+        memory_type: str = "fact",
     ) -> list[Document]:
         """插入父块（无向量，供子块引用）并 flush 获取 DB ID
 
@@ -511,6 +587,7 @@ class MemoryService:
             parents: 父块列表，每项 {"title": str, "content": str}
             title: 记忆标题（父块无标题时兜底）
             source: 记忆 source 标识（'memory:<identity>:'）
+            memory_type: 记忆类型（module-062 P2，默认 'fact' 存量零回归）
 
         Returns:
             已 flush 的父块 Document 列表（含 id，供子块引用）
@@ -524,6 +601,7 @@ class MemoryService:
                 embedding=None,
                 parent_id=None,
                 content_hash=hashlib.sha256(p["content"].encode("utf-8")).hexdigest(),
+                type=memory_type,
             )
             session.add(doc)
             parent_objs.append(doc)
@@ -532,7 +610,7 @@ class MemoryService:
 
     async def _insert_children(
         self, session, children: list[dict], parent_objs: list[Document],
-        title: str, source: str,
+        title: str, source: str, memory_type: str = "fact",
     ) -> None:
         """向量化子块并插入（含向量 + search_tokens + parent_id）
 
@@ -542,6 +620,7 @@ class MemoryService:
             parent_objs: 已 flush 的父块对象列表（子块引用其 id）
             title: 记忆标题（子块无标题时兜底）
             source: 记忆 source 标识（'memory:<identity>:'）
+            memory_type: 记忆类型（module-062 P2，默认 'fact' 存量零回归）
         """
         child_texts = [c["content"] for c in children]
         embeddings = await embedding_service.embed_documents(child_texts)
@@ -559,6 +638,7 @@ class MemoryService:
                 parent_id=parent.id,
                 content_hash=hashlib.sha256(child["content"].encode("utf-8")).hexdigest(),
                 search_tokens=tokenize(child["content"]),
+                type=memory_type,
             ))
 
     async def recall(
@@ -607,6 +687,11 @@ class MemoryService:
         avg_score = await self._absolute_cosine_avg(query, docs)
         dynamic_k = self._dynamic_k(avg_score)
         memories = await self._expand_to_parents(docs)
+        # module-062 P3：长期层冷记忆降权（久未召回降权不删除，×0.3-1.0）。
+        # 顺序如实声明：检索（retrieve + 父块展开）→ 降权（按 last_recalled_at）→
+        # 动态 K 截断——降权影响排序后截断，久未召回可能被挤出前 K。短期层不
+        # 降权（已有衰减），此处仅长期层 recall 走冷降权。
+        memories = await self._apply_cold_decay(memories, docs, identity)
         return memories[:dynamic_k]
 
     async def recall_short(
@@ -736,7 +821,14 @@ class MemoryService:
                 if age_days > settings.memory_short_max_days:
                     continue  # 超硬上限：不参与召回（也不刷新提及，避免"检索一次即复活"）
             count = doc.mention_count or 0
-            half_life = settings.memory_short_half_life or 3.0
+            # module-062 P2：类型化衰减（ADR-0007 P2，A-MAC 参考）——按 type 选半衰期：
+            # preference 慢（30 天，偏好长期有效）/ event 快（1 天，临时事件迅速过期）/
+            # 其余（fact/未知/存量无 type）→ memory_short_half_life=3（存量零回归口径）。
+            # 开关 PW_MEMORY_TYPE_DECAY=false 回退全局 half_life（现状行为）。
+            if settings.memory_type_decay_enabled:
+                half_life = self._type_half_life(_memory_type_of(doc))
+            else:
+                half_life = settings.memory_short_half_life or 3.0
             if half_life <= 0:
                 half_life = 3.0  # 配置防御：半衰期非正数回退默认
             decay = 0.5 ** (age_days / half_life)
@@ -791,6 +883,129 @@ class MemoryService:
                 await session.commit()
         except Exception as e:
             logger.warning("短期记忆提及刷新失败（降级）: %s", e)
+
+    @staticmethod
+    def _type_half_life(mtype: str) -> float:
+        """按记忆类型选半衰期（module-062 P2 类型化衰减，A-MAC 参考）
+
+        - preference：30 天（慢衰减——偏好长期有效）
+        - event：1 天（快——临时事件迅速过期）
+        - 其余（fact/未知/存量无 type）：memory_short_half_life=3（现状半衰期，
+          存量零回归口径——只区分 preference/event/其余，避免存量差异）
+
+        Args:
+            mtype: 记忆类型（_memory_type_of 输出，''/fact/preference/event）
+
+        Returns:
+            半衰期天数（float，配置非正数回退默认值）
+        """
+        if mtype == "preference":
+            return settings.memory_type_half_life_preference or 30.0
+        if mtype == "event":
+            return settings.memory_type_half_life_event or 1.0
+        return settings.memory_short_half_life or 3.0
+
+    async def _apply_cold_decay(
+        self, memories: list[dict], child_docs: list[dict], identity: str,
+    ) -> list[dict]:
+        """module-062 P3 长期层冷记忆降权：久未召回 ×0.3-1.0（不删除）
+
+        检索命中后按距上次召回（last_recalled_at or created_at）天数加权：
+          cold_factor = 1.0                       （< memory_cold_decay_days=30 天，最近召回）
+                      = max(memory_cold_decay_min=0.3,
+                            1.0 - (days_since-30)/100)（平滑渐降，30→100 天 1.0→0.3）
+        最终分 = 语义分 × cold_factor；召回命中 → fire-and-forget 刷新
+        last_recalled_at=now（冷记忆升温，下次召回权重回 1.0）。
+
+        顺序声明（AC §3）：检索 → 降权 → 动态 K 截断（recall 调用处），降权影响
+        排序后截断。短期层不降权（已有衰减），本方法仅长期层 recall 调用。
+
+        降级（fail-open）：开关关 / 参考文档加载失败 / 参考时间缺失 / 计算异常 →
+        cold_factor=1.0 不降权，不影响召回主链路。存量行无 last_recalled_at →
+        按 created_at 计算（零迁移 fail-open）。
+
+        Args:
+            memories: _expand_to_parents 输出的父块记忆列表（原地改 score）
+            child_docs: 检索命中的长期子块列表（含 id / parent_id）
+            identity: 已规范化的身份标识（本方法不直接使用，保留签名一致性）
+
+        Returns:
+            降权后的记忆列表（按新 score 降序重排，调用方按此截断 dynamic_k）
+        """
+        if not settings.memory_cold_decay_enabled or not memories:
+            return memories
+        try:
+            ref_ids = {d.get("parent_id") for d in child_docs if d.get("parent_id")}
+            ref_ids |= {d.get("id") for d in child_docs
+                        if not d.get("parent_id") and d.get("id")}
+            if not ref_ids:
+                return memories
+            async with async_session_factory() as session:
+                rows = await session.execute(
+                    select(Document).where(Document.id.in_(ref_ids))
+                )
+                refs = {d.id: d for d in rows.scalars().all()}
+        except Exception as e:
+            logger.warning("冷记忆降权失败，保持原分: %s", e)
+            return memories
+
+        by_content: dict[str, Document] = {}
+        for d in refs.values():
+            if _is_superseded(d):
+                continue
+            if d.content and d.content not in by_content:
+                by_content[d.content] = d
+
+        now = datetime.now(timezone.utc)
+        result: list[dict] = []
+        refreshed_ids: list[int] = []
+        for m in memories:
+            doc = by_content.get(m.get("content"))
+            factor = 1.0
+            if doc is not None:
+                ref = _cold_ref_time(doc)
+                if ref is not None:
+                    try:
+                        days_since = (now - ref).total_seconds() / 86400.0
+                        if days_since >= settings.memory_cold_decay_days:
+                            factor = max(
+                                settings.memory_cold_decay_min,
+                                1.0 - (days_since - settings.memory_cold_decay_days) / 100.0,
+                            )
+                    except (TypeError, ValueError):
+                        factor = 1.0  # 计算异常 → 不降权（fail-open）
+                refreshed_ids.append(doc.id)
+            m["score"] = round(m["score"] * factor, 4)
+            result.append(m)
+        # fire-and-forget 刷新 last_recalled_at（不阻塞召回；刷新任务内部降级）
+        if refreshed_ids:
+            asyncio.create_task(self._refresh_last_recalled(refreshed_ids))
+        # 降权后排序可能变化 → 按新 score 降序（stable：同分保持原先后）
+        result.sort(key=lambda m: m["score"], reverse=True)
+        return result
+
+    async def _refresh_last_recalled(self, doc_ids: list[int]) -> None:
+        """长期层召回命中刷新 last_recalled_at=now（fire-and-forget，冷记忆升温）
+
+        与 _refresh_mentions 同款模式：只更新参考文档本身，失败仅日志降级，
+        不影响召回结果。冷降权依据 last_recalled_at：刷新后下次召回权重回 1.0
+        （< memory_cold_decay_days 不降权）。
+
+        Args:
+            doc_ids: 召回命中的参考文档 id 列表
+        """
+        if not doc_ids:
+            return
+        try:
+            async with async_session_factory() as session:
+                await session.execute(
+                    update(Document)
+                    .where(Document.id.in_(doc_ids))
+                    .values(last_recalled_at=datetime.now(timezone.utc))
+                )
+                await session.commit()
+        except Exception as e:
+            logger.warning("长期记忆 last_recalled_at 刷新失败（降级）: %s", e)
 
     async def _promote_memory(self, identity: str, doc: Document) -> None:
         """短期→长期升级：复制到长期层 + **保留短期副本**（后悔药，module-061 P0）

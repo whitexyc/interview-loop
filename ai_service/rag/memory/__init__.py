@@ -15,3 +15,8 @@ from rag.memory.session_memory import *  # noqa: F401,F403
 # 两个模块顶层只 import stdlib（torch 在函数内延迟导入），包导入零开销。
 from rag.memory.nli_loader import *  # noqa: F401,F403
 from rag.memory.nli_judge import *  # noqa: F401,F403
+# module-062：memory_type_clf（类型判断分类器）/memory_conflict_clf（矛盾检测
+# 分类器）同款注册——顶层仅 import 已加载的 embedding_service/numpy/内存提取器
+# （sklearn/joblib 惰性导入），包导入零模型加载。
+from rag.memory.memory_type_clf import *  # noqa: F401,F403
+from rag.memory.memory_conflict_clf import *  # noqa: F401,F403
