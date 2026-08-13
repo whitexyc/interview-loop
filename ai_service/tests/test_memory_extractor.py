@@ -163,7 +163,8 @@ class TestExtractFacts:
             fake = self._mock_client(raw)
             with mock.patch("rag.memory_extractor.LLMFactory.get_client", return_value=fake):
                 facts = await extract_facts("回答风格", "可以，我会简短回答", [])
-            assert facts == [{"content": "用户偏好简短回答", "importance": 0.9}]
+            # module-062：返回结构加 type 字段（缺失 → 默认 fact，增量字段）
+            assert facts == [{"content": "用户偏好简短回答", "importance": 0.9, "type": "fact"}]
         asyncio.run(run())
 
     def test_empty_content_dropped(self):
@@ -186,7 +187,8 @@ class TestExtractFacts:
             fake = self._mock_client(raw)
             with mock.patch("rag.memory_extractor.LLMFactory.get_client", return_value=fake):
                 facts = await extract_facts("q", "a", [])
-            assert facts == [{"content": "边界事实", "importance": 0.6}]
+            # module-062：缺失 type → 默认 fact（增量字段）
+            assert facts == [{"content": "边界事实", "importance": 0.6, "type": "fact"}]
         asyncio.run(run())
 
     def test_non_numeric_importance_dropped(self):
@@ -231,7 +233,8 @@ class TestExtractFacts:
             fake = self._mock_client(raw)
             with mock.patch("rag.memory_extractor.LLMFactory.get_client", return_value=fake):
                 facts = await extract_facts("q", "a", [])
-            assert facts == [{"content": "用户偏好", "importance": 0.95}]
+            # module-062：缺失 type → 默认 fact（增量字段）
+            assert facts == [{"content": "用户偏好", "importance": 0.95, "type": "fact"}]
         asyncio.run(run())
 
     def test_parse_failure_returns_empty(self):

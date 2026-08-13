@@ -1,0 +1,6 @@
+{
+  "max_planner_retry": 60,
+  "max_developer_retry": 60,
+  "max_reviewer_rounds": 60,
+  "max_tester_retry": 60
+}

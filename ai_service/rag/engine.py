@@ -514,20 +514,29 @@ class RAGEngine:
         except Exception as e:
             logger.warning("长期记忆提取失败，跳过写入: %s", e)
             return
+        # module-062 P2：按 memory_type_mode 决策每条事实的类型（clf 分类模型 /
+        # llm extract_facts 输出 / none 默认 fact）。导入放函数内避免模块顶层依赖
+        #（resolve_memory_type 内部惰性加载分类器，mode=none 零开销）。
+        from rag.memory.memory_type_clf import resolve_memory_type
         if not facts:
             return
         long_saved = 0
         short_saved = 0
         for fact in facts:
+            # module-062 P2：类型注入（memory_type_mode 决策，失败/缺失回退 fact）
+            mtype = await resolve_memory_type(
+                fact.get("content", ""), fact.get("type"))
             # 长期记忆：持久偏好（无 TTL，module-033）
             try:
-                await memory_service.save(fact["content"], identity, dedup=True)
+                await memory_service.save(fact["content"], identity, dedup=True,
+                                          memory_type=mtype)
                 long_saved += 1
             except Exception as e:
                 logger.warning("长期记忆写入失败（降级）: %s", e)
             # 短期记忆：最近主题/会话摘要（TTL 7 天，module-034）
             try:
-                await memory_service.save_short(fact["content"], identity, dedup=True)
+                await memory_service.save_short(fact["content"], identity, dedup=True,
+                                                memory_type=mtype)
                 short_saved += 1
             except Exception as e:
                 logger.warning("短期记忆写入失败（降级）: %s", e)

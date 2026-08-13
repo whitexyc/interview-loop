@@ -41,10 +41,11 @@ L2 前置校验（module-043 / ADR-0003 修订版，module-055 扩展触发）�
        module-055：提前到信号查询前短路（无条件触发后规则表命中零 DB 开销）
   任何异常 → 保守 knowledge（宁多检不漏检）。
 
-L4 分类器（module-043 / ADR-0003）：
+L4 分类器（module-043 / ADR-0003，module-056 达标启用）：
   bge-m3 冻结特征 + 逻辑回归头（intent_classifier.py）可插拔注入
-  （构造器注入 / 配置开关惰性加载），默认仍用 LLM；模型缺失/加载/推理失败
-  一律回退 LLM 分类，零影响。
+  （构造器注入 / 配置开关惰性加载）；module-056 起默认启用（L4 为决策
+  主体），模型缺失/加载/推理失败一律回退 LLM 分类，零影响；
+  PW_INTENT_CLASSIFIER_ENABLED=false 保持纯 LLM 路径。
 """
 import json
 import logging
@@ -166,8 +167,9 @@ class RouterAgent:
 
     使用 LLM 对用户问题进行 zero-shot 分类（L4 分类器启用时替换决策主体）。
     实例化时可指定 provider，默认使用 settings.llm_provider。
-    module-043：可注入 L4 意图分类器（intent_classifier，bge-m3+逻辑回归），
-    默认仍用 LLM；LLM 低置信结果走 L2 确定性信号确认（见模块 docstring）。
+    module-043：可注入 L4 意图分类器（intent_classifier，bge-m3+逻辑回归）；
+    module-056 起默认启用（L4 为决策主体，失败回退 LLM）；LLM 路径结果
+    走 L2 确定性信号确认（见模块 docstring）。
     """
 
     def __init__(self, provider: Optional[str] = None,

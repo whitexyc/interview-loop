@@ -120,13 +120,52 @@ class Settings(BaseSettings):
     memory_promote_mentions: int = 2            # 短期→长期升级：mention_count ≥ 该值
     memory_promote_window_days: int = 7         # 升级窗口（天）：最近提及在窗口内才升级
 
+    # 记忆类型化衰减（module-062 / ADR-0007 P2）：记忆按类型差异化半衰期（A-MAC 参考——
+    # 偏好慢衰减、事件快过期），替换"所有短期记忆同一半衰期"的一刀切。
+    #   memory_type_mode 定生产注入（类型从哪来，winner 决定，见 eval/memory_type_dataset.py）：
+    #     clf  —— bge-m3+逻辑回归分类模型判型（复用 module-056 intent 基建，落盘
+    #            models/memory_type_clf.joblib；推理失败回退 llm_type/默认 fact）
+    #     llm  —— extract_facts 输出 type（_EXTRACT_PROMPT few-shot，缺失/非法默认 fact）
+    #     none —— 不判型，全部按默认 fact 存储（类型化衰减零生效 = 零回归回退，
+    #            不预设成功：Accuracy<0.8 谁都不上则保持 none）
+    #   memory_type_decay_enabled（PW_MEMORY_TYPE_DECAY）默认 true：_evolve_recall 按
+    #     type 选半衰期；false 回退全局 memory_short_half_life（现状行为）。
+    #   半衰期（天）：preference 30（偏好长期有效）/ event 1（临时事件迅速过期）/
+    #     其余（fact/未知/存量无 type）→ memory_short_half_life=3（存量零回归口径）。
+    #   升级阈值未按类型区分（保持 ≥2 次/7 天），如实声明。
+    #   实测（module-062 WP1，eval_runs id=32/33，同 30 条评测集）：clf 1.0000 /
+    #   LLM 1.0000 双达标且同分 → 取 clf（零成本/确定性/离线，对齐 module-056 L4
+    #   分类器替代 LLM 哲学；评测集小且与训练集同模式，1.0 含一定"同分布"成分，
+    #   如实声明）。clf 推理失败自动回退 llm_type（extract_facts 输出）→ 默认 fact。
+    memory_type_mode: Literal["clf", "llm", "none"] = "clf"
+    memory_type_decay_enabled: bool = True
+    memory_type_half_life_preference: float = 30.0
+    memory_type_half_life_event: float = 1.0
+
+    # 冷记忆降权（module-062 / ADR-0007 P3）：长期层久未召回的旧记忆检索时降权
+    # （Memory Decay 参考 ×0.3-1.0，温和不删除）。recall 长期层检索命中后按
+    # 距上次召回（last_recalled_at or created_at）天数加权：< memory_cold_decay_days
+    # → ×1.0（最近召回）；此后平滑渐降（30→100 天 1.0→0.3），下限
+    # memory_cold_decay_min（默认 0.3，不删旧可回溯）。召回命中 fire-and-forget
+    # 刷新 last_recalled_at=now（冷记忆升温）。短期层不降权（已有衰减），如实声明。
+    #   memory_cold_decay_enabled（PW_MEMORY_COLD_DECAY）默认 true；false 回退现状。
+    memory_cold_decay_enabled: bool = True
+    memory_cold_decay_days: int = 30
+    memory_cold_decay_min: float = 0.3
+
     # 记忆冲突消解（module-061 / ADR-0007 P1）：true 时 _merge_duplicate 去重
-    # 命中后走 mDeBERTa NLI 判矛盾（contradiction → 旧父块标 superseded=true +
-    # 新内容按正常新增入库，替代"拼接共存"）；false 完全旧行为（追加拼接，零回归）。
-    # 默认 false = 不预设成功：评测（eval/memory_conflict_dataset.py 矛盾 P/R/F1）
-    # 达标（contradiction Recall≥0.8 且 Precision≥0.8）后才切 true，对齐
-    # ADR-0003 L4 / module-052 放行模式。NLI 不可用/超时 → 返回 None → 旧行为。
-    memory_conflict_enabled: bool = False
+    # 命中后走矛盾判定（contradiction → 旧父块标 superseded=true + 新内容按正常新增
+    # 入库，替代"拼接共存"）；false 完全旧行为（追加拼接，零回归）。
+    # module-061 原默认 false（旧双门槛 Recall≥0.8 且 Precision≥0.8 未达标）；
+    # module-062 WP4 用户决策改为 **Precision≥0.8 者启用**（Recall 后续提升不阻塞，
+    # 保守方向：宁可漏检也不错标）。实测（module-062 WP4 同 30 条评测集）：
+    #   clf（bge-m3+LR，142 案例训练）：Precision 0.9048 / Recall 0.9500（eval_runs id=34）
+    #   nli（mDeBERTa）：Precision 1.0000 / Recall 0.5000（eval_runs id=35，module-061 复现）
+    # 双达标取 Precision 高者 → **nli 启用**（PW_MEMORY_CONFLICT=true，judge=nli）；
+    # clf Recall 更高（0.95 vs 0.5），产品如需更全召回可 PW_MEMORY_CONFLICT_JUDGE=clf
+    # 一键切换（已在 config 预置）。矛盾判定器不可用/超时 → 返回 None → 旧行为（零回归）。
+    memory_conflict_enabled: bool = True
+    memory_conflict_judge: Literal["clf", "nli"] = "nli"
 
     # 意图分类（module-043 L4）：true 时 router 尝试加载 bge-m3+逻辑回归分类器
     #（模型缺失/加载失败自动回退 LLM 分类，零影响）。

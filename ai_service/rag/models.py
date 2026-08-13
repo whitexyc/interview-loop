@@ -61,6 +61,22 @@ class Document(Base):
         DateTime(timezone=True), server_default=func.now(),
         comment="记忆最近更新时间（升级/冲突标记/去重追加时刷新）"
     )
+    # module-062 记忆进化 2（ADR-0007 P2/P3）：
+    #   type —— 记忆类型（preference 偏好/ fact 事实/ event 事件），P2 类型化衰减
+    #           依据（_evolve_recall 按 type 选半衰期：preference 30 天慢 / event 1 天
+    #           快 / 其余按 memory_short_half_life=3）。类型来源由 memory_type_mode
+    #           （clf/llm/none）决定；存量行默认 'fact'（DB DEFAULT，零迁移兜底）。
+    #   last_recalled_at —— 长期层最后召回时间，P3 冷记忆降权依据（recall 命中后
+    #                        fire-and-forget 刷新为 now；久未召回 → 分数 ×0.3-1.0 降权
+    #                        不删除）。存量行 NULL → 按 created_at 计算且不降权（零回归）。
+    type = Column(
+        String(16), nullable=False, default="fact",
+        comment="记忆类型：preference（偏好，慢衰减）/ fact（事实，中衰减）/ event（事件，快衰减）"
+    )
+    last_recalled_at = Column(
+        DateTime(timezone=True), nullable=True,
+        comment="长期层最后召回时间（P3 冷记忆降权依据：久未召回降权不删除）"
+    )
 
     def __repr__(self) -> str:
         return f"<Document id={self.id} title={self.title!r} source={self.source!r}>"

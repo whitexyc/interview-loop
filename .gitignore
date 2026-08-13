@@ -44,6 +44,9 @@ specs/
 # Models (download separately, not source code)
 ai_service/models/
 
+# Local tool caches / eval outputs (not source)
+ai_service/.ua/
+ai_service/eval/faithfulness.json
 
 # Local Claude Code settings (per-machine, not shared)
 .claude/settings.local.json
