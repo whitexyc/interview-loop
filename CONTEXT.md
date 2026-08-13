@@ -166,13 +166,19 @@
 | `specs/adr/0009-query-rewrite-optimization.md` | Query 改写优化方案（分诊式改写+保真校验+评测闭环，📋 暂不实施） |
 | `specs/adr/0010-hallucination-detection-upgrade.md` | 幻觉检测升级方案（HHEM 专职裁判+逐句报分+矛盾扫描，P0 可先行） |
 | `specs/adr/0011-prompt-eval-optimization.md` | 提示词评估与自动优化（四维判断+四代优化算法+DSPy 选型+三步落地路径，📋 暂不实施） |
-| `specs/adr/0012-tool-governance.md` | 工具治理与分层工具选择（数量退化数据+A/B/C 三档方案，工具口径 10→7 已修正；📋 P1 已立项 module-059：阶段切分状态机） |
+| `specs/adr/0012-tool-governance.md` | 工具治理与分层工具选择（数量退化数据+A/B/C 三档方案，10 工具口径 08-13 同步复核确认；✅ P1 已实施：并入 module-058，检索组 7 / 生成组 4，ctx.phase 状态机） |
 | `specs/adr/0013-verify-async.md` | verify 异步化决策（✅ 已实施 module-060：轮询送达 + 落库持久化 + 非流式保持同步 + 计时口径变化） |
+| `specs/adr/0014-document-parsing-cleaning.md` | 多格式文档解析与清洗策略（📋 待实施 module-064：AnyDoc 统一解析 4.4ms + 清洗五步 + 文档去重三级（哈希/结构指纹/余弦≥0.95 + canonical）+ PDF 图片三层（OCR/VLM/MinerU 路由）+ 原始文件留存） |
+| `specs/adr/0015-multi-turn-intent-routing.md` | 多轮对话意图路由升级（📋 已立项 module-063：会话级路由 classify(query,history[-4:]) + 短句意图继承（去语气词 <6 字符无特征）+ 复用分诊式改写喂路由 + 工具历史规则信号；百度千帆实测 召回 62.5→89.2% / 准确率 58→87.5%） |
+| `specs/module-063-multi-turn-intent-routing/task-brief.md` | 多轮意图路由升级执行简报（📋 WP-A 会话级路由 / WP-B 短句继承 / WP-C 改写喂路由 / WP-D 工具信号+评测 / WP-E 回归；ADR-0015 落地） |
+| `specs/module-064-multi-format-ingestion/task-brief.md` | 多格式文档解析与数据清洗执行简报（📋 AnyDoc 接入 + 清洗五步 + 文档去重三级 + 图片三层 + 原始文件留存；ADR-0014 落地） |
 | `specs/module-060-verify-async/` | verify 异步化（✅ 已实施：chat_stream 异步 verify + done 带 verify_task_id + 前端轮询补结果 + verify_results 表持久化，单测 17/0 + 前端 58/0；真实 E2E 待环境——本机无 PostgreSQL） |
 | `specs/module-052-nli-contradiction-scan/task-brief.md` | NLI 矛盾扫描前置决策任务简报（📋 复测进行中 module-057 v2，数据集 86 条，kappa 门槛判定中） |
 | `specs/module-053-rrf-fusion/` | 检索融合升级（✅ RRF 三通道已实施放行：Hit@5 0.9714→0.9905，加权否决，changelog 含放行决策表；上线 `PW_RETRIEVAL_FUSION_MODE=rrf` 一键开启，默认 hybrid 零回归） |
-| `specs/module-058-retrieval-chain-opt/task-brief.md` | 检索链优化+可观测性任务简报（📋 WP-A 拼标题+防扎堆 / WP-B prompt 顺序前缀缓存 / WP-C 可观测性，基线 Hit@5 0.9905 id=18） |
-| `specs/module-059-tool-phase-split/task-brief.md` | 工具治理 P1 任务简报（📋 阶段切分状态机：检索组 6 / 生成组 generate_answer+search_knowledge 补检口，ctx.phase 单向前进，PW_TOOL_PHASE_SPLIT 开关） |
+| `specs/module-058-retrieval-chain-opt/task-brief.md` | 检索链优化+可观测性+工具治理任务简报（✅ WP-B prompt 前缀缓存 / WP-C 可观测性 / WP-E 工具治理已实施，780/0；⏸️ WP-A 拼标题推迟，后续三口径对比） |
+| `specs/module-059-tool-phase-split/task-brief.md` | 工具治理 P1 任务简报（✅ 已随 module-058 完成：检索组 7 / 生成组 4（re_search 双组），ctx.phase 单向前进，PW_TOOL_PHASE_SPLIT 开关） |
+| `specs/module-061-memory-correction/` | 记忆纠错（✅ 已实施 ADR-0007 P0+P1：升级留后悔药 + SUPERSEDED 标记 + NLI 冲突消解，824/0；module-062 升级后 NLI 消解已启用） |
+| `specs/module-062-memory-evolution2/` | 记忆进化 2（✅ 已实施 ADR-0007 P2/P3 + WP4：类型化衰减（preference 30 天/event 1 天）+ 冷记忆降权（×0.3-1.0 不删除）+ 矛盾检测启用（mDeBERTa Precision 1.0），897/0） |
 | `specs/module-042-harness-guardrails/test-report.md` | 校验验收测试报告 |
 | `ai_service/rag/schemas.py:18-28` | ChatRequest 模型 + 截断 validator |
 | `ai_service/agent/router.py:76-122` | LLM 输出校验 + 保守路由 |
@@ -203,6 +209,7 @@
 - **写路径冲突消解（P1）**：语义去重命中（cosine>0.85）后 mDeBERTa NLI 判新事实 vs 旧父块——contradiction → 旧父块 superseded=true + updated_at + 新内容按**正常新增**入库（不拼接共存，"讨厌咖啡\n喜欢咖啡"不再让 LLM 猜哪句是新）；entailment/neutral/NLI 不可用/开关关 → 保持追加拼接（旧行为零回归）。
 - **NLI 封装（nli_judge）**：mDeBERTa 三分类（entailment/neutral/contradiction），延迟加载 557MB + threading.Lock + to_thread + 20s 超时 + 任何失败返回 None（上层降级旧行为）；加载路径镜像 eval/compare_nli_models 已验证 transformers 5.x（HF_HUB_OFFLINE + fp32 + id2label 从 config 读）。
 - **开关默认关（不预设成功）**：`PW_MEMORY_CONFLICT` 默认 false——评测达标（contradiction Recall≥0.8 且 Precision≥0.8）才切 true。**真实 baseline（eval_runs id=31，30 条五类记忆标注集）：Accuracy 0.60 / contradiction Precision 1.0000（0 误判）/ Recall 0.5000（漏判一半）→ 未达门槛**。数据说话：mDeBERTa 判矛盾精准但只抓得住一半（与 module-054/057 矛盾判别短板结论一致），记忆级短句场景 Precision 极高值得注意。
+- **⚠️ 后续更新（module-062 WP4）**：矛盾检测对比启用后 **`PW_MEMORY_CONFLICT=true` + `PW_MEMORY_CONFLICT_JUDGE=nli`**（mDeBERTa Precision 1.0000 达标启用，宁可漏检也不错标；clf 分类器 Recall 0.95 更高可 `PW_MEMORY_CONFLICT_JUDGE=clf` 一键切换）——本段"默认关"为 module-061 当时口径，已过时，以上条为准。
 - **记忆级 vs claim_vs_doc 矛盾判别（口径区分）**：module-052/054/057 是 claim_vs_doc（长句对文档片段，kappa<0.7）；module-061 是记忆级（短句/偏好/事件级改口），更聚焦但同样以数据验证（未达门槛不预设成功）。
 - **标记+新增分两步（事务口径）**：`_merge_duplicate` 标记 superseded 提交后，save 正常新增路径插入新内容——新增失败旧记忆已标记但未删除（内容保留不丢数据 fail-open）。
 - **`is True` 判断（测试兼容）**：`_is_superseded` 用 `getattr(doc, "superseded", False) is True` 而非 truthy——MagicMock 缺字段时 `.superseded` 返回真值 MagicMock，truthy 判断会误伤全部存量测试父块。
