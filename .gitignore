@@ -43,3 +43,7 @@ specs/
 
 # Models (download separately, not source code)
 ai_service/models/
+
+
+# Local Claude Code settings (per-machine, not shared)
+.claude/settings.local.json
