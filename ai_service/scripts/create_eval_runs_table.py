@@ -14,7 +14,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # ai_service 根
 
-from eval.golden_retrieval import EVAL_RUNS_DDL, ensure_eval_runs_table
+from eval.golden.golden_retrieval import EVAL_RUNS_DDL, ensure_eval_runs_table
 
 
 async def main() -> None:

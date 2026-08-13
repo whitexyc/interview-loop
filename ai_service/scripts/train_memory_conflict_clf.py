@@ -49,7 +49,7 @@ logger = logging.getLogger("train_memory_conflict_clf")
 
 # 本文件所在目录（scripts/），训练集在 eval/
 EVAL_DIR = Path(__file__).resolve().parents[1] / "eval"
-DATASET_PATH = EVAL_DIR / "memory_conflict_train_dataset.json"
+DATASET_PATH = EVAL_DIR / "datasets" / "memory_conflict_train_dataset.json"
 # 模型落盘路径（与 memory_conflict_clf 默认一致）
 DEFAULT_MODEL_PATH = str(
     Path(__file__).resolve().parents[1] / "models" / "memory_conflict_clf.joblib"
@@ -83,7 +83,7 @@ async def train(model_path: str, save: bool) -> None:
     samples = load_training_samples()
     if len(samples) < 10:
         logger.error("训练样本不足（%d 条），无法训练——请先运行 "
-                     "python -m eval.build_memory_conflict_train 补充标注数据", len(samples))
+                     "python -m eval.datasets.build_memory_conflict_train 补充标注数据", len(samples))
         sys.exit(1)
 
     clf = MemoryConflictClassifier(model_path=model_path)
