@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { Table, Button, Popconfirm, message, Input, Typography, Modal, Upload, Flex, Alert } from 'antd';
 import { DeleteOutlined, SearchOutlined, PlusOutlined, InboxOutlined, CheckCircleFilled, LoadingOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
-import { listDocuments, deleteDocument, uploadDocument } from '../services/ragService';
+import { listDocuments, deleteDocument, uploadDocumentFile } from '../services/ragService';
 import type { DocumentInfo } from '../types/rag';
 import PasswordGuard from '../components/PasswordGuard';
 import LLMChainPanel from '../components/LLMChainPanel';
@@ -58,10 +58,10 @@ export default function KnowledgePage() {
     setFileName(name); setUploadError(null); setDuplicate(false);
     setUploadStep(1);
     try {
-      const text = await file.text();
+      // module-064：多格式（含二进制 pdf/docx/xlsx）走原始文件字节上传
       setTimeout(() => setUploadStep(2), 400);
       setTimeout(() => setUploadStep(3), 1000);
-      const result = await uploadDocument({ title: name, content: text });
+      const result = await uploadDocumentFile(file, name);
       if (result.duplicate) {
         setDuplicate(true); setUploadStep(0);
         setTimeout(() => setDuplicate(false), 3000);
@@ -212,7 +212,7 @@ export default function KnowledgePage() {
           />
         )}
         <Dragger
-          name="file" multiple={false} accept=".md,.txt"
+          name="file" multiple={false} accept=".md,.txt,.pdf,.docx,.xlsx,.pptx,.epub,.csv"
           beforeUpload={async (f) => { handleFileDrop(f as File); return false; }}
           showUploadList={false} disabled={isUploading}
           style={{ borderRadius: 12, overflow: 'hidden', padding: isUploading ? '16px 0' : '24px 0' }}
@@ -237,7 +237,9 @@ export default function KnowledgePage() {
             <Flex vertical align="center" gap={8} style={{ padding: '8px 0' }}>
               <InboxOutlined style={{ fontSize: 36, color: '#94a3b8' }} />
               <Text strong style={{ fontSize: 15, color: '#0f172a' }}>拖拽文件到此处</Text>
-              <Text style={{ fontSize: 13, color: '#64748b' }}>或点击选择文件（支持 .md / .txt）</Text>
+              <Text style={{ fontSize: 13, color: '#64748b' }}>
+                或点击选择文件（支持 Markdown / 文本 / PDF / Word / Excel / PPT / EPUB / CSV）
+              </Text>
             </Flex>
           )}
         </Dragger>

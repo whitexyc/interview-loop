@@ -30,4 +30,11 @@ jieba==0.42.1
 # L4/L3 分类器依赖（module-043/045：intent_classifier + sufficiency_classifier）
 scikit-learn>=1.3.0
 joblib>=1.3.0
+# 多格式文档解析（module-064 / ADR-0014 WP1）：
+#   firecrawl-anydoc —— AnyDoc 统一解析引擎（14 格式 → GFM Markdown，零系统依赖无模型）
+#   python-docx / openpyxl —— docx/xlsx 轻量回退解析（AnyDoc 不可用时）；
+#   pptx/epub 无轻量回退（AnyDoc 原生处理），诚实降级不假装支持
+firecrawl-anydoc==0.1.8
+python-docx>=1.1.0
+openpyxl>=3.1.0
 

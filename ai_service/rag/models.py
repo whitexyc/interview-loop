@@ -77,6 +77,34 @@ class Document(Base):
         DateTime(timezone=True), nullable=True,
         comment="长期层最后召回时间（P3 冷记忆降权依据：久未召回降权不删除）"
     )
+    # module-064 多格式解析/清洗/去重（ADR-0014）：
+    #   original_path —— 上传原始文件落盘路径（WP5 原件留存，重灌依赖）。仅文档
+    #                    根父块（parent_id IS NULL）与子块写；存量行 NULL 兼容。
+    #   doc_content_hash —— 文档级全文本 SHA256（WP6 L1 内容哈希去重：完全相同
+    #                    直接丢弃，复用 content_hash 列的思想但粒度是整篇文档，
+    #                    存全部行便于按文档定位）。存量行 NULL（跨格式精确去重
+    #                    对存量靠 title 匹配，如实声明）。
+    #   duplicate_cluster_id —— 语义重复簇 ID（WP6 L2：embedding 余弦≥0.95 不删，
+    #                    标簇 + canonical 选择；检索抑制只出 canonical）。存量行
+    #                    NULL（未参与语义去重）。
+    #   is_canonical —— 簇内是否 canonical（true=检索可见，false=重复副本检索
+    #                    抑制）。存量行默认 TRUE（零回归）。
+    original_path = Column(
+        String(512), nullable=True,
+        comment="上传原始文件落盘路径（module-064 WP5 原件留存，重灌依赖）"
+    )
+    doc_content_hash = Column(
+        String(64), nullable=True, index=True,
+        comment="文档级全文本 SHA256（module-064 WP6 L1 内容哈希去重）"
+    )
+    duplicate_cluster_id = Column(
+        String(64), nullable=True, index=True,
+        comment="语义重复簇 ID（module-064 WP6 L2，检索抑制只出 canonical）"
+    )
+    is_canonical = Column(
+        Boolean, nullable=False, default=True,
+        comment="簇内 canonical：true=检索可见，false=重复副本检索抑制（module-064）"
+    )
 
     def __repr__(self) -> str:
         return f"<Document id={self.id} title={self.title!r} source={self.source!r}>"

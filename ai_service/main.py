@@ -29,6 +29,8 @@ from rag.schemas import (
 )
 from rag.models import Document, Feedback
 from rag.memory.memory import memory_service
+from rag.retrieval.document_parser import SUPPORTED_EXTENSIONS, DocumentParseError
+from rag.retrieval.document_ingest import ingest_document, IngestError
 from llm.client import LLMFactory
 
 
@@ -917,54 +919,47 @@ async def upload_document(
     title: str = Form(default=""),
     source: str = Form(default=""),
 ):
-    """上传 PDF 文档，自动提取文本后入库
+    """多格式文档上传：解析 → 图片 → 清洗 → 归一化 → 去重 → 分块 → 嵌入 → 入库（module-064）
 
-    上传 PDF 文件（multipart/form-data），可选附加标题和来源标识。
-    使用 PyMuPDF 提取文本内容，调用已有 add_document 入库。
+    支持 .md/.txt/.pdf/.docx/.xlsx/.pptx/.epub/.csv（前端 accept 同源，见
+    document_parser.SUPPORTED_EXTENSIONS）。四层 ingestion：
+      解析层 document_parser（格式识别读字节魔数，AnyDoc 主引擎 + PyMuPDF/
+      轻量回退）→ 图片三层（默认关，WP4）→ 五步清洗 + 无损归一化（WP2/WP3）
+      → 三级去重（WP6）→ 原件留存（WP5）→ add_document 分块嵌入落库。
+    错误变体映射中文提示（Unsupported/Malformed/Encrypted → DocumentParseError/
+    IngestError 消息直接透出）。
     """
-    # 校验文件类型
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
-        return {"code": 1, "message": "仅支持 PDF 文件"}
+    if not file.filename:
+        return {"code": 1, "message": "未获取到上传文件名"}
+
+    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
+    if not ext or f".{ext}" not in SUPPORTED_EXTENSIONS:
+        return {"code": 1, "message":
+                f"不支持的文件格式（.{ext or '未知'}），请上传 {'/'.join(SUPPORTED_EXTENSIONS)}"}
 
     # 读取文件内容
     content_bytes = await file.read()
     if not content_bytes:
         return {"code": 2, "message": "上传文件为空"}
 
-    # 用 PyMuPDF 解析
-    try:
-        import fitz
-
-        pdf_doc = fitz.open(stream=content_bytes, filetype="pdf")
-        page_count = pdf_doc.page_count
-        pages_text = []
-        for i, page in enumerate(pdf_doc, start=1):
-            text = page.get_text()
-            pages_text.append(f"--- Page {i}/{page_count} ---\n{text}")
-        full_text = "\n\n".join(pages_text)
-        pdf_doc.close()
-    except ImportError:
-        return {"code": 3, "message": "PDF 解析库不可用，请安装 PyMuPDF"}
-    except Exception as e:
-        logger.error("PDF 解析失败: %s", e, exc_info=True)
-        return {"code": 3, "message": f"PDF 解析失败: {e}"}
-
     # 确定标题
     if not title:
-        title = (
-            file.filename.replace(".pdf", "")
-            .replace("_", " ")
-            .replace("-", " ")
-            .strip()
-        )
+        stem = file.filename.rsplit(".", 1)[0]
+        title = stem.replace("_", " ").replace("-", " ").strip()
 
     # 确定来源
     if not source:
-        source = f"pdf_upload:{file.filename}"
+        source = f"{ext}_upload:{file.filename}"
 
-    # 调用已有 add_document 入库
-    result = await rag_engine.add_document(title, full_text, source)
-    result["page_count"] = page_count
+    # 统一 ingestion 管线（解析→清洗→归一化→去重→原件留存→入库）
+    try:
+        result = await ingest_document(content_bytes, file.filename, title, source)
+    except (DocumentParseError, IngestError) as e:
+        logger.warning("文档上传失败: %s", e)
+        return {"code": 3, "message": str(e)}
+    except Exception as e:
+        logger.error("文档处理失败: %s", e, exc_info=True)
+        return {"code": 3, "message": f"文档处理失败: {e}"}
 
     return {"code": 0, "data": result}
 

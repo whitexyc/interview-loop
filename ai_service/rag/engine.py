@@ -22,6 +22,7 @@ import hashlib
 import logging
 import re
 import time
+from typing import Optional
 
 from sqlalchemy import select
 
@@ -963,10 +964,14 @@ class RAGEngine:
         if not parent_scores:
             return output  # 没有子块需要展开，直接返回旧格式文档
 
-        # 批量查询父块
+        # 批量查询父块（module-064 WP6：检索抑制——只出 canonical，非 canonical
+        # 重复副本不参与答案引用。存量行 is_canonical 默认 TRUE 零回归。）
         async with async_session_factory() as session:
             result = await session.execute(
-                select(Document).where(Document.id.in_(list(parent_scores.keys())))
+                select(Document).where(
+                    Document.id.in_(list(parent_scores.keys())),
+                    Document.is_canonical.is_(True),
+                )
             )
             parents = result.scalars().all()
 
@@ -995,7 +1000,12 @@ class RAGEngine:
                       len(child_docs), len(unique_output))
         return unique_output
 
-    async def add_document(self, title: str, content: str, source: str = "") -> dict:
+    async def add_document(self, title: str, content: str, source: str = "",
+                           original_path: str = "",
+                           doc_content_hash: str = "",
+                           duplicate_cluster_id: Optional[str] = None,
+                           is_canonical: bool = True,
+                           doc_embedding: Optional[list] = None) -> dict:
         """添加文档：分块 → 向量化 → 落库
 
         流程：
@@ -1008,10 +1018,24 @@ class RAGEngine:
           因为 embedding 计算可能失败（如模型加载异常），先算再写可以避免
           写入无 embedding 的"残缺"记录，保证数据一致性。
 
+        module-064 扩展（ADR-0014 WP5/WP6，默认值零回归）：
+          original_path —— WP5 上传原件落盘路径（重灌依赖）
+          doc_content_hash —— WP6 L1 文档级全文本 SHA256（完全相同去重）
+          duplicate_cluster_id / is_canonical —— WP6 L2 语义重复标簇 + canonical
+            选择（检索抑制只出 canonical）
+          doc_embedding —— 文档级 embedding，存于**首个父块**（文档根父块）的
+            embedding 列（复用既有 Vector 列零新增；父块不参与向量检索——retriever
+            只查 parent_id IS NOT NULL 子块——故不污染检索）
+
         Args:
             title: 文档标题
             content: 文档内容（不能为空）
             source: 来源标识（可选）
+            original_path: 上传原始文件落盘路径（可选）
+            doc_content_hash: 文档级全文本 SHA256（可选）
+            duplicate_cluster_id: 语义重复簇 ID（可选，None=非重复）
+            is_canonical: 是否 canonical（False=重复副本，检索抑制）
+            doc_embedding: 文档级 embedding（可选，存根父块）
 
         Returns:
             {"id": int, "title": str, "chunks": int, "duplicate": bool}
@@ -1025,12 +1049,13 @@ class RAGEngine:
         if not content or not content.strip():
             raise ValueError("文档内容不能为空")
 
-        logger.info("add_document: title=%s, content_len=%d, source=%s", title, len(content), source)
+        logger.info("add_document: title=%s, content_len=%d, source=%s, original_path=%s",
+                    title, len(content), source, original_path or "(无)")
 
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
 
         async with async_session_factory() as session:
-            # 检测重复：标题完全匹配 或 内容哈希匹配
+            # 检测重复：标题完全匹配 或 内容哈希匹配（存量逻辑，零回归）
             existing = await session.execute(
                 select(Document).where(
                     (Document.title == title.strip()) | (Document.content_hash == content_hash)
@@ -1054,17 +1079,24 @@ class RAGEngine:
                 children = [{"title": title, "content": content, "parent_index": 0}]
 
             try:
-                # 2. 插入父块（无向量，供子块引用）
+                # 2. 插入父块（无向量，供子块引用；module-064：根父块存文档级
+                #    embedding + 四列 WP5/WP6 元数据）
                 parent_objs = []
-                for p in parents:
+                for pi, p in enumerate(parents):
                     parent_title = f"{title} > {p['title']}" if p.get("title") and p["title"] != title else title
+                    # 首个父块为文档根父块：持有文档级 embedding（语义去重比对用）
+                    parent_embedding = doc_embedding if pi == 0 else None
                     doc = Document(
                         title=parent_title,
                         content=p["content"],
                         source=source,
-                        embedding=None,
+                        embedding=parent_embedding,
                         parent_id=None,
                         content_hash=hashlib.sha256(p["content"].encode("utf-8")).hexdigest(),
+                        original_path=original_path or None,
+                        doc_content_hash=doc_content_hash or None,
+                        duplicate_cluster_id=duplicate_cluster_id,
+                        is_canonical=is_canonical,
                     )
                     session.add(doc)
                     parent_objs.append(doc)
@@ -1076,7 +1108,7 @@ class RAGEngine:
                 child_texts = [c["content"] for c in children]
                 embeddings = await embedding_service.embed_documents(child_texts)
 
-                # 4. 插入子块（含向量 + parent_id 外键）
+                # 4. 插入子块（含向量 + parent_id 外键 + WP5/WP6 元数据）
                 for i, (child, emb) in enumerate(zip(children, embeddings)):
                     parent_idx = child.get("parent_index", 0)
                     if parent_idx >= len(parent_objs):
@@ -1092,6 +1124,10 @@ class RAGEngine:
                         parent_id=parent.id,
                         content_hash=hashlib.sha256(child["content"].encode("utf-8")).hexdigest(),
                         search_tokens=tokenize(child["content"]),
+                        original_path=original_path or None,
+                        doc_content_hash=doc_content_hash or None,
+                        duplicate_cluster_id=duplicate_cluster_id,
+                        is_canonical=is_canonical,
                     )
                     session.add(doc)
 
