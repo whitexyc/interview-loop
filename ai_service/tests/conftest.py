@@ -83,3 +83,18 @@ def default_verify_async_disabled(monkeypatch):
     from src.config import settings
 
     monkeypatch.setattr(settings, "verify_async_enabled", False)
+
+
+@pytest.fixture(autouse=True)
+def default_memory_conflict_disabled(monkeypatch):
+    """测试环境统一钉住记忆冲突消解开关=关闭（module-061，对齐 056/058/060 模式）
+
+    生产默认已关闭（PW_MEMORY_CONFLICT 默认 false，评测达标才启用），但存量
+    记忆测试（module-033/034/035/046）以旧行为（去重命中 → 追加拼接）为准——
+    显式钉住 false 是"存量测试全绿 + 开关 false 完全旧行为零回归"的双重保证
+    （即使生产误开也不会漂移存量测试）。新测试（test_memory_correction.py）
+    体内显式 setattr True 验证冲突分流（配合 mock NLI，不依赖真实模型）。
+    """
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "memory_conflict_enabled", False)

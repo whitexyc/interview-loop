@@ -130,8 +130,32 @@ async def ensure_verify_results_table() -> None:
         await session.commit()
 
 
+# documents 表加列 DDL（module-061 P0 记忆纠错）：与 feedback/request_logs 同款
+# 模式——init_db 自愈幂等 ALTER（ADD COLUMN IF NOT EXISTS，重复启动不报错）。
+# superseded/updated_at 为记忆纠错（ADR-0007 P0+P1）字段：升级留后悔药（长期
+# 新条目 superseded=false + updated_at=now）+ 写路径冲突消解（矛盾 → 旧父块
+# superseded=true）。默认值兜底存量行（superseded=false / updated_at=当前时间），
+# 零迁移 fail-open（存量记忆不因加列受影响）。本地开发库 schema 未迁移先决：
+# 手动跑 scripts/migrate_module061.py（module-046 经验）。
+MEMORY_SUPERSEDED_DDL = """
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS superseded BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP;
+COMMENT ON COLUMN documents.superseded IS '记忆是否已被新说法取代（true=SUPERSEDED，不删除可审计，Zep 模式）';
+COMMENT ON COLUMN documents.updated_at IS '记忆最近更新（升级/冲突标记/去重追加时刷新）';
+"""
+
+
+async def ensure_memory_superseded_columns() -> None:
+    """幂等补 documents 表 superseded/updated_at 两列（与 feedback 同款拆分执行模式）"""
+    statements = [s.strip() for s in MEMORY_SUPERSEDED_DDL.split(";") if s.strip()]
+    async with async_session_factory() as session:
+        for stmt in statements:
+            await session.execute(text(stmt))
+        await session.commit()
+
+
 async def init_db():
-    """初始化数据库：启用 pgvector 扩展 + 自愈建 feedback / request_logs / verify_results 表"""
+    """初始化数据库：启用 pgvector 扩展 + 自愈建表/加列（feedback / request_logs / verify_results / superseded）"""
     async with engine.begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         logger.info("pgvector extension 已就绪")
@@ -141,6 +165,8 @@ async def init_db():
     logger.info("request_logs 表已就绪（module-058）")
     await ensure_verify_results_table()
     logger.info("verify_results 表已就绪（module-060）")
+    await ensure_memory_superseded_columns()
+    logger.info("documents 表 superseded/updated_at 列已就绪（module-061）")
 
 
 async def get_db() -> AsyncSession:

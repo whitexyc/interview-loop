@@ -47,6 +47,20 @@ class Document(Base):
     mention_count = Column(
         Integer, nullable=False, default=0, comment="提及次数（module-046 仅短期层使用）"
     )
+    # module-061 记忆纠错（ADR-0007 P0+P1）：
+    #   superseded —— 记忆是否已被新说法取代（true=SUPERSEDED，不删除可审计，
+    #                  Zep 模式）。写路径冲突消解（_merge_duplicate NLI 判矛盾）
+    #                  与 P0 升级留后悔药均可能标 true；召回侧过滤 superseded=true
+    #                  （_expand_to_parents / _evolve_recall），旧说法不参与召回。
+    #   updated_at —— 记忆最近更新（升级/冲突标记/去重追加时刷新），可审计时间线。
+    # 存量行默认 FALSE / 当前时间（init_db 幂等 ALTER 兜底，零迁移 fail-open）。
+    superseded = Column(
+        Boolean, nullable=False, default=False, comment="是否已被新说法取代（SUPERSEDED，不删除可审计）"
+    )
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(),
+        comment="记忆最近更新时间（升级/冲突标记/去重追加时刷新）"
+    )
 
     def __repr__(self) -> str:
         return f"<Document id={self.id} title={self.title!r} source={self.source!r}>"

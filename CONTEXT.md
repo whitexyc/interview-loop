@@ -195,3 +195,15 @@
 - **开关与逃生口**：`PW_VERIFY_ASYNC` 默认 true；false 时 chat_stream 走现状同步路径（verified→done 顺序逐字一致）。测试环境 conftest autouse 钉住 false（对齐 056/058 开关模式）。
 - **非流式端点保持同步**：/ai/rag/chat（engine.chat 同步 verify）**零改动**（前端已不用，契约稳定）；agent/agent-lg 端点不做 verify 零改动；request_logs 零改动。
 - **计时口径变化（如实记录）**：异步化后 request_logs 不再有 verify 阶段（module-058 有该字段预期）；verify 耗时改由轮询接口返回的 `verified_in_ms`（后台 `perf_counter` 计时）。
+
+## 记忆纠错领域（2026-08-13 讨论，module-061，ADR-0007 P0+P1）
+
+- **SUPERSEDED（不删除可审计，Zep 模式）**：`documents.superseded` 列（默认 FALSE）——记忆被新说法取代时标记 true 而非硬删；召回侧过滤 superseded=true（`_expand_to_parents`/`_evolve_recall`），旧说法不参与召回但可审计可回溯。**"标过期 ≠ 删记忆"**（数据安全红线：不得硬删用户记忆）。
+- **升级留后悔药（P0）**：`_promote_memory` 短期→长期升级**不再删除短期副本**（"抄进笔记本不撕草稿纸"）——旧实现复制后删短期（升级单向不可逆）；改后短期层 30 天硬上限 + 衰减 + 提及刷新（module-046）自然淘汰被取代副本；长期新条目带 superseded=false + updated_at=now。
+- **写路径冲突消解（P1）**：语义去重命中（cosine>0.85）后 mDeBERTa NLI 判新事实 vs 旧父块——contradiction → 旧父块 superseded=true + updated_at + 新内容按**正常新增**入库（不拼接共存，"讨厌咖啡\n喜欢咖啡"不再让 LLM 猜哪句是新）；entailment/neutral/NLI 不可用/开关关 → 保持追加拼接（旧行为零回归）。
+- **NLI 封装（nli_judge）**：mDeBERTa 三分类（entailment/neutral/contradiction），延迟加载 557MB + threading.Lock + to_thread + 20s 超时 + 任何失败返回 None（上层降级旧行为）；加载路径镜像 eval/compare_nli_models 已验证 transformers 5.x（HF_HUB_OFFLINE + fp32 + id2label 从 config 读）。
+- **开关默认关（不预设成功）**：`PW_MEMORY_CONFLICT` 默认 false——评测达标（contradiction Recall≥0.8 且 Precision≥0.8）才切 true。**真实 baseline（eval_runs id=31，30 条五类记忆标注集）：Accuracy 0.60 / contradiction Precision 1.0000（0 误判）/ Recall 0.5000（漏判一半）→ 未达门槛**。数据说话：mDeBERTa 判矛盾精准但只抓得住一半（与 module-054/057 矛盾判别短板结论一致），记忆级短句场景 Precision 极高值得注意。
+- **记忆级 vs claim_vs_doc 矛盾判别（口径区分）**：module-052/054/057 是 claim_vs_doc（长句对文档片段，kappa<0.7）；module-061 是记忆级（短句/偏好/事件级改口），更聚焦但同样以数据验证（未达门槛不预设成功）。
+- **标记+新增分两步（事务口径）**：`_merge_duplicate` 标记 superseded 提交后，save 正常新增路径插入新内容——新增失败旧记忆已标记但未删除（内容保留不丢数据 fail-open）。
+- **`is True` 判断（测试兼容）**：`_is_superseded` 用 `getattr(doc, "superseded", False) is True` 而非 truthy——MagicMock 缺字段时 `.superseded` 返回真值 MagicMock，truthy 判断会误伤全部存量测试父块。
+- **子包 import 注册（module-050 别名机制）**：`rag.memory` 被旧路径别名（rag/__init__ `_OLD_PATHS["memory"]`）覆盖为普通模块后，新子模块（nli_loader/nli_judge）必须在 `rag/memory/__init__.py` 导入一次注册进 sys.modules，否则 `from rag.memory.nli_judge import X` 报 "'rag.memory' is not a package"（实测坑：eval baseline 首跑 30/30 skip 系此原因）。

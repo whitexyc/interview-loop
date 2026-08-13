@@ -47,7 +47,7 @@ import logging
 import re
 from datetime import date, datetime, timezone
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import func, select, update
 
 from src.config import settings
 from src.database import async_session_factory
@@ -89,6 +89,23 @@ def _normalize_identity(identity: str) -> str:
     if _LIKE_META_RE.search(identity):
         return DEFAULT_IDENTITY
     return identity
+
+
+def _is_superseded(doc) -> bool:
+    """是否已被新说法取代（module-061 SUPERSEDED，不删除可审计，Zep 模式）
+
+    用 `is True` 而非 truthy 判断：存量行/测试桩为 None/MagicMock/False 时
+    `is True` 均为 False（不过滤）；真实 DB 行 superseded=True 才为 True。
+    MagicMock 的 `.superseded` 会返回真值 MagicMock，若用 truthy 判断会把
+    全部测试桩父块误判为 SUPERSEDED——必须显式 `is True`。
+
+    Args:
+        doc: Document 对象（真实 ORM 行或测试桩）
+
+    Returns:
+        superseded 字段确为 Python True 时返回 True
+    """
+    return getattr(doc, "superseded", False) is True
 
 
 def _escape_like(s: str) -> str:
@@ -386,16 +403,30 @@ class MemoryService:
         return None
 
     async def _merge_duplicate(self, duplicate, content: str, layer: str = "") -> dict | None:
-        """语义重复记忆：更新既有父块（追加内容）而非新增，返回 status='updated'
+        """语义重复记忆：更新既有父块（追加内容）或冲突消解（module-061 P1）
 
-        不新增任何行（库内条数不涨）；把新内容追加到既有父块 content，
-        父块 id/title 保持不变，召回仍按既有子块向量命中映射回父块。
+        默认（一致/中性/开关关/NLI 不可用）：把新内容追加到既有父块 content，
+        父块 id/title 保持不变，召回仍按既有子块向量命中映射回父块，返回
+        status='updated'（库内条数不涨）——module-046 行为不变（零回归）。
         父块缺失/更新失败 → 返回 None（由调用方 save 兜底为正常新增）。
 
-        module-046：短期层（layer='short'）去重命中 = 再次提及 → 写入侧提及
-        刷新（mention_count+1 + last_mentioned_at=now）；长期层（layer=''）
-        行为不变（进化只作用于短期层）。存量行 mention_count 为 NULL 时
-        视为 0 再 +1（零迁移 fail-open）。
+        module-061 P1 冲突消解（settings.memory_conflict_enabled 且 NLI 可用）：
+        去重命中后 NLI 判新事实 vs 旧父块 content：
+          - contradiction → 旧父块标 superseded=true + updated_at=now（不删除，
+            可审计回溯，Zep 模式），返回 None 由 save 按**正常新增**入库新内容
+            （不拼接共存——"讨厌咖啡"不再与"喜欢咖啡"拼接让 LLM 猜哪句是新）
+          - entailment/neutral → 保持现行为（追加拼接 content）
+          - NLI 不可用（None）/超时 → 保持现行为（追加，零回归）
+
+        事务口径声明：superseded 标记与新增分两步（_merge_duplicate 标记提交
+        后，save 正常新增路径插入新内容）——若新增失败，旧记忆已被标记但
+        **未删除**（内容仍保留可审计，不丢数据 fail-open）；标记写库失败 →
+        日志告警 + 按旧行为追加（fail-open 不阻断写入，AC §5）。
+
+        module-046：短期层（layer='short'）一致/中性追加仍刷新提及
+        （mention_count+1 + last_mentioned_at=now）；矛盾路径不再刷新旧父块
+        提及（旧记忆已 SUPERSEDED）。存量行 mention_count 为 NULL 时视为 0
+        再 +1（零迁移 fail-open）。
 
         Args:
             duplicate: _find_duplicate 命中的子块 Document（含 parent_id）
@@ -403,7 +434,8 @@ class MemoryService:
             layer: 层标识（""=长期 / "short"=短期）
 
         Returns:
-            {"id": int, "title": str, "status": "updated"}；失败返回 None
+            {"id": int, "title": str, "status": "updated"}；失败/冲突消解
+            （需新增）返回 None
         """
         parent_id = duplicate.parent_id or duplicate.id
         try:
@@ -412,16 +444,61 @@ class MemoryService:
                 if parent is None:
                     logger.warning("去重命中但父块不存在(id=%d)，按新增处理", parent_id)
                     return None
+
+                # module-061 Review 修复：superseded 父块 = 非法合并目标（已被
+                # 新说法取代、从召回面过滤）——继续追加会让新内容不可召回，走
+                # 正常新增（"旧说法让位最新说法"原则；存量 superseded=false 零回归）
+                if _is_superseded(parent):
+                    logger.info("去重命中但父块已 SUPERSEDED(id=%d)，按新增处理", parent.id)
+                    return None
+
+                # module-061 P1：去重命中 → NLI 判冲突（开关开 + NLI 可用才判）
+                if settings.memory_conflict_enabled:
+                    verdict = await self._judge_conflict(parent.content, content)
+                    if verdict == "contradiction":
+                        # 旧父块标 SUPERSEDED + updated_at；不拼接共存；返回 None
+                        # 让 save 按正常新增入库新内容（两条并存但旧的可追溯）
+                        parent.superseded = True
+                        parent.updated_at = datetime.now(timezone.utc)
+                        await session.commit()
+                        logger.info(
+                            "记忆冲突消解: 旧记忆 SUPERSEDED(id=%d, title=%s)，"
+                            "新内容按正常新增", parent.id, parent.title)
+                        return None
+
                 if content not in parent.content:
                     parent.content = f"{parent.content}\n{content}"
                 if layer == "short":
                     parent.mention_count = (parent.mention_count or 0) + 1
                     parent.last_mentioned_at = datetime.now(timezone.utc)
+                # module-061：去重追加 = 更新 → 刷新 updated_at（可审计时间线）
+                parent.updated_at = datetime.now(timezone.utc)
                 await session.commit()
                 logger.info("记忆去重更新旧记忆: id=%d, title=%s", parent.id, parent.title)
                 return {"id": parent.id, "title": parent.title, "status": "updated"}
         except Exception as e:
             logger.warning("记忆去重更新失败，按新增处理: %s", e)
+            return None
+
+    async def _judge_conflict(self, premise: str, hypothesis: str) -> str | None:
+        """NLI 判新事实 vs 旧记忆是否矛盾（module-061 P1）
+
+        复用生产封装 rag.memory.nli_judge.nli_judge（延迟加载 + to_thread +
+        超时/失败返回 None）。任何异常/None → 返回 None（上层降级旧行为——
+        保持追加拼接，零回归）。导入放函数内避免模块顶层依赖（延迟加载哲学）。
+
+        Args:
+            premise: 旧记忆内容（父块 content）
+            hypothesis: 新记忆内容
+
+        Returns:
+            "entailment" / "neutral" / "contradiction"；不可用 → None
+        """
+        try:
+            from rag.memory.nli_judge import nli_judge
+            return await nli_judge.predict(premise, hypothesis)
+        except Exception as e:
+            logger.warning("NLI 冲突判定异常，降级旧行为: %s", e)
             return None
 
     async def _insert_parents(
@@ -631,6 +708,10 @@ class MemoryService:
 
         by_content: dict[str, Document] = {}
         for d in refs.values():
+            # module-061：SUPERSEDED 不参与进化（旧说法让位最新说法；_expand_to_parents
+            # 已过滤 superseded 父块，此处为召回侧防御性统一口径）
+            if _is_superseded(d):
+                continue
             if d.content and d.content not in by_content:
                 by_content[d.content] = d
 
@@ -643,6 +724,8 @@ class MemoryService:
             if doc is None:
                 result.append(m)  # 参考文档缺失 → 保留原样（fail-open）
                 continue
+            if _is_superseded(doc):
+                continue  # module-061：SUPERSEDED 不参与召回（旧说法让位最新说法）
             # ① 硬上限 + ② 衰减：参考时间 = last_mentioned_at or created_at
             ref = doc.last_mentioned_at or doc.created_at
             age_days = 0.0
@@ -710,16 +793,22 @@ class MemoryService:
             logger.warning("短期记忆提及刷新失败（降级）: %s", e)
 
     async def _promote_memory(self, identity: str, doc: Document) -> None:
-        """短期→长期升级：复制到长期层 + 删除短期副本（幂等，plan 3.3 异常降级）
+        """短期→长期升级：复制到长期层 + **保留短期副本**（后悔药，module-061 P0）
 
         复制：父块（无向量）+ 子块（含向量）→ source 改为长期 'memory:<identity>:'
         （长期/短期隔离由 source 前缀 + _layer_pattern 精确匹配保证）。
         幂等：长期层已存在同 content_hash 的父块（历史升级/长期层已写入同内容）
-        → 不重复复制，仅清理残留短期副本。content_hash 缺失（存量脏行）时跳过
+        → 不重复复制（不产生垃圾行）。content_hash 缺失（存量脏行）时跳过
         幂等检查（极端边角，容忍重复）。
         旧格式单文档（parent_id=None 且无子块，自身即完整记忆）→ 整体复制
         （保留向量，parent_id=None）。
-        复制在删除之前执行：复制失败 → 短期副本保留（不丢数据）。
+
+        module-061 P0（ADR-0007 P0 升级留后悔药）：
+        **升级不删除短期副本**（旧实现复制后删短期副本——"抄进笔记本就改不回
+        来"）。改后短期副本保留（"抄进笔记本不撕草稿纸"），短期层仍有 30 天
+        硬上限 + 衰减 + 提及刷新（module-046），被取代副本会被自然淘汰；长期
+        层新条目带 superseded=false + updated_at=now（可审计可回溯）。重复升级
+        幂等（长期层已有同 hash → 不重复复制，短期副本仍保留）。
 
         Args:
             identity: 已规范化的身份标识
@@ -746,13 +835,15 @@ class MemoryService:
                             Document.content_hash.in_(hashes),
                         ).limit(1)
                     )).scalar()
+                now = datetime.now(timezone.utc)
                 if dup is None:
-                    # 复制到长期层（先复制后删除：复制失败不丢短期数据）
+                    # 复制到长期层（复制失败不丢短期数据；短期副本保留不删除）
                     long_source = _memory_source(identity)
                     if children:
                         new_parent = Document(
                             title=doc.title, content=doc.content, source=long_source,
                             embedding=None, parent_id=None, content_hash=doc.content_hash,
+                            superseded=False, updated_at=now,
                         )
                         session.add(new_parent)
                         await session.flush()
@@ -761,6 +852,7 @@ class MemoryService:
                                 title=c.title, content=c.content, source=long_source,
                                 embedding=c.embedding, parent_id=new_parent.id,
                                 content_hash=c.content_hash, search_tokens=c.search_tokens,
+                                superseded=False, updated_at=now,
                             ))
                     else:
                         # 旧格式单文档：整体复制（保留向量）
@@ -768,16 +860,15 @@ class MemoryService:
                             title=doc.title, content=doc.content, source=long_source,
                             embedding=doc.embedding, parent_id=None,
                             content_hash=doc.content_hash, search_tokens=doc.search_tokens,
+                            superseded=False, updated_at=now,
                         ))
-                    logger.info("短期记忆升级长期: identity=%s, source=%s, content=%.20s",
-                                identity, long_source, doc.content[:20])
+                    logger.info("短期记忆升级长期（保留短期副本）: identity=%s, source=%s, "
+                                "content=%.20s", identity, long_source, doc.content[:20])
                 else:
                     logger.info("短期记忆升级跳过（长期层已存在）: identity=%s, dup_id=%d",
                                 identity, dup)
-                # 删除短期副本（父块 + 子块；已升级时同样清理残留副本）
-                del_ids = [doc.id] + [c.id for c in children]
-                if del_ids:
-                    await session.execute(delete(Document).where(Document.id.in_(del_ids)))
+                # module-061 P0：不删除短期副本（后悔药）；长期层新条目已带
+                # superseded=false/updated_at，可审计可回溯
                 await session.commit()
         except Exception as e:
             logger.warning("短期→长期升级失败（降级，不影响召回）: %s", e)
@@ -948,6 +1039,9 @@ class MemoryService:
         best: dict[str, dict] = {}
         for d in child_docs:
             p = parents.get(d.get("parent_id"))
+            # module-061：SUPERSEDED 记忆不参与召回（旧说法让位最新说法，可审计可回溯）
+            if p is not None and _is_superseded(p):
+                continue
             content = p.content if p else d.get("content", "")
             if not content:
                 continue

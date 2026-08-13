@@ -120,6 +120,14 @@ class Settings(BaseSettings):
     memory_promote_mentions: int = 2            # 短期→长期升级：mention_count ≥ 该值
     memory_promote_window_days: int = 7         # 升级窗口（天）：最近提及在窗口内才升级
 
+    # 记忆冲突消解（module-061 / ADR-0007 P1）：true 时 _merge_duplicate 去重
+    # 命中后走 mDeBERTa NLI 判矛盾（contradiction → 旧父块标 superseded=true +
+    # 新内容按正常新增入库，替代"拼接共存"）；false 完全旧行为（追加拼接，零回归）。
+    # 默认 false = 不预设成功：评测（eval/memory_conflict_dataset.py 矛盾 P/R/F1）
+    # 达标（contradiction Recall≥0.8 且 Precision≥0.8）后才切 true，对齐
+    # ADR-0003 L4 / module-052 放行模式。NLI 不可用/超时 → 返回 None → 旧行为。
+    memory_conflict_enabled: bool = False
+
     # 意图分类（module-043 L4）：true 时 router 尝试加载 bge-m3+逻辑回归分类器
     #（模型缺失/加载失败自动回退 LLM 分类，零影响）。
     # module-056 达标启用：人造标注集 337 条重训 + golden_intent 100 条真实
