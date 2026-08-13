@@ -123,14 +123,24 @@ class IntentClassifier:
             "confusion_matrix": {"classes": list(model.classes_), "matrix": cm},
         }
 
-    async def predict_proba(self, query: str) -> dict[str, float]:
+    async def predict_proba(self, query: str,
+                            prev_user_query: Optional[str] = None) -> dict[str, float]:
         """返回 {intent: 校准概率}（三类键齐全，和≈1）
+
+        module-063（WP-A）：prev_user_query 提供时拼接最近一轮 user query 向量
+        （list 拼接 2048 维，训练时同构——参考 memory_conflict_clf 两条嵌入先例）。
+        **注意**：当前落盘模型 intent_clf.joblib 为单 query 1024 维训练，传入
+        prev 会触发 sklearn 特征维度不匹配抛 ValueError → 调用方（router）捕获
+        回退 LLM 分类（fail-open 零回归）；待多轮标注数据重训（config
+        intent_classifier_multi_turn 置 true）后生效。
 
         模型未加载时抛 RuntimeError——调用方（router）捕获后回退 LLM 分类，
         不阻断主链路。
 
         Args:
             query: 用户问题
+            prev_user_query: 最近一轮 user query（多轮场景；None = 单轮）
+                （None → 单 query 1024 维，与存量模型契约一致零回归）
 
         Returns:
             {"knowledge": float, "casual_chat": float, "realtime": float}
@@ -138,8 +148,15 @@ class IntentClassifier:
         """
         if self._model is None:
             raise RuntimeError("L4 分类器模型未加载")
-        vec = await self._embedding_service.embed_text(query)
-        proba = self._model.predict_proba([vec])[0]
+        if prev_user_query is not None and str(prev_user_query).strip():
+            # 多轮拼接：当前 query 向量 + 最近一轮 user query 向量（2048 维）
+            vec = await self._embedding_service.embed_text(query.strip())
+            prev_vec = await self._embedding_service.embed_text(prev_user_query.strip())
+            feature = list(vec) + list(prev_vec)
+        else:
+            vec = await self._embedding_service.embed_text(query.strip())
+            feature = vec
+        proba = self._model.predict_proba([feature])[0]
         probs = {cls: round(float(p), 4) for cls, p in zip(self._model.classes_, proba)}
         for label in _INTENT_LABELS:
             probs.setdefault(label, 0.0)

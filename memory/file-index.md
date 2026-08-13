@@ -114,6 +114,10 @@
 | ai_service/scripts/migrate_module062.py | module-062 | 脚本 | DB 迁移（documents 补 type/last_recalled_at 两列幂等，查 information_schema 已存在则跳过；本地库已执行） | ✅ |
 | ai_service/tests/test_memory_evolution2.py | module-062 | 测试 | 记忆进化 2 单测（extract_facts type/分类器推理/resolve_memory_type 三模式/类型化半衰期/冷降权系数·下限·存量·开关·DB 失败·重排·刷新/recall 集成/save 写 type/类型注入/裁判切换/评测基线一致性/DDL 幂等/配置）70 项 | ✅ |
 | specs/module-062-memory-evolution2/ | module-062 | 规划 | 模块文档（plan/acceptance/changelog；review/test-report 由 Reviewer/Tester 产出） | ✅ |
+| ai_service/eval/golden/golden_multi_turn.py | module-063 | 评测 | 多轮追问评测（12 对三指标：自包含清晰度/意图保持（多轮路由 vs 单句对照）/检索提升（prev 检索作锚点重叠度）；--fixture 启发式改写+意图 / --no-save / eval_type='multi_turn' 落库；真实 deepseek+DB 实测意图保持 12/12、检索 +0.4363） | ✅ |
+| ai_service/tests/agent/test_multi_turn_routing.py | module-063 | 测试 | 多轮意图路由单测（WP-A 空历史零回归/LLM 上下文/L4 prev 拼接 2048 维/L4+L2 修正 + WP-B 去语气词/短句继承/话题漂移不继承/单轮不继承/有特征正常路由/链式继承/history[-6:] + WP-C engine 改写喂路由/precise 短路/失败回退/默认关零回归/流式+LangGraph 接 history + WP-D 工具信号/轨迹不可得跳过）35 项 | ✅ |
+| ai_service/tests/eval/test_golden_multi_turn.py | module-063 | 测试 | golden_multi_turn 评测脚本单测（数据集校验/启发式改写+意图/重叠度/三指标纯函数/fixture 运行/非法集校验）19 项 | ✅ |
+| specs/module-063-multi-turn-intent-routing/ | module-063 | 规划 | 模块文档（plan/acceptance/task-brief/changelog；review/test-report 由 Reviewer/Tester 产出） | ✅ |
 
 ## 三、前端核心文件（frontend/，module-003+）
 
@@ -160,7 +164,8 @@
 | module-052 | specs/module-052-nli-contradiction-scan/ | ✅ NLI 矛盾扫描前置决策（mDeBERTa-v3 中文实测 kappa 0.4711 vs HHEM 0.1351 → 替换方向推荐，ADR-0010 P1-③ 选型结论），全量 645/0（2026-08-12 Tester 复跑；在途快照 628/1 系 module-053 并行改造，非本模块回归） |
 | module-053 | specs/module-053-rrf-fusion/ | ✅ 检索融合升级（RRF 三通道消融验证：基线复测 0.9714 + RRF 0.9905 放行推荐启用 + 加权两组持平否决 + DB 修复 + 嵌入路径回归修复），全量 645/0（2026-08-12） |
 | module-060 | specs/module-060-verify-async/ | ✅ verify 异步化（ADR-0013：chat_stream 异步 verify + done 带 verify_task_id + 前端轮询补结果 + verify_results 表持久化），单测 17/0 + 前端 58/0 + build PASS；真实 E2E 待环境（本机无 PostgreSQL）（2026-08-13 Developer 产出） |
-| module-061 | specs/module-061-memory-correction/ | ✅ 记忆纠错（ADR-0007 P0+P1：P0 升级留后悔药——升级不删短期副本 + 长期 superseded/updated_at + 召回过滤；P1 写路径冲突消解——mDeBERTa NLI 判矛盾 → 旧父块 SUPERSEDED 不删除 + 新内容正常新增；module-062 WP4 已启用 PW_MEMORY_CONFLICT=true + JUDGE=nli，本模块当时默认 false 未达门槛已过时），全量 824/0（2026-08-13 Developer 产出；062 后最终 897/0） |
-| module-062 | specs/module-062-memory-evolution2/ | ✅ 记忆进化 2（ADR-0007 P2 类型化衰减——documents.type + _evolve_recall 按 type 半衰期 preference 30/event 1/其余 3 + 类型来源 clf 1.0000/LLM 1.0000 同分取 clf memory_type_mode=clf + P3 冷记忆降权——documents.last_recalled_at + 长期层久未召回 ×0.3-1.0 不删除 + 刷新升温 + WP4 矛盾检测启用——142 案例 clf Precision 0.9048 vs mDeBERTa Precision 1.0，按用户规则取 Precision 高者 → PW_MEMORY_CONFLICT=true + JUDGE=nli），全量 **897/0** = 825 基线 + 70 新增 + 2 修复测试 + 存量 test_memory_extractor 3 处精确结构断言按验收许可补 type 字段（2026-08-13 Tester 验收） |
+| module-061 | specs/module-061-memory-correction/ | ✅ 记忆纠错（ADR-0007 P0+P1：P0 升级留后悔药——升级不删短期副本 + 长期 superseded/updated_at + 召回过滤；P1 写路径冲突消解——mDeBERTa NLI 判矛盾 → 旧父块 SUPERSEDED 不删除 + 新内容正常新增，PW_MEMORY_CONFLICT 默认 false 评测达标才启用；真实 baseline id=31 Accuracy 0.60/P 1.0000/R 0.5000 未达门槛如实标注），全量 824/0 = 797 基线 + 27 新增 + 存量 2 项按验收许可更新（2026-08-13 Developer 产出） |
+| module-062 | specs/module-062-memory-evolution2/ | ✅ 记忆进化 2（ADR-0007 P2 类型化衰减——documents.type + _evolve_recall 按 type 半衰期 preference 30/event 1/其余 3 + 类型来源 clf 1.0000/LLM 1.0000 同分取 clf memory_type_mode=clf + P3 冷记忆降权——documents.last_recalled_at + 长期层久未召回 ×0.3-1.0 不删除 + 刷新升温 + WP4 矛盾检测启用——142 案例 clf Precision 0.9048 vs mDeBERTa Precision 1.0，按用户规则取 Precision 高者 → PW_MEMORY_CONFLICT=true + JUDGE=nli），全量 895/0 = 825 基线 + 70 新增 + 存量 test_memory_extractor 3 处精确结构断言按验收许可补 type 字段（2026-08-13 Developer 产出） |
+| module-063 | specs/module-063-multi-turn-intent-routing/ | ✅ 多轮对话意图路由升级（ADR-0015：会话级路由 classify(query,history[-6:]) + LLM 上下文 + L4 拼接 2048 维（未重训默认关）+ 短句继承（去语气词 <6 无特征零 LLM）+ 改写提前喂路由（非流式）+ 工具历史信号 + L4 路径补 L2 确定性信号 + golden_multi_turn 12 对三指标实测：意图保持 12/12 / 检索 +0.4363），全量 **951/0** = 897 基线 + 54 新增（test_multi_turn_routing 35 + test_golden_multi_turn 19，存量零改动），真实 E2E 两轮"为什么"→knowledge 走检索链路（2026-08-14 Developer 产出） |
 
 > 每个模块目录含 plan.md / acceptance-criteria.md / changelog.md / review-report.md / test-report.md。

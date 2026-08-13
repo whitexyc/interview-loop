@@ -23,6 +23,13 @@
   保守策略：当 LLM 分类失败或超时时，默认返回 "knowledge" 意图。
   宁可多检索一次，也不要漏检。这是"安全优先"的设计。
 
+多轮对话（module-063 / ADR-0015）：
+  单句识别会漏掉省略句/指代句（"为什么""那图谱呢"）——本类升级为会话级
+  路由：classify(query, history) 取最近 4-6 轮，LLM prompt 拼对话上下文判断；
+  短句（去语气词后 <6 字符且无 FTS/图谱/规则特征）继承上一轮 intent（规则层
+  零 LLM，_short_inherit）；上轮工具轨迹含知识检索/生成 → 短 query 强制
+  knowledge（_KB_TOOL_NAMES）。空 history 行为与改动前逐字一致（零回归）。
+
 L2 前置校验（module-043 / ADR-0003 修订版，module-055 扩展触发）：
   LLM 判定 intent≠knowledge（无论置信高低，module-055：低置信限制在
   module-054 E2E 暴露缺口——LLM 高置信误判 casual_chat 同样漏检）时，用
@@ -82,6 +89,21 @@ _RULE_TABLE = (
     "谢谢", "感谢", "晚安", "早安", "辛苦了", "哈哈", "嗯嗯", "好的好的",
 )
 
+# 中文语气词规则表（module-063 / WP-B 短句意图继承）：
+# 先做最常用 8 个（task-brief §八.6），不追求全。去语气词后再判短句长度——
+# "为什么呀"→"为什么"（否则语气词干扰长度判定）。"请问"亦在
+# _FUNCTION_STOPWORDS（FTS 术语过滤），此处是"短句长度判定前去语气词"，
+# 语义不同（一个防 FTS 误命中、一个防长度误判）。
+_PARTICLE_WORDS = ("哦", "呢", "呀", "啦", "请问", "那个", "嘛", "吧")
+
+# 工具历史信号（module-063 / WP-D）：上一轮 tool_calls 含下述任一工具 →
+# 本轮短 query 强制 knowledge（工具轨迹是意图的强信号，确定性零 token）。
+_KB_TOOL_NAMES = ("search_knowledge", "generate_answer")
+
+# 短句继承递归深度上限（module-063 / WP-B）：省略句链式继承（"为什么"前
+# 又是"为什么"）逐层回退路由上一轮，防无限递归。
+_INHERIT_MAX_DEPTH = 3
+
 # 高频功能词/代词/疑问词：不计入 FTS 术语命中。"什么""怎么""区别"等词在
 # 知识库文档中广泛存在，命中无判别力；只保留有专有术语特征的词参与确认。
 # module-055 数据驱动扩充（2026-08-12 golden 扫描实测）：L2 无条件触发后，
@@ -124,6 +146,20 @@ _PROMPT_TEMPLATE = """你是一个问题分类器。判断用户问题的意图�
 
 返回格式（只返回 JSON，不要其他文字）:
 {{"intent": "knowledge|casual_chat|realtime", "confidence": 0.0-1.0, "reason": "简短原因"}}"""
+
+# 多轮对话上下文块（module-063 / WP-A）：有 history 时拼在 _PROMPT_TEMPLATE
+# 之后。强调"省略句/指代句结合上下文判断、含义完整句按字面判断"——防止多轮
+# 闲聊被错误归因到 knowledge（话题漂移防护的 LLM 侧补充；规则层由
+# _deterministic_confirm 的 rule_veto 兜底）。
+_MULTITURN_CONTEXT = """
+
+对话历史（最近 {n} 轮）:
+{history}
+
+注意：如果当前问题是省略句/指代句（如"为什么""那它呢"，缺少主语或指代前文），
+请结合最近对话上下文判断意图；如果问题本身含义完整（即使是短句），按字面判断，
+不要因为前文是知识库问题就强行归为 knowledge。
+"""
 
 
 async def fts_term_hit(query: str) -> bool:
@@ -200,8 +236,9 @@ class RouterAgent:
                     logger.warning("L4 分类器加载失败，回退 LLM 分类: %s", e)
         return self._intent_classifier
 
-    async def classify(self, query: str) -> dict:
-        """判断问题意图
+    async def classify(self, query: str, history: Optional[list] = None,
+                       tool_history: Optional[list] = None) -> dict:
+        """判断问题意图（module-063：会话级路由 + 短句意图继承）
 
         内部使用 LLM.generate() 发送 prompt 给 LLM，让 LLM 返回 JSON。
         使用 generate（单轮）而不是 chat（多轮），因为分类不需要上下文。
@@ -211,9 +248,20 @@ class RouterAgent:
             走 L2 确定性信号确认（FTS 术语/图谱实体/规则表），命中 → 修正为
             knowledge（module-054 E2E 实测：LLM 高置信误判 casual_chat 也会
             漏检，低置信限制不可靠）
+        module-063（ADR-0015）增强：
+          - 会话级路由：history 取最近 4-6 轮（内部 history[-6:]），LLM prompt
+            拼对话上下文（省略句/指代句结合上下文判断）；空/None history →
+            行为与改动前逐字一致（零回归）
+          - 短句意图继承（WP-B，规则层零 LLM）：去语气词后长度 <6 且
+            _deterministic_confirm 无新特征 → 继承上一轮 intent（从 history
+            最近一条 user 消息推演，无状态）
+          - 工具历史信号（WP-D）：tool_history 含 search_knowledge/generate_answer
+            → 短 query 强制 knowledge（轨迹不可得 None → 跳过）
 
         Args:
             query: 用户问题
+            history: 最近对话历史消息列表（[{"role","content"}, ...]），可选
+            tool_history: 上一轮工具调用名列表（agent 轨迹，不可得传 None）
 
         Returns:
             {"intent": str, "confidence": float, "reason": str}
@@ -222,20 +270,69 @@ class RouterAgent:
         if not query or not query.strip():
             return {"intent": "knowledge", "confidence": 0.0, "reason": "空查询，默认走知识库"}
 
+        # 路由只用最近 4-6 轮（task-brief §八.5：历史不全塞，更早轮次几乎
+        # 不影响指代还费 token）；空 history → 与现状逐字一致零回归。
+        history = list(history or [])[-6:]
+
+        # ── WP-B/WP-D 规则层短路（零 LLM）：短句继承 / 工具信号 ──
+        inherited = await self._short_inherit(query, history, tool_history)
+        if inherited is not None:
+            return inherited
+
+        return await self._classify_core(query, history)
+
+    async def _classify_core(self, query: str, history: list) -> dict:
+        """核心分类：L4 分类器路径 → LLM 路径 + L2 确定性信号确认
+
+        module-063（WP-A）：history 非空时 LLM prompt 拼对话上下文块
+        （_build_prompt）；L4 分类器在 settings.intent_classifier_multi_turn
+        开启时拼接最近一轮 user query 向量（2048 维，需多轮重训模型——当前
+        落盘 intent_clf.joblib 为单 query 1024 维训练，拼接会触发 sklearn
+        维度不匹配抛异常 → 捕获回退 LLM，fail-open 零回归）。
+
+        Args:
+            query: 用户问题
+            history: 最近对话历史（可能为空列表）
+
+        Returns:
+            {"intent": str, "confidence": float, "reason": str}
+        """
         # ── L4 分类器路径（module-043）：可插拔注入，失败回退 LLM ──
         classifier = await self._get_classifier()
         if classifier is not None:
             try:
-                probs = await classifier.predict_proba(query.strip())
+                if settings.intent_classifier_multi_turn:
+                    last_content, _ = self._last_user_turn(history)
+                    if last_content is not None:
+                        # 拼接最近一轮 user query 向量（2048 维，训练时同构）
+                        probs = await classifier.predict_proba(
+                            query.strip(), prev_user_query=last_content)
+                    else:
+                        probs = await classifier.predict_proba(query.strip())
+                else:
+                    probs = await classifier.predict_proba(query.strip())
                 intent = max(probs, key=probs.get)
                 # module-045 WP2d: L4 分类器返回的 intent 过白名单——非法值
                 # 归 knowledge（与 LLM 路径 _parse_response 口径一致，防模型
                 # 类别外漂移导致路由落入未知分支）
                 if intent not in ("knowledge", "casual_chat", "realtime"):
                     intent = "knowledge"
+                # module-063（ADR-0015）：L4 路径同样走 L2 确定性信号确认
+                #（与 LLM 路径同款安全网）——L4 单句分类无历史上下文，多轮
+                # 省略句（如"怎么解决呢"）可能被误判 casual/realtime（eval/
+                # golden_multi_turn 实测暴露）；确定性信号（FTS/图谱命中）修正
+                # 为 knowledge（零 LLM，红线不变；module-055 已证信号精确——
+                # golden 50 条非 knowledge 样本误确认 0）
+                if intent != "knowledge":
+                    confirmed, signal = await self._deterministic_confirm(query.strip())
+                    if confirmed:
+                        logger.info("L2 信号确认(%s)，L4 intent 修正为 knowledge: query=%s",
+                                    signal, query[:50])
+                        intent = "knowledge"
                 # module-048 WP5: probs 缺键防御——白名单修正为 knowledge 后
                 # 该键可能不存在（真实分类器缺 knowledge 键），回退默认置信度
-                # 0.0，不抛 KeyError（缺键时语义等同于"该意图无置信度"）
+                # 0.0，不抛 KeyError（缺键时语义等同于"该意图无置信度"）；
+                # L2 修正为 knowledge 后置信度取 knowledge 概率（可能非最高分）
                 confidence = probs.get(intent, 0.0)
                 logger.info("意图识别(L4): query=%s, intent=%s, confidence=%.2f",
                             query[:50], intent, confidence)
@@ -246,7 +343,7 @@ class RouterAgent:
 
         try:
             client = LLMFactory.get_client(self._provider)
-            prompt = _PROMPT_TEMPLATE.format(query=query.strip())
+            prompt = self._build_prompt(query.strip(), history)
             response = await client.generate(prompt)
             result = self._parse_response(response)
 
@@ -275,6 +372,144 @@ class RouterAgent:
             # 任何异常都保守地返回 knowledge
             logger.warning("意图识别失败，默认走知识库: %s", e)
             return {"intent": "knowledge", "confidence": 0.0, "reason": f"LLM 分类失败，保守路由: {e}"}
+
+    # ── 多轮意图路由（module-063 / ADR-0015）：短句继承 + 工具信号 + 上下文 ──
+
+    async def _short_inherit(self, query: str, history: list,
+                             tool_history: Optional[list]) -> dict | None:
+        """WP-B 短句意图继承 + WP-D 工具历史信号（规则层零 LLM，LLM/分类器前短路）
+
+        条件（全部满足才继承）：
+          ① history 非空（空历史不继承——单轮短 query 正常路由）
+          ② 去除语气词后长度 < 6 字符
+          ③ _deterministic_confirm 无新特征（FTS 术语/图谱实体未命中、规则表
+             未命中）——有特征必须正常路由（防话题漂移，"今天天气"靠规则表
+             rule_veto 挡住不继承）
+        满足则继承上一轮 intent：路由 history 最近一条 user 消息（其之前的历史
+        递归，省略句可链式继承；深度上限 _INHERIT_MAX_DEPTH 防无限递归）。
+        WP-D 工具信号优先：上一轮 tool_calls 含 search_knowledge/generate_answer
+        → 短 query 强制 knowledge（工具轨迹不可得 tool_history=None → 跳过）。
+
+        Args:
+            query: 用户当前问题
+            history: 最近对话历史（已按 [-6:] 截断）
+            tool_history: 上一轮工具调用名列表（不可得 None）
+
+        Returns:
+            继承结果 dict（intent/confidence/reason）；不继承返回 None（正常路由）
+        """
+        if not history:
+            return None
+        stripped = self._strip_particles(query)
+        if len(stripped) >= 6:
+            return None
+
+        # WP-D 工具历史信号：上轮走知识检索/生成 → 强制 knowledge
+        if tool_history:
+            if any(t in _KB_TOOL_NAMES for t in tool_history):
+                return {"intent": "knowledge", "confidence": 0.0,
+                        "reason": "工具历史信号：上轮走知识检索/生成，短 query 强制 knowledge"}
+
+        # 无新特征判定（复用 _deterministic_confirm，FTS/图谱/规则表）
+        try:
+            confirmed, signal = await self._deterministic_confirm(stripped)
+        except Exception:
+            return None  # 保守：异常不继承，走正常路由
+        if confirmed or signal == "rule_veto":
+            return None  # 有特征（术语命中/规则词）→ 正常路由（防话题漂移）
+
+        # 继承上一轮 intent：路由 history 最近一条 user 消息（无状态，从
+        # history 推演；其之前的历史允许链式继承）
+        last_content, prev_history = self._last_user_turn(history)
+        if last_content is None:
+            return None
+        prev = await self._classify_prev(last_content, prev_history, depth=1)
+        if prev is None:
+            return None
+        intent = prev.get("intent", "knowledge")
+        return {"intent": intent, "confidence": prev.get("confidence", 0.0),
+                "reason": f"短句意图继承（上一轮 intent={intent}）"}
+
+    async def _classify_prev(self, query: str, history: list, depth: int) -> dict | None:
+        """递归路由上一轮 user 消息（省略句链式继承的上一层）
+
+        Args:
+            query: 上一轮 user 消息内容
+            history: 上一轮之前的历史
+            depth: 当前递归深度（从 1 起；>= _INHERIT_MAX_DEPTH 返回 None 防无限递归）
+
+        Returns:
+            上一轮的路由结果 dict；递归超限/异常返回 None（调用方回退正常路由）
+        """
+        if depth >= _INHERIT_MAX_DEPTH:
+            return None
+        history = list(history or [])[-6:]
+        inherited = await self._short_inherit(query, history, None)
+        if inherited is not None:
+            return inherited
+        return await self._classify_core(query, history)
+
+    def _build_prompt(self, query: str, history: list) -> str:
+        """构造分类 prompt：空 history 用原模板（逐字一致）；有 history 拼上下文块
+
+        module-063（WP-A）：上下文块只放最近 4 轮（task-brief：路由用最后 4-6 轮，
+        上下文块够用不费 token），每条截断 300 字符防超长。
+
+        Args:
+            query: 用户问题
+            history: 最近对话历史
+
+        Returns:
+            完整分类 prompt
+        """
+        prompt = _PROMPT_TEMPLATE.format(query=query)
+        if not history:
+            return prompt
+        lines = []
+        for msg in history[-4:]:
+            role = "用户" if msg.get("role") == "user" else "助手"
+            content = str(msg.get("content", ""))[:300]
+            lines.append(f"{role}: {content}")
+        return prompt + _MULTITURN_CONTEXT.format(
+            n=min(len(history), 4), history="\n".join(lines))
+
+    @staticmethod
+    def _strip_particles(query: str) -> str:
+        """去除中文语气词（哦/呢/呀/啦/请问/那个/嘛/吧，规则表可配）
+
+        短句继承前先去语气词："为什么呀"→"为什么"、"那图谱呢"→"那图谱"，
+        否则语气词干扰长度判定（"为什么呀"去除前 4 字 <6 本已达标，但"今天
+        天气呀"不去除会被误判为短句走继承）。
+
+        Args:
+            query: 用户问题
+
+        Returns:
+            去语气词后的 query（去空白）
+        """
+        q = query.strip()
+        for p in _PARTICLE_WORDS:
+            q = q.replace(p, "")
+        return q.strip()
+
+    @staticmethod
+    def _last_user_turn(history: list) -> tuple[str | None, list]:
+        """提取最近一条 user 消息及其之前的历史（无状态，从 history 推演）
+
+        Args:
+            history: 会话历史消息列表（[{"role","content"}, ...]）
+
+        Returns:
+            (last_user_content, history_before_last_user)；
+            无 user 消息 → (None, None)
+        """
+        if not history:
+            return None, None
+        for i in range(len(history) - 1, -1, -1):
+            msg = history[i] or {}
+            if msg.get("role") == "user" and str(msg.get("content", "")).strip():
+                return str(msg["content"]).strip(), history[:i]
+        return None, None
 
     # ── L2 确定性信号确认（module-043 / ADR-0003 修订版，红线：零 LLM） ──
 

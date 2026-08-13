@@ -452,7 +452,10 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
             # ====== Step 1: 意图识别 ======
             t0 = _t()
             from agent.router import router_agent
-            intent_result = await router_agent.classify(request.query)
+            # module-063（WP-A，纪律 §八.2）：流式检索链也接 history——漏一个
+            # 就是"chat 正常、stream 回归"（空 history 零回归）
+            intent_result = await router_agent.classify(
+                request.query, history=request.history)
             intent = intent_result.get("intent", "knowledge")
             observability.timing("intent", _t() - t0)
             intent_labels = {"knowledge": "知识库", "casual_chat": "闲聊", "realtime": "实时数据"}

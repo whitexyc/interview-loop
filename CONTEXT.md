@@ -166,19 +166,15 @@
 | `specs/adr/0009-query-rewrite-optimization.md` | Query 改写优化方案（分诊式改写+保真校验+评测闭环，📋 暂不实施） |
 | `specs/adr/0010-hallucination-detection-upgrade.md` | 幻觉检测升级方案（HHEM 专职裁判+逐句报分+矛盾扫描，P0 可先行） |
 | `specs/adr/0011-prompt-eval-optimization.md` | 提示词评估与自动优化（四维判断+四代优化算法+DSPy 选型+三步落地路径，📋 暂不实施） |
-| `specs/adr/0012-tool-governance.md` | 工具治理与分层工具选择（数量退化数据+A/B/C 三档方案，10 工具口径 08-13 同步复核确认；✅ P1 已实施：并入 module-058，检索组 7 / 生成组 4，ctx.phase 状态机） |
+| `specs/adr/0012-tool-governance.md` | 工具治理与分层工具选择（数量退化数据+A/B/C 三档方案，工具口径 10→7 已修正；📋 P1 已立项 module-059：阶段切分状态机） |
 | `specs/adr/0013-verify-async.md` | verify 异步化决策（✅ 已实施 module-060：轮询送达 + 落库持久化 + 非流式保持同步 + 计时口径变化） |
-| `specs/adr/0014-document-parsing-cleaning.md` | 多格式文档解析与清洗策略（📋 待实施 module-064：AnyDoc 统一解析 4.4ms + 清洗五步 + 文档去重三级（哈希/结构指纹/余弦≥0.95 + canonical）+ PDF 图片三层（OCR/VLM/MinerU 路由）+ 原始文件留存） |
-| `specs/adr/0015-multi-turn-intent-routing.md` | 多轮对话意图路由升级（📋 已立项 module-063：会话级路由 classify(query,history[-4:]) + 短句意图继承（去语气词 <6 字符无特征）+ 复用分诊式改写喂路由 + 工具历史规则信号；百度千帆实测 召回 62.5→89.2% / 准确率 58→87.5%） |
-| `specs/module-063-multi-turn-intent-routing/task-brief.md` | 多轮意图路由升级执行简报（📋 WP-A 会话级路由 / WP-B 短句继承 / WP-C 改写喂路由 / WP-D 工具信号+评测 / WP-E 回归；ADR-0015 落地） |
-| `specs/module-064-multi-format-ingestion/task-brief.md` | 多格式文档解析与数据清洗执行简报（📋 AnyDoc 接入 + 清洗五步 + 文档去重三级 + 图片三层 + 原始文件留存；ADR-0014 落地） |
+| `specs/adr/0015-multi-turn-intent-routing.md` | 多轮对话意图路由升级（✅ 已实施 module-063：会话级路由 classify(query,history[-6:]) + 短句继承（去语气词 <6 无特征零 LLM）+ 分诊式改写喂路由 + 工具历史信号 + L4 路径补 L2；golden_multi_turn 12 对实测意图保持 12/12 / 检索 +0.4363） |
+| `specs/module-063-multi-turn-intent-routing/task-brief.md` | 多轮意图路由升级执行简报（✅ 已实施 2026-08-14，全量 951/0；ADR-0015 落地） |
 | `specs/module-060-verify-async/` | verify 异步化（✅ 已实施：chat_stream 异步 verify + done 带 verify_task_id + 前端轮询补结果 + verify_results 表持久化，单测 17/0 + 前端 58/0；真实 E2E 待环境——本机无 PostgreSQL） |
 | `specs/module-052-nli-contradiction-scan/task-brief.md` | NLI 矛盾扫描前置决策任务简报（📋 复测进行中 module-057 v2，数据集 86 条，kappa 门槛判定中） |
 | `specs/module-053-rrf-fusion/` | 检索融合升级（✅ RRF 三通道已实施放行：Hit@5 0.9714→0.9905，加权否决，changelog 含放行决策表；上线 `PW_RETRIEVAL_FUSION_MODE=rrf` 一键开启，默认 hybrid 零回归） |
-| `specs/module-058-retrieval-chain-opt/task-brief.md` | 检索链优化+可观测性+工具治理任务简报（✅ WP-B prompt 前缀缓存 / WP-C 可观测性 / WP-E 工具治理已实施，780/0；⏸️ WP-A 拼标题推迟，后续三口径对比） |
-| `specs/module-059-tool-phase-split/task-brief.md` | 工具治理 P1 任务简报（✅ 已随 module-058 完成：检索组 7 / 生成组 4（re_search 双组），ctx.phase 单向前进，PW_TOOL_PHASE_SPLIT 开关） |
-| `specs/module-061-memory-correction/` | 记忆纠错（✅ 已实施 ADR-0007 P0+P1：升级留后悔药 + SUPERSEDED 标记 + NLI 冲突消解，824/0；module-062 升级后 NLI 消解已启用） |
-| `specs/module-062-memory-evolution2/` | 记忆进化 2（✅ 已实施 ADR-0007 P2/P3 + WP4：类型化衰减（preference 30 天/event 1 天）+ 冷记忆降权（×0.3-1.0 不删除）+ 矛盾检测启用（mDeBERTa Precision 1.0），897/0） |
+| `specs/module-058-retrieval-chain-opt/task-brief.md` | 检索链优化+可观测性任务简报（📋 WP-A 拼标题+防扎堆 / WP-B prompt 顺序前缀缓存 / WP-C 可观测性，基线 Hit@5 0.9905 id=18） |
+| `specs/module-059-tool-phase-split/task-brief.md` | 工具治理 P1 任务简报（📋 阶段切分状态机：检索组 6 / 生成组 generate_answer+search_knowledge 补检口，ctx.phase 单向前进，PW_TOOL_PHASE_SPLIT 开关） |
 | `specs/module-042-harness-guardrails/test-report.md` | 校验验收测试报告 |
 | `ai_service/rag/schemas.py:18-28` | ChatRequest 模型 + 截断 validator |
 | `ai_service/agent/router.py:76-122` | LLM 输出校验 + 保守路由 |
@@ -209,7 +205,6 @@
 - **写路径冲突消解（P1）**：语义去重命中（cosine>0.85）后 mDeBERTa NLI 判新事实 vs 旧父块——contradiction → 旧父块 superseded=true + updated_at + 新内容按**正常新增**入库（不拼接共存，"讨厌咖啡\n喜欢咖啡"不再让 LLM 猜哪句是新）；entailment/neutral/NLI 不可用/开关关 → 保持追加拼接（旧行为零回归）。
 - **NLI 封装（nli_judge）**：mDeBERTa 三分类（entailment/neutral/contradiction），延迟加载 557MB + threading.Lock + to_thread + 20s 超时 + 任何失败返回 None（上层降级旧行为）；加载路径镜像 eval/compare_nli_models 已验证 transformers 5.x（HF_HUB_OFFLINE + fp32 + id2label 从 config 读）。
 - **开关默认关（不预设成功）**：`PW_MEMORY_CONFLICT` 默认 false——评测达标（contradiction Recall≥0.8 且 Precision≥0.8）才切 true。**真实 baseline（eval_runs id=31，30 条五类记忆标注集）：Accuracy 0.60 / contradiction Precision 1.0000（0 误判）/ Recall 0.5000（漏判一半）→ 未达门槛**。数据说话：mDeBERTa 判矛盾精准但只抓得住一半（与 module-054/057 矛盾判别短板结论一致），记忆级短句场景 Precision 极高值得注意。
-- **⚠️ 后续更新（module-062 WP4）**：矛盾检测对比启用后 **`PW_MEMORY_CONFLICT=true` + `PW_MEMORY_CONFLICT_JUDGE=nli`**（mDeBERTa Precision 1.0000 达标启用，宁可漏检也不错标；clf 分类器 Recall 0.95 更高可 `PW_MEMORY_CONFLICT_JUDGE=clf` 一键切换）——本段"默认关"为 module-061 当时口径，已过时，以上条为准。
 - **记忆级 vs claim_vs_doc 矛盾判别（口径区分）**：module-052/054/057 是 claim_vs_doc（长句对文档片段，kappa<0.7）；module-061 是记忆级（短句/偏好/事件级改口），更聚焦但同样以数据验证（未达门槛不预设成功）。
 - **标记+新增分两步（事务口径）**：`_merge_duplicate` 标记 superseded 提交后，save 正常新增路径插入新内容——新增失败旧记忆已标记但未删除（内容保留不丢数据 fail-open）。
 - **`is True` 判断（测试兼容）**：`_is_superseded` 用 `getattr(doc, "superseded", False) is True` 而非 truthy——MagicMock 缺字段时 `.superseded` 返回真值 MagicMock，truthy 判断会误伤全部存量测试父块。
@@ -222,3 +217,14 @@
 - **冷记忆降权（P3，Memory Decay）**：长期层"永久等权重"改为"久未召回降权不删除"——`documents.last_recalled_at` + `_apply_cold_decay`：距上次召回 <30 天 ×1.0，此后平滑渐降至 ×0.3 下限（30→100 天 1.0→0.3），**不删除可回溯**；召回命中 fire-and-forget 刷新 last_recalled_at=now（冷记忆升温）。顺序：检索 → 降权 → 动态 K 截断。短期层不降权（已有衰减）。
 - **矛盾检测启用（WP4，Precision≥0.8 者启用）**：自建 142 案例训练分类器（bge-m3 新旧两条嵌入→拼接+差值+绝对差 4096 维 + LR，contradiction Precision 0.9048/Recall 0.95）vs mDeBERTa（Precision 1.0000/Recall 0.5）同 30 条评测集对比——**双达标取 Precision 高者 → mDeBERTa(nli) 启用**（`PW_MEMORY_CONFLICT=true` + `PW_MEMORY_CONFLICT_JUDGE=nli`，覆盖 module-061 默认关）；保守方向"宁可漏检也不错标"（Recall 后续提升入 backlog，clf Recall 更高可 `PW_MEMORY_CONFLICT_JUDGE=clf` 一键切换）。
 - **`isinstance` 判断（module-062 测试兼容）**：`_memory_type_of`/`_cold_ref_time` 用显式 `isinstance(str/datetime)` 判断（对齐 `_is_superseded` 的 `is True` 技巧）——MagicMock 缺字段时自动属性是真值 MagicMock 非 str/datetime → 走"其余半衰期/不降权"，存量测试桩零回归。
+
+## 多轮意图路由领域（2026-08-14 讨论，module-063，ADR-0015，只增不删）
+
+- **省略句/指代句路由缺口**：单句识别漏掉省略句（"为什么""那图谱呢"）——单句无特征会被误判 casual_chat/realtime。生产级三层：① 会话级路由（classify(query, history)，历史取最近 4-6 轮）② 短句意图继承（规则层零 LLM）③ 复用分诊式改写把省略句改写成自包含 query 再路由+检索。业界标准 = conversational query rewriting（百度千帆上线召回 62.5→89.2%、准确率 58→87.5%、平均轮次 3.2→1.8）。
+- **会话级路由（WP-A）**：`RouterAgent.classify(query, history=None, tool_history=None)`——history 内部 `[-6:]`（只用最近 4-6 轮，task-brief §八.5 历史不全塞；更早轮次不影响指代还费 token）；**空/None history 行为与改动前逐字一致（零回归，897 基线存量测试零改动）**。LLM `_MULTITURN_CONTEXT` few-shot："省略句/指代句结合上下文判断意图；含义完整句按字面判断"（防多轮闲聊被错误归因 knowledge 的 LLM 侧护栏；规则层由 `_deterministic_confirm` 的 rule_veto 兜底）。
+- **短句意图继承（WP-B，规则层零 LLM）**：`_strip_particles` 去语气词（`_PARTICLE_WORDS`=哦/呢/呀/啦/请问/那个/嘛/吧 8 个，task-brief §八.6 先做最常用）→ 去除后长度 <6 字符 且 `_deterministic_confirm` 无新特征（FTS 术语/图谱实体未命中、规则表未命中）→ `_short_inherit` 继承上一轮 intent（无状态从 history 推演，`_classify_prev` 递归允许省略句链式继承，深度上限 3 防无限递归）。**有特征必须正常路由（防话题漂移）**——"今天天气"靠规则表 rule_veto 挡住不继承。
+- **改写喂路由（WP-C，⭐ 核心增量）**：module-049 分诊式改写（FTS 静态分诊 → 模糊 LLM 改写 → 保真预检余弦回退 → 并行择优）本就是业界 Hybrid 改写标准形态——本模块把它**提前到路由前**，改写结果**多喂一个消费方**（路由 + 检索）。改写成功且保真通过用改写后 query 路由+检索；失败/回退原 query（保守零回归）；分诊命中 FTS 术语（precise）且非闲聊/实时规则词 → 短路 knowledge（省一次 LLM/L4 路由调用）。非流式 engine.chat 完整实现；流式 `_retrieve` 改写仍只喂检索（流式路由用原 query+history，WP-A 上下文+WP-B 继承覆盖，如实声明）。两条路径都接 history（纪律 §八.2：非流式 engine.chat + 流式 main.chat_stream + LangGraph graph.py）。
+- **工具历史信号（WP-D，规则层）**：`tool_history` 含 search_knowledge/generate_answer（`_KB_TOOL_NAMES`）且短 query → 强制 knowledge（确定性零 token，工具轨迹是意图的强信号）。**chat/chat_stream 请求 history 无工具轨迹 → 跳过**（能力 + 单测就绪，待 agent 轨迹持久化后接线）。
+- **L4 多轮拼接（WP-A）**：`IntentClassifier.predict_proba(query, prev_user_query=None)`——prev 提供时 list 拼接最近一轮 user query 向量（2048 维，训练同构，参考 memory_conflict_clf 两条嵌入先例）。**当前落盘 intent_clf.joblib 单 query 1024 维训练 → `PW_INTENT_CLASSIFIER_MULTI_TURN` 默认 false，置 true 需先重训配对样本**；未重训置 true 维度不匹配 → router 捕获回退 LLM（fail-open 零回归）。
+- **L4 路径补 L2 确定性信号（本模块实测暴露）**：L4 原本是决策主体时直接返回不跑 L2——golden_multi_turn 真实测量暴露 L4 单句无历史把"怎么解决呢"误判 casual（0.65），FTS 术语"解决"命中本应拉回却被 L4 短路 → 修复为 **L4 判非 knowledge 同走 `_deterministic_confirm`**（与 LLM 路径同款零 LLM 安全网；module-055 已证 L2 信号精确——golden 50 条非 knowledge 样本误确认 0）。真实复测：该对 casual→knowledge，意图保持 11/12→**12/12**。
+- **多轮评测三指标（zenvanriel 改写质量三指标）**：自包含清晰度（改写把省略句补全成可独立理解 query 的比例）/ 意图保持（多轮路由 intent==标注；对照单句路由基线展示省略句漏检）/ 检索提升（改写后与"上一轮完整问题检索"锚点的重叠度增量）。**真实实测（12 对）：意图保持 12/12、单句对照 11/12、检索提升 +0.4363（raw_overlap 0.2364→0.6727）、自包含 11/12**（"为什么"改写单次返回 None 非确定性，如实标注）。`eval/golden/golden_multi_turn.py` --fixture 模式不依赖 LLM/DB。

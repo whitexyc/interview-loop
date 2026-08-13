@@ -233,8 +233,42 @@ class RAGEngine:
             # ========== 1. 意图识别 ==========
             # module-058（WP-C）：意图路由/分诊改写/检索/重排/反思/生成/幻觉
             # 检测各阶段计时落观测上下文（request_logs 可观测）
+            # module-063（WP-A/WP-C，ADR-0015）：① 路由吃历史（classify
+            # history 参数，空历史行为与现状逐字一致零回归）；② 分诊式改写
+            # 提前到路由前（仅 query_rewrite_enabled 时，默认关零回归）——
+            # 改写成功且保真通过时用改写后 query 路由+检索，失败/回退用原始
+            # query（改写结果多喂一个消费方）；③ 分诊命中 FTS 术语（precise）
+            # 且非闲聊/实时规则词 → 短路 knowledge（可选优化，省一次 LLM
+            # 路由调用）。
             _t0 = time.perf_counter()
-            intent_result = await router_agent.classify(request.query)
+            current_query = request.query
+            rewrite_round0: list[dict] | None = None
+            rewrite_info: dict = {}
+            if settings.query_rewrite_enabled:
+                _rq_t0 = time.perf_counter()
+                current_query, rewrite_round0, rewrite_info = await query_rewrite.prepare(
+                    request.query,
+                    lambda q: asyncio.wait_for(
+                        hybrid_retriever.retrieve(q, top_k=20), timeout=15,
+                    ),
+                )
+                observability.timing("triage_rewrite", time.perf_counter() - _rq_t0)
+                if rewrite_info.get("mode") != "precise":
+                    logger.info("Query 改写: mode=%s, used_rewrite=%s, query=%s",
+                                rewrite_info.get("mode"),
+                                rewrite_info.get("used_rewrite", "-"),
+                                request.query[:50])
+                if (rewrite_info.get("mode") == "precise"
+                        and not router_agent._rule_hits(request.query)):
+                    # 分诊命中 FTS 术语（精确 query）→ 短路 knowledge
+                    intent_result = {"intent": "knowledge", "confidence": 0.0,
+                                     "reason": "分诊命中 FTS 术语，短路 knowledge"}
+                else:
+                    intent_result = await router_agent.classify(
+                        current_query, history=request.history)
+            else:
+                intent_result = await router_agent.classify(
+                    request.query, history=request.history)
             observability.timing("intent", time.perf_counter() - _t0)
             intent = intent_result.get("intent", "knowledge")
             intent_labels = {"knowledge": "知识库", "casual_chat": "闲聊", "realtime": "实时数据"}
@@ -261,30 +295,13 @@ class RAGEngine:
                 return ChatResponse(answer=answer, sources=[], message="casual_chat")
 
             # ========== 2. 检索+反思循环（最多 3 轮） ==========
-            current_query = request.query
+            # module-049 分诊式改写已提前到路由前（module-063，见上）：改写结果
+            # 同时喂路由 + 检索（改写成功且保真通过时 current_query 为改写后
+            # query，失败/回退为原始 query）。round 0 直接用并行择优结果
+            #（rewrite_round0 非 None），不再重复检索；改写链路任何一环失败 →
+            # 回退原 query（与现状行为完全一致，零回归）。HyDE/反思兜底均保留。
             all_docs: list[dict] = []
             seen_ids: set[int] = set()
-            # module-049 分诊式改写（前置增强）：静态分诊（FTS 术语命中 →
-            # 精确 query 直接检索）+ 模糊 query 走 LLM 改写 + 保真预检 +
-            # 并行检索择优。rewrite_round0 非 None 时 = 并行择优结果，
-            # round 0 直接使用（不重复检索）；改写链路任何一环失败 →
-            # 回退原 query（与现状行为完全一致，零回归）。HyDE/反思兜底
-            # 均保留，本增强只把"改写时机"提前。
-            rewrite_round0: list[dict] | None = None
-            if settings.query_rewrite_enabled:
-                _rq_t0 = time.perf_counter()
-                current_query, rewrite_round0, rewrite_info = await query_rewrite.prepare(
-                    request.query,
-                    lambda q: asyncio.wait_for(
-                        hybrid_retriever.retrieve(q, top_k=20), timeout=15,
-                    ),
-                )
-                observability.timing("triage_rewrite", time.perf_counter() - _rq_t0)
-                if rewrite_info.get("mode") != "precise":
-                    logger.info("Query 改写: mode=%s, used_rewrite=%s, query=%s",
-                                rewrite_info.get("mode"),
-                                rewrite_info.get("used_rewrite", "-"),
-                                request.query[:50])
             # module-043 L3 后置校验：精排 top-1 绝对余弦 < 0.3 → 疑似误判标记
             #（先度量后干预：只写入 ChatSteps 可观测，不阻塞、不改回答路径）
             # module-045 WP2b/c：判定与展示同源——round 0 判定处由
