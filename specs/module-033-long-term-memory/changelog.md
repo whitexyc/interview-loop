@@ -68,8 +68,55 @@ recall 动态 K 召回（候选平均相似度 >0.85→5 / 0.75-0.85→3 / <0.75
 | 全量回归 | `python -m pytest tests/ -q` | 254 passed / 0 failed（215 基线 + 39 新增） |
 | 编译检查 | `python -m py_compile src/config.py rag/memory.py rag/memory_extractor.py rag/engine.py main.py` | OK |
 
+## 附属发现（工作树 m8-knowledge-panel 审查期间发现的跨模块缺陷）
+
+> 以下问题不属于 module-033 产品代码范畴，但在同一工作树审查期间被检出，
+> 记录于此供后续模块修复。
+
+### [Important] 缺测试：AgentTool.run asyncio.TimeoutError 分支
+
+`ai_service/agent/tool_registry.py:63-65` — `AgentTool.run` 对 `asyncio.TimeoutError`
+返回 `f"(工具 {self.name} 执行超时)"`，对通用 `Exception` 返回 `""`。
+现有测试仅覆盖 RuntimeError（返回 `""`），未验证 TimeoutError 超时分支
+（应返回超时提示而非空字符串）。
+
+### [Important] 缺测试：ChatRequest Pydantic Field 校验
+
+`ai_service/rag/schemas.py:18-19` — `ChatRequest.query` 设 `Field(max_length=2000)`，
+`ChatRequest.history` 设 `Field(max_length=20)`。`test_schemas.py` 缺少以下边界测试：
+- query 超过 2000 字符 → 预期 422
+- history 超过 20 条 → 预期 422
+
+### [Important] 缺测试：MAX_ANSWER_LEN=10000 截断
+
+`ai_service/main.py:40` 定义 `MAX_ANSWER_LEN = 10000`，在四个端点实施了截断逻辑
+（chat L331 / chat_stream L472 / chat_agent L555 / chat_agent-lg L625），
+但无任何测试验证：
+- 截断点在各端点的触发正确性
+- 截断后 sources 保持完整（不被截断影响）
+- 截断标记 "[答案过长，已截断]" 正确追加
+
+### [Important] Plan-vs-实现不一致：history 超限行为
+
+Pydantic `Field(max_length=20)` 在 history 超过 20 条时抛出 422 ValidationError
+（拒绝请求），而非静默截断取最近 20 条。若验收标准预期为静默截断，需将
+`Field(max_length=20)` 改为在端点层 `history = request.history[-20:]` 切片。
+
+### [Minor] Agent 端点流式不一致
+
+`chat_agent` 与 `chat_agent-lg` 的 SSE token 事件输出完整 answer 文本，
+但 done 事件的 answer 字段是截断后的。读取 token 事件与 done 事件的 UI
+会看到不同长度的 answer。
+
+### [Minor] 截断后验证偏差
+
+`chat_stream` 在 `answer_parts` 中追加 "[答案过长，已截断]" 标记后（L474），
+将该截断+标记文本传入 `reflector.verify_answer()`（L496），
+截断后的不完整内容验证可能产生误导性置信度评分。
+
 ## 变更记录
 
 | 版本 | 日期 | 变更内容 | 变更人 |
 |------|------|----------|--------|
+| v2 | 2026-08-08 | 追加工作树审查期间发现的跨模块缺陷清单（6 项） | Reviewer |
 | v1 | 2026-08-05 | 初始实现（提取器/去重/动态K/格式化/异步接入 + 39 单测） | Developer |

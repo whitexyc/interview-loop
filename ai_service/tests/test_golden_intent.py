@@ -163,7 +163,10 @@ class TestRecordEvalRun:
         assert saved_id == 42
         assert captured["eval_type"] == "intent"
         assert captured["git_commit"] == "abc123def"
-        assert captured["config_snapshot"] == {"top_k": "5"}
+        # module-056 Review 修复：快照补运行时 L4 开关字段（rag_config 表无此键，
+        # 测试环境 conftest 钉住 False → 如实记录 "False"）
+        assert captured["config_snapshot"] == {
+            "top_k": "5", "intent_classifier_enabled": "False"}
         assert captured["scores"]["accuracy"] == 0.9
 
     def test_save_failure_returns_zero(self, monkeypatch):
@@ -174,3 +177,59 @@ class TestRecordEvalRun:
         monkeypatch.setattr(golden_intent, "save_eval_run", _fake_save)
         commit, saved_id = asyncio.run(golden_intent.record_eval_run(scores={}, per_question=[]))
         assert saved_id == 0
+
+
+class TestRunCompareClassifier:
+    """--compare-classifier 的 L4 钉住（module-056 Review 修复）
+
+    防自污染：module-056 起 intent_classifier_enabled 默认 true，若 LLM 侧
+    不经钉住直接跑，router_agent 会静默走 L4 分类器路径，「LLM vs 分类器」
+    退化为「分类器 vs 分类器」（双 1.0000 恒成立、对比失去意义）。
+    """
+
+    @staticmethod
+    def _patch_side_effects(monkeypatch):
+        """打桩 run_eval/打印/IntentClassifier，不依赖 DB 与 LLM"""
+        from src.config import settings
+
+        observed = []
+
+        async def _fake_run_eval(classifier=None, dataset=None):
+            observed.append(settings.intent_classifier_enabled)
+            items = list(dataset)
+            scores = {
+                "dataset_size": len(items), "evaluated": len(items), "skipped": 0,
+                "accuracy": 1.0, "confusion_matrix": {}, "per_class": {}, "classes": [],
+            }
+            per_q = [{"query": it["query"], "label": it["intent"],
+                      "predicted": it["intent"], "correct": True} for it in items]
+            return scores, per_q, []
+
+        class _FakeClassifier:
+            async def load(self):
+                return True
+
+            async def predict_proba(self, query):
+                return {"knowledge": 0.9, "casual_chat": 0.05, "realtime": 0.05}
+
+        monkeypatch.setattr(golden_intent, "run_eval", _fake_run_eval)
+        monkeypatch.setattr(golden_intent, "print_report", lambda *a, **k: None)
+        monkeypatch.setattr(golden_intent, "print_comparison", lambda *a, **k: None)
+        monkeypatch.setattr("agent.intent_classifier.IntentClassifier",
+                            lambda model_path=None, embedding_service=None: _FakeClassifier())
+        return observed
+
+    def test_llm_side_pins_classifier_disabled_and_restores(self, monkeypatch):
+        """LLM 侧运行期间 L4 必须被钉住关闭，结束后恢复原开关值"""
+        from src.config import settings
+
+        # 模拟 module-056 默认启用态
+        monkeypatch.setattr(settings, "intent_classifier_enabled", True)
+        observed = self._patch_side_effects(monkeypatch)
+
+        asyncio.run(golden_intent.run_compare_classifier(no_save=True))
+
+        # 两次 run_eval（LLM 侧 + 分类器侧）均在钉住态运行
+        assert observed and all(v is False for v in observed)
+        # 结束后恢复调用前原值（默认启用态不被本脚本破坏）
+        assert settings.intent_classifier_enabled is True
