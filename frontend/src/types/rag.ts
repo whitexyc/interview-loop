@@ -14,6 +14,16 @@
  * 3. 可空字段不加 ?（后端保证字段一定存在）
  */
 
+/** 证据链验证单条声明 — 模块 module-039 */
+export interface VerifiedClaim {
+  /** 陈述文本（1-2 句话） */
+  claim: string;
+  /** 可信度判定 */
+  verdict: 'supported' | 'inferred' | 'unsupported';
+  /** 证据引用编号（如 "[1]"；unsupported 时为 "N/A"） */
+  evidence: string;
+}
+
 /** 聊天请求 — 对应 Python RAGEngine.chat() 的入参 */
 export interface ChatRequest {
   /** 用户问题 */
@@ -46,6 +56,42 @@ export interface ChatResponse {
   message: string;
   /** 各步骤中间数据（后端 RAG 链路执行结果） */
   steps?: PipelineSteps;
+  /** 证据链验证结果（module-039；无验证数据时为 null） */
+  verified_claims?: {
+    claims: VerifiedClaim[];
+    overall_confidence: number;
+    total_claims: number;
+    supported: number;
+    inferred: number;
+    unsupported: number;
+  } | null;
+  /**
+   * 异步 verify 任务 ID（module-060：done 事件携带 verify_task_id → 前端凭此
+   * 轮询 GET /ai/rag/chat/verify/{task_id} 补验证结果；答案先交付、验证后到。
+   * 无 task_id（提交失败/开关关闭）→ 不轮询、不显示验证面板，fail-open）。
+   */
+  verifyTaskId?: string;
+}
+
+/**
+ * 验证任务轮询结果（module-060 verify 异步后置）
+ * 对应后端 GET /ai/rag/chat/verify/{task_id} 返回。
+ */
+export interface VerifyTaskResult {
+  /** 任务状态：pending（进行中）/ done（完成）/ failed（失败） */
+  status: 'pending' | 'done' | 'failed';
+  /** 逐句验证结果（status=done 时有） */
+  claims?: VerifiedClaim[];
+  /** 整体置信度（status=done 时有） */
+  overall_confidence?: number;
+  total_claims?: number;
+  supported?: number;
+  inferred?: number;
+  unsupported?: number;
+  /** verify_answer 任务耗时（毫秒，status=done 时有） */
+  verified_in_ms?: number;
+  /** 失败原因（status=failed 时有） */
+  error?: string;
 }
 
 /** RAG 中间步骤数据 — 对应后端 ChatSteps 模型 */
@@ -161,4 +207,17 @@ export interface DocumentListResponse {
   total: number;
   page: number;
   page_size: number;
+}
+
+/**
+ * 反馈请求 — module-048 反馈飞轮：对应后端 POST /ai/feedback 入参
+ * （feedback 表是层 4 分类器再训练的数据源）
+ */
+export interface FeedbackRequest {
+  /** 持久化消息 ID（Java 后端消息主键；无 message_id 的历史消息不展示反馈按钮） */
+  message_id: number;
+  /** 评价：1 = 有帮助（👍），-1 = 无帮助（👎） */
+  rating: 1 | -1;
+  /** 可选评论（后端限制 ≤500 字符；前端当前不采集，留待后续扩展） */
+  comment?: string;
 }

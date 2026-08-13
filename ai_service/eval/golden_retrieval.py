@@ -10,6 +10,13 @@ Golden 检索集评估脚本 — Hit@k / Recall@k / MRR + 单通道消融 + 版�
     python -m eval.golden_retrieval --top-k 10
     python -m eval.golden_retrieval --no-save          # 不写 eval_runs（纯跑分）
     python -m eval.golden_retrieval --compare          # 对比最近两次运行的 delta
+    python -m eval.golden_retrieval --ablate           # 消融对比：graph_only vs hybrid 一键跑两边 + side-by-side delta（图谱贡献量）
+
+三通道融合（module-053，环境变量切换，默认 hybrid 两通道零回归）:
+    $env:PW_RETRIEVAL_FUSION_MODE='rrf';      python -m eval.golden_retrieval   # 三通道 RRF（k=60）
+    $env:PW_RETRIEVAL_FUSION_MODE='weighted'; python -m eval.golden_retrieval   # 三通道加权（默认 0.3,0.6,0.1）
+    $env:PW_RETRIEVAL_FUSION_WEIGHTS='0.25,0.5,0.25'  # 权重消融组
+    每次运行的 fusion_mode/fusion_weights 写入 eval_runs scores，新旧数字对比须同口径。
 
 指标定义:
     Hit@k      该题检索 top_k 结果中是否命中任意 golden doc（0/1，按题平均）
@@ -35,8 +42,9 @@ from pathlib import Path
 
 from sqlalchemy import text
 
+from src.config import settings
 from src.database import async_session_factory
-from rag.retriever import RetrievalException, hybrid_retriever
+from rag.retrieval.retriever import RetrievalException, hybrid_retriever
 
 logging.basicConfig(
     level=logging.INFO,
@@ -289,8 +297,11 @@ async def compare_runs(limit: int = 2) -> None:
     print("\n" + "=" * 60)
     print("Regression Compare (recent vs previous)")
     print("=" * 60)
-    print(f"  new  #{newest['id']}  commit={newest['git_commit'][:8]}  {newest['created_at']}")
-    print(f"  prev #{older['id']}  commit={older['git_commit'][:8]}  {older['created_at']}")
+    print(f"  new  #{newest['id']}  commit={newest['git_commit'][:8]}  {newest['created_at']}"
+          f"  fusion={ns.get('fusion_mode', 'hybrid')}")
+    print(f"  prev #{older['id']}  commit={older['git_commit'][:8]}  {older['created_at']}"
+          f"  fusion={os_.get('fusion_mode', 'hybrid')}")
+    print("  ⚠️ 新旧对比须同口径（fusion_mode 一致），否则 delta 无意义")
     print("-" * 60)
     print(f"  {'metric':<12}{'new':>8}{'prev':>8}{'delta':>8}")
     for key in ("hit_at_k", "recall_at_k", "mrr"):
@@ -384,6 +395,12 @@ async def run_eval(mode: str, top_k: int) -> tuple[dict, list[dict], list[dict]]
     scores = {
         **agg["overall"],
         "mode": mode,
+        # module-053 口径声明：retrieval_fusion_mode 标注本次运行的融合模式
+        #（hybrid=两通道 / rrf=三通道 RRF / weighted=三通道加权），新旧数字
+        # 对比前必须同口径（评估路径直调 retriever，不含引擎层 round 0 图谱并行）
+        "fusion_mode": settings.retrieval_fusion_mode,
+        "fusion_weights": settings.retrieval_fusion_weights
+        if settings.retrieval_fusion_mode == "weighted" else "",
         "top_k": top_k,
         "dataset_size": len(golden),
         "evaluated": len(per_question),
@@ -399,7 +416,9 @@ def print_report(mode: str, top_k: int, scores: dict, per_question: list[dict], 
     print("Golden Retrieval Eval")
     print("=" * 60)
     print(f"Dataset: {scores['dataset_size']} questions | Evaluated: {scores['evaluated']} | Skipped: {scores['skipped']}")
-    print(f"Mode: {mode} | top_k: {top_k}")
+    print(f"Mode: {mode} | fusion_mode: {scores.get('fusion_mode', 'hybrid')}"
+          + (f" | weights: {scores['fusion_weights']}" if scores.get("fusion_weights") else "")
+          + f" | top_k: {top_k}")
     print("-" * 60)
     print(f"Hit@{top_k}:   {scores['hit_at_k']:.4f}")
     print(f"Recall@{top_k}: {scores['recall_at_k']:.4f}")
@@ -427,6 +446,53 @@ def print_report(mode: str, top_k: int, scores: dict, per_question: list[dict], 
     print()
 
 
+async def ablate(top_k: int) -> None:
+    """消融实验：graph_only vs hybrid 对比，输出 side-by-side delta
+
+    分别以 graph_only 和 hybrid 模式运行 golden 检索评估，
+    对比两个模式的 Hit@k / Recall@k / MRR 及按类别的差值。
+    """
+    print("\n" + "=" * 60)
+    print("Ablation: graph_only vs hybrid")
+    print("=" * 60)
+
+    # 校验 golden 集
+    load_golden()
+
+    results: dict[str, dict] = {}
+    for mode in ("graph_only", "hybrid"):
+        print(f"Running {mode}...")
+        scores, _, _ = await run_eval(mode, top_k)
+        results[mode] = scores
+        print(f"  {mode}: Hit@{top_k}={scores['hit_at_k']:.4f}  "
+              f"Recall@{top_k}={scores['recall_at_k']:.4f}  MRR={scores['mrr']:.4f}")
+
+    graph = results["graph_only"]
+    hybrid = results["hybrid"]
+
+    print("\n" + "-" * 60)
+    print(f"{'Metric':<16} {'graph_only':>12} {'hybrid':>12} {'delta':>12}")
+    print("-" * 60)
+    for key in ("hit_at_k", "recall_at_k", "mrr"):
+        gv = graph[key]
+        hv = hybrid[key]
+        delta = hv - gv
+        print(f"{key:<16} {gv:>12.4f} {hv:>12.4f} {delta:>+12.4f}")
+
+    print("-" * 60)
+    print("Per-Category Delta (hybrid - graph_only):")
+    gcat = graph.get("per_category", {})
+    hcat = hybrid.get("per_category", {})
+    all_cats = sorted(set(gcat) | set(hcat))
+    for cat in all_cats:
+        gv = gcat.get(cat, {}).get("hit_at_k", 0.0)
+        hv = hcat.get(cat, {}).get("hit_at_k", 0.0)
+        print(f"  {cat:<18} Hit@{top_k}: {gv:.4f} → {hv:.4f}  ({hv-gv:+.4f})")
+    print("=" * 60)
+    print("  正 delta 表示 hybrid 优于 graph_only（图谱贡献量）。")
+    print()
+
+
 async def main() -> None:
     """评估脚本入口"""
     parser = argparse.ArgumentParser(description="Golden 检索集召回评估")
@@ -436,6 +502,8 @@ async def main() -> None:
     parser.add_argument("--top-k", type=int, default=5, help="检索深度 k（默认 5，0/负数自动回退 5）")
     parser.add_argument("--no-save", action="store_true", help="不记录 eval_runs 表")
     parser.add_argument("--compare", action="store_true", help="对比最近两次运行")
+    parser.add_argument("--ablate", action="store_true",
+                        help="消融实验：graph_only vs hybrid side-by-side 对比")
     args = parser.parse_args()
 
     if args.compare:
@@ -443,6 +511,10 @@ async def main() -> None:
         return
 
     top_k = args.top_k if args.top_k and args.top_k > 0 else 5
+
+    if args.ablate:
+        await ablate(top_k)
+        return
 
     # 先校验 golden 集（文件缺失/结构非法时立即报错退出）
     load_golden()

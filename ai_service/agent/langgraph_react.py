@@ -32,7 +32,10 @@ from langgraph.graph import END, StateGraph
 
 from src.config import settings
 from llm.client import LLMFactory
-from agent.react import ReactContext, _assistant_message, _build_messages
+from agent.react import (
+    ReactContext, _assistant_message, _build_messages,
+    advance_phase, schemas_for_phase,
+)
 from agent.reflector import reflector
 from agent.tool_registry import ToolRegistry, registry
 
@@ -51,6 +54,7 @@ class ReActGraphState(TypedDict):
         tools: 工具注册表（默认全局 registry）
         response: llm_call 节点的 LLM 工具调用响应
         answer: 最终答案（finalize/fallback 产出）
+        max_answer_len: 答案最大长度（0=不限制），超出截断并附加标记
     """
     ctx: ReactContext
     messages: list
@@ -60,6 +64,7 @@ class ReActGraphState(TypedDict):
     tools: ToolRegistry
     response: dict
     answer: str
+    max_answer_len: int
 
 
 # ==================== Node 函数 ====================
@@ -84,7 +89,9 @@ async def llm_call(state: ReActGraphState) -> dict:
     events = state["events"]
 
     client = LLMFactory.get_client()
-    response = await client.chat_with_tools(messages, tools.to_llm_schemas())
+    # module-058（ADR-0012 方案 A）：按 ctx.phase 阶段选工具 schema
+    #（与手写 react_loop 共用 schemas_for_phase，防两处漂移）
+    response = await client.chat_with_tools(messages, schemas_for_phase(tools, ctx))
 
     content = response.get("content", "") or ""
     if content:
@@ -126,8 +133,10 @@ async def execute_tools(state: ReActGraphState) -> dict:
     executed_ids = {tc.get("id", "") for tc in allowed}
     messages.append(_assistant_message(response, executed_ids))
 
+    executed_names: list[str] = []
     for tc in allowed:
         name = tc.get("name", "")
+        executed_names.append(name)
         args = tc.get("args") or {}
         if isinstance(args, str):  # 防御：个别供应商返回未解析的 JSON 字符串
             try:
@@ -145,6 +154,8 @@ async def execute_tools(state: ReActGraphState) -> dict:
         # 工具结果追加到消息历史（LLM 下一轮能看到）
         messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                          "content": result})
+    # 本轮调用过生成工具 → 下一轮切 generation（单向前进，与手写 react_loop 共用）
+    advance_phase(ctx, executed_names)
 
     return {"messages": messages, "tool_count": tool_count, "events": events}
 
@@ -160,6 +171,14 @@ async def finalize(state: ReActGraphState) -> dict:
     """
     events = state["events"]
     answer = (state.get("response") or {}).get("content", "") or ""
+    max_len = state.get("max_answer_len", 0) or 0
+    if max_len and len(answer) > max_len:
+        answer = answer[:max_len] + "\n\n[答案过长，已截断]"
+        # 同步更新 llm_call 节点追加的 token 事件，保证 token/done 内容一致
+        for evt in reversed(events):
+            if evt.get("type") == "token":
+                evt["content"] = answer
+                break
     events.append({"type": "done", "answer": answer, "tool_count": state["tool_count"]})
     return {"answer": answer, "events": events}
 
@@ -179,7 +198,11 @@ async def fallback(state: ReActGraphState) -> dict:
                    state["budget"], len(ctx.docs))
     answer = await reflector.generate_answer(
         ctx.query, ctx.docs, history=ctx.history, memory=ctx.memory,
+        scratchpad=ctx.scratchpad,
     )
+    max_len = state.get("max_answer_len", 0) or 0
+    if max_len and len(answer) > max_len:
+        answer = answer[:max_len] + "\n\n[答案过长，已截断]"
     if answer:
         events.append({"type": "token", "content": answer})
     events.append({"type": "done", "answer": answer, "tool_count": state["tool_count"]})
@@ -258,6 +281,7 @@ async def langgraph_react_loop(
     messages: list,
     budget: int,
     tools: Optional[ToolRegistry] = None,
+    max_answer_len: int = 0,
 ):
     """LangGraph 版 ReAct 循环（异步生成器，事件与 react_loop 对齐）
 
@@ -269,6 +293,7 @@ async def langgraph_react_loop(
         messages: 会话消息（system + history + 当前问题，会追加工具结果）
         budget: 工具总调用次数上限（≥0）
         tools: 工具注册表，默认全局 registry
+        max_answer_len: 答案最大长度（0=不限制），超出截断并附加标记
 
     Yields 事件（与 react_loop 一致）:
       {"type": "tool_call",   "name": str, "args": dict, "tool_count": int}
@@ -282,11 +307,14 @@ async def langgraph_react_loop(
     """
     tools = tools or registry
     budget = int(budget or 0)
+    max_answer_len = int(max_answer_len or 0)
 
     # 预算=0：不调用工具，LLM 直接回答（验收 §1.3「LangGraph 预算=0：直接回答」）
     if budget <= 0:
         client = LLMFactory.get_client()
         answer = await client.chat(messages)
+        if max_answer_len and len(answer) > max_answer_len:
+            answer = answer[:max_answer_len] + "\n\n[答案过长，已截断]"
         yield {"type": "done", "answer": answer, "tool_count": 0}
         return
 
@@ -299,6 +327,7 @@ async def langgraph_react_loop(
         "tools": tools,
         "response": {},
         "answer": "",
+        "max_answer_len": max_answer_len,
     }
     # recursion_limit 覆盖默认 25：预算大时循环步数 = 2*budget + 兜底/收尾
     final_state = await react_graph.ainvoke(

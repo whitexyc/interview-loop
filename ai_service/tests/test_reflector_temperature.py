@@ -48,7 +48,11 @@ class TestReflectorProviderAndTemperature:
             r = Reflector()
             with mock.patch("llm.client.LLMFactory.get_client", side_effect=fake_get):
                 return await r.check_sufficiency(
-                    "什么是线程池", [{"title": "T", "content": "c"}],
+                    "什么是线程池",
+                    # module-044：数量闸门 <2 篇直接不充分（零 LLM），
+                    # 该用例验证反思温度，需 ≥2 篇且分数达标才走 LLM 路径
+                    [{"title": "T", "content": "c", "abs_cosine": 0.7},
+                     {"title": "T2", "content": "c2", "abs_cosine": 0.6}],
                 )
 
         result = asyncio.run(run())

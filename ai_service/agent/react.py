@@ -50,6 +50,9 @@ _SYSTEM_PROMPT = """你是张三个人网站的 Agentic RAG 问答助手。用�
 - extract_entities: 从查询/文本中提取技术实体
 - recall_memory: 召回该用户的跨会话长期记忆
 - generate_answer: 基于已检索到的全部文档生成带引用标注的最终答案
+- verify_answer: 逐句验证已生成答案是否被检索文档支持，标注可信度
+- re_search: 检索不足时自动改写查询重检
+- note_to_self: 记录中间发现或推理结论到工作笔记，后续轮次可参考
 
 使用规则：
 1. 优先用 search_knowledge 做一次检索；结果不足时再换 search_fts / search_vector /
@@ -57,7 +60,9 @@ _SYSTEM_PROMPT = """你是张三个人网站的 Agentic RAG 问答助手。用�
 2. 检索工具会自动累积已检索文档；信息足够后调用 generate_answer 生成带引用答案，
    或直接输出最终答案
 3. 工具返回空结果不代表出错，可能是知识库无相关内容，请判断是继续检索还是如实告知用户
-4. 用中文回答，严格基于检索到的文档内容，禁止编造"""
+4. 用中文回答，严格基于检索到的文档内容，禁止编造
+5. 检索结果与问题不相关时，调用 re_search 自动改写查询重检，
+   无需手动换 search_fts/search_vector（与 engine 流水线的自动反思对齐）"""
 
 
 class ReactContext:
@@ -70,6 +75,10 @@ class ReactContext:
         history: 历史对话列表 [{"role", "content"}, ...]
         docs: 检索工具累积的文档（按 doc id 去重）
         memory: recall_memory 工具召回的记忆文本（供 generate_answer 使用）
+        scratchpad: note_to_self 工具记录的工作笔记列表，按写入序（module-041）
+        phase: 工具执行阶段（module-058 / ADR-0012 方案 A）——初始 "retrieval"；
+            本轮调用过 generate_answer/verify_answer → 下一轮切 "generation"
+            （单向前进，generation 内调 re_search 不回退）
     """
 
     def __init__(self, query: str, identity: str = "unknown",
@@ -80,6 +89,12 @@ class ReactContext:
         self.docs: list[dict] = []
         self._seen_ids: set = set()
         self.memory = ""
+        self.scratchpad: list[str] = []  # module-041: Agent 工作笔记，按写入序
+        self.phase: str = "retrieval"    # module-058: 工具执行阶段状态机
+
+    def add_note(self, note: str) -> None:
+        """记录一条工作笔记到 scratchpad（module-041）"""
+        self.scratchpad.append(note.strip())
 
     def add_docs(self, docs: list[dict]) -> None:
         """按 doc id 去重累积检索文档（供 generate_answer / 兜底生成使用）"""
@@ -114,6 +129,36 @@ def _assistant_message(response: dict, executed_ids: set) -> dict:
     if calls:
         msg["tool_calls"] = calls
     return msg
+
+
+# ─── 工具阶段切分公共辅助（module-058 / ADR-0012 方案 A，两条循环共用） ───
+# 阶段判定：以"是否已调用过 generate_answer/verify_answer"为界（非 docs
+# 非空——后者会切断"生成后发现不足→再补检"能力）；generation 内调 re_search
+# 不回退（单向前进，防死循环）。归组见 tool_registry.register_builtin_tools。
+_GENERATION_GATE_TOOLS = {"generate_answer", "verify_answer"}
+
+
+def schemas_for_phase(tools: ToolRegistry, ctx: ReactContext) -> list[dict]:
+    """按当前阶段选工具 schema（开关 false → 全量 10 个，零回归逃生口）
+
+    两条 ReAct 循环（react_loop + langgraph_react_loop）共用本函数，只改
+    一处 = 回归（防两处漂移）。
+    """
+    if settings.tool_phase_split:
+        return tools.to_llm_schemas(group=ctx.phase)
+    return tools.to_llm_schemas()
+
+
+def advance_phase(ctx: ReactContext, executed_names: list[str]) -> None:
+    """本轮调用过生成工具 → 下一轮切 generation（单向前进）
+
+    Args:
+        ctx: 会话上下文（phase 原地更新，跨轮次/跨节点可见）
+        executed_names: 本轮实际执行的工具名列表（含预算截断后实际执行者）
+    """
+    if ctx.phase == "retrieval" and any(
+            n in _GENERATION_GATE_TOOLS for n in executed_names):
+        ctx.phase = "generation"
 
 
 async def react_agent(
@@ -163,6 +208,7 @@ async def react_loop(
     messages: list,
     budget: int,
     tools: Optional[ToolRegistry] = None,
+    max_answer_len: int = 0,
 ) -> AsyncGenerator[dict, None]:
     """ReAct 循环核心（异步生成器，逐事件产出，供 react_agent 与 SSE 端点复用）
 
@@ -171,6 +217,7 @@ async def react_loop(
         messages: 会话消息（system + history + 当前问题，会追加工具结果）
         budget: 工具总调用次数上限（≥0）
         tools: 工具注册表，默认全局 registry
+        max_answer_len: 答案最大长度（0=不限制），超出截断并附加标记
 
     Yields 事件:
       {"type": "tool_call",   "name": str, "args": dict, "tool_count": int}
@@ -185,22 +232,29 @@ async def react_loop(
     tools = tools or registry
     client = LLMFactory.get_client()
     budget = int(budget or 0)
+    max_answer_len = int(max_answer_len or 0)
     tool_count = 0
 
     # 预算=0：不调用工具，LLM 直接回答（验收 §1.2「预算=0：直接生成」）
     if budget <= 0:
         answer = await client.chat(messages)
+        if max_answer_len and len(answer) > max_answer_len:
+            answer = answer[:max_answer_len] + "\n\n[答案过长，已截断]"
         yield {"type": "done", "answer": answer, "tool_count": 0}
         return
 
     while tool_count < budget:
-        response = await client.chat_with_tools(messages, tools.to_llm_schemas())
+        # module-058（ADR-0012 方案 A）：按 ctx.phase 阶段选工具 schema
+        #（检索阶段 7 个 / 生成阶段 4 个；开关 false → 全量，零回归）
+        response = await client.chat_with_tools(messages, schemas_for_phase(tools, ctx))
         tool_calls = response.get("tool_calls", []) or []
         content = response.get("content", "") or ""
 
         # 无 tool_call：LLM 认为信息足够，直接输出答案
         if not tool_calls:
             if content:
+                if max_answer_len and len(content) > max_answer_len:
+                    content = content[:max_answer_len] + "\n\n[答案过长，已截断]"
                 yield {"type": "token", "content": content}
             yield {"type": "done", "answer": content, "tool_count": tool_count}
             return
@@ -219,8 +273,10 @@ async def react_loop(
         executed_ids = {tc.get("id", "") for tc in allowed}
         messages.append(_assistant_message(response, executed_ids))
 
+        executed_names: list[str] = []
         for tc in allowed:
             name = tc.get("name", "")
+            executed_names.append(name)
             args = tc.get("args") or {}
             if isinstance(args, str):  # 防御：个别供应商返回未解析的 JSON 字符串
                 try:
@@ -238,13 +294,18 @@ async def react_loop(
             # 工具结果追加到消息历史（LLM 下一轮能看到）
             messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                              "content": result})
+        # 本轮调用过生成工具 → 下一轮切 generation（单向前进）
+        advance_phase(ctx, executed_names)
 
     # 预算耗尽：用已收集 docs 兜底生成
     logger.warning("工具预算耗尽 (budget=%d)，用 %d 篇已收集文档兜底生成",
                    budget, len(ctx.docs))
     answer = await reflector.generate_answer(
         ctx.query, ctx.docs, history=ctx.history, memory=ctx.memory,
+        scratchpad=ctx.scratchpad,
     )
+    if max_answer_len and len(answer) > max_answer_len:
+        answer = answer[:max_answer_len] + "\n\n[答案过长，已截断]"
     if answer:
         yield {"type": "token", "content": answer}
     yield {"type": "done", "answer": answer, "tool_count": tool_count}

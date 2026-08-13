@@ -3,7 +3,7 @@ RAG 知识库文档 ORM 模型
 """
 import logging
 
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, func
+from sqlalchemy import Boolean, Column, Integer, String, Text, DateTime, Float, ForeignKey, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase
 from pgvector.sqlalchemy import Vector
@@ -38,6 +38,29 @@ class Document(Base):
     created_at = Column(
         DateTime(timezone=True), server_default=func.now(), comment="创建时间"
     )
+    # module-046 记忆进化：仅短期层使用（last_mentioned_at 提及刷新 / mention_count
+    # 召回加权 + 升级阈值）。存量行字段为 NULL/0 时按 created_at 衰减、count=0 加权
+    #（零迁移 fail-open，不写迁移脚本）
+    last_mentioned_at = Column(
+        DateTime(timezone=True), nullable=True, comment="最近提及时间（module-046 仅短期层使用）"
+    )
+    mention_count = Column(
+        Integer, nullable=False, default=0, comment="提及次数（module-046 仅短期层使用）"
+    )
+    # module-061 记忆纠错（ADR-0007 P0+P1）：
+    #   superseded —— 记忆是否已被新说法取代（true=SUPERSEDED，不删除可审计，
+    #                  Zep 模式）。写路径冲突消解（_merge_duplicate NLI 判矛盾）
+    #                  与 P0 升级留后悔药均可能标 true；召回侧过滤 superseded=true
+    #                  （_expand_to_parents / _evolve_recall），旧说法不参与召回。
+    #   updated_at —— 记忆最近更新（升级/冲突标记/去重追加时刷新），可审计时间线。
+    # 存量行默认 FALSE / 当前时间（init_db 幂等 ALTER 兜底，零迁移 fail-open）。
+    superseded = Column(
+        Boolean, nullable=False, default=False, comment="是否已被新说法取代（SUPERSEDED，不删除可审计）"
+    )
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(),
+        comment="记忆最近更新时间（升级/冲突标记/去重追加时刷新）"
+    )
 
     def __repr__(self) -> str:
         return f"<Document id={self.id} title={self.title!r} source={self.source!r}>"
@@ -53,3 +76,106 @@ class Document(Base):
             "metadata": self.meta,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
+
+
+class Feedback(Base):
+    """用户反馈模型 — 层 4 分类器（intent/充分性）再训练数据源（module-048）
+
+    👍👎 反馈飞轮：前端对每条 AI 回复点赞/点踩（可选评论），落 feedback 表
+    累积标注数据。feedback 与 documents 表无关（独立新表），message_id 先
+    落前端消息 ID，飞轮回填脚本再按需关联 query/answer（本模块不建外键）。
+    """
+
+    __tablename__ = "feedback"
+
+    id = Column(Integer, primary_key=True, autoincrement=True, comment="反馈 ID")
+    message_id = Column(Integer, nullable=False, index=True,
+                        comment="关联的消息 ID（飞轮回填用）")
+    rating = Column(Integer, nullable=False, comment="评分：1=赞，-1=踩")
+    comment = Column(Text, nullable=True, comment="补充评论（可选，≤500）")
+    identity = Column(String(256), nullable=False, default="",
+                      comment="反馈者身份（user_id 优先，client_ip 兜底）")
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), comment="创建时间"
+    )
+
+    def __repr__(self) -> str:
+        return (f"<Feedback id={self.id} message_id={self.message_id} "
+                f"rating={self.rating}>")
+
+
+class RequestLog(Base):
+    """请求观测日志 — 线上可观测性（module-058 WP-C）
+
+    trace_id 贯穿日志与落库；timings/usage 为 JSONB（阶段耗时按毫秒、
+    token 用量按供应商），支撑"单问题成本分布 / P50-P95 延迟"聚合查询。
+    identity 对齐 048 口径（user_id 优先，client_ip 兜底）；建表走
+    init_db 自愈幂等 DDL（src/database.py REQUEST_LOGS_DDL），
+    落库失败 fail-open 不阻塞主链路。
+    """
+
+    __tablename__ = "request_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True, comment="日志 ID")
+    trace_id = Column(String(64), nullable=False, index=True, comment="请求追踪 ID")
+    identity = Column(String(256), nullable=False, default="",
+                      comment="请求身份（user_id 优先，client_ip 兜底）")
+    endpoint = Column(String(128), nullable=False, default="",
+                      comment="端点（chat/chat_stream/agent/agent-lg）")
+    intent = Column(String(64), nullable=False, default="",
+                      comment="意图（knowledge/casual_chat/realtime/agent）")
+    timings = Column(JSONB, nullable=False, default=dict, comment="各阶段耗时（毫秒）")
+    usage = Column(JSONB, nullable=False, default=dict, comment="token 用量（按供应商）")
+    cache_hits = Column(Integer, nullable=False, default=0, comment="检索缓存命中次数")
+    cache_misses = Column(Integer, nullable=False, default=0, comment="检索缓存未命中次数")
+    error = Column(Boolean, nullable=False, default=False, comment="请求错误标记")
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), comment="创建时间"
+    )
+
+    def __repr__(self) -> str:
+        return f"<RequestLog id={self.id} trace_id={self.trace_id!r}>"
+
+
+class VerifyResult(Base):
+    """证据链验证任务与结果 — verify 异步化（module-060）
+
+    verify（幻觉检测）后台异步执行后的任务状态与结果，前端凭 task_id 轮询
+    DB 为准（不读内存任务池）：pending（进行中）/ done（完成，含逐句 claims）/
+    failed（异常）。done 结果永久保留不清理（飞轮数据源——答案可信度/幻觉
+    调优数据积累）。建表走 init_db 自愈幂等 DDL（src/database.py
+    VERIFY_RESULTS_DDL），字段与 DDL 对齐。
+    """
+
+    __tablename__ = "verify_results"
+
+    id = Column(Integer, primary_key=True, autoincrement=True, comment="记录 ID")
+    task_id = Column(String(64), nullable=False, unique=True, index=True,
+                     comment="验证任务 ID（UUID hex，前端轮询 key）")
+    trace_id = Column(String(64), nullable=False, default="",
+                      comment="请求追踪 ID（关联 request_logs）")
+    identity = Column(String(256), nullable=False, default="",
+                      comment="请求身份（user_id 优先，client_ip 兜底）")
+    endpoint = Column(String(128), nullable=False, default="chat_stream",
+                      comment="端点（当前仅 chat_stream 提交）")
+    query = Column(Text, nullable=False, default="",
+                   comment="用户问题（飞轮数据源可关联）")
+    status = Column(String(16), nullable=False, default="pending",
+                    comment="任务状态：pending/done/failed")
+    claims = Column(JSONB, nullable=True, comment="验证结果（claims 数组 JSONB）")
+    overall_confidence = Column(Float, nullable=True,
+                                comment="整体置信度（0.0-1.0）")
+    supported = Column(Integer, nullable=False, default=0, comment="supported 计数")
+    inferred = Column(Integer, nullable=False, default=0, comment="inferred 计数")
+    unsupported = Column(Integer, nullable=False, default=0, comment="unsupported 计数")
+    error = Column(Text, nullable=True, comment="失败原因（status=failed 时）")
+    verified_in_ms = Column(Integer, nullable=True, comment="verify 任务耗时（毫秒）")
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), comment="创建时间"
+    )
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), comment="更新时间"
+    )
+
+    def __repr__(self) -> str:
+        return f"<VerifyResult id={self.id} task_id={self.task_id!r} status={self.status!r}>"

@@ -196,3 +196,51 @@ class TestExecuteExternalSession:
         result = asyncio.run(run())
         assert len(result) == 1
         assert result[0]["id"] == 1
+
+
+class TestExecuteAbsCosinePassThrough:
+    """module-045 WP1: 合并环 abs_cosine 透传（双命中不丢字段，fts-only 保持无字段）"""
+
+    def test_double_hit_doc_preserves_abs_cosine(self):
+        """FTS+向量双命中：合并结果含 abs_cosine（原始绝对余弦，非 min-max 相对分）"""
+        async def run():
+            retriever = _make_retriever()
+            fts_sess, vec_sess = _session(), _session()
+            retriever._fts_search = mock.AsyncMock(
+                return_value=[{"id": 1, "score": 0.8}],
+            )
+            retriever._vector_search = mock.AsyncMock(
+                return_value=[{"id": 1, "score": 0.65}],
+            )
+            factory = _FakeSessionFactory([fts_sess, vec_sess])
+            with mock.patch("rag.retriever.async_session_factory", factory):
+                result = await retriever._execute("问题", [0.1], 6, 3)
+            return result
+
+        result = asyncio.run(run())
+        assert len(result) == 1
+        assert result[0]["id"] == 1
+        # abs_cosine 是归一化前存档的原始绝对余弦；vector_score 是 min-max 相对分
+        assert result[0]["abs_cosine"] == 0.65
+        assert result[0]["vector_score"] == 1.0
+
+    def test_fts_only_doc_has_no_abs_cosine(self):
+        """fts-only 文档保持无该字段（下游按 0.0 保守处理，语义不变）"""
+        async def run():
+            retriever = _make_retriever()
+            fts_sess, vec_sess = _session(), _session()
+            retriever._fts_search = mock.AsyncMock(
+                return_value=[{"id": 1, "score": 0.8}],
+            )
+            retriever._vector_search = mock.AsyncMock(
+                return_value=[{"id": 2, "score": 0.6}],
+            )
+            factory = _FakeSessionFactory([fts_sess, vec_sess])
+            with mock.patch("rag.retriever.async_session_factory", factory):
+                result = await retriever._execute("问题", [0.1], 6, 3)
+            return result
+
+        result = asyncio.run(run())
+        by_id = {d["id"]: d for d in result}
+        assert "abs_cosine" not in by_id[1]  # fts-only：无字段
+        assert by_id[2]["abs_cosine"] == 0.6  # vector-only：带字段

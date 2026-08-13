@@ -29,7 +29,7 @@ import { SendOutlined, BulbOutlined, PlusOutlined, RobotOutlined } from '@ant-de
 import ChatMessage from '../components/ChatMessage';
 import PipelinePanel from '../components/PipelinePanel';
 import CitationModal from '../components/CitationModal';
-import { chatStream, agentStream } from '../services/ragService';
+import { chatStream, agentStream, fetchVerifyResult } from '../services/ragService';
 import type { SourceItem, PipelineSteps, ToolTrace, ToolCallEvent, ToolResultEvent, ChatResponse } from '../types/rag';
 import type { ConversationInfo, MessageDTO } from '../types/conversation';
 import {
@@ -75,39 +75,93 @@ export default function ChatPage() {
   const [conversations, setConversations] = useState<ConversationInfo[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<number | null>(null);
 
-  // ── 反馈状态（M10） ──
-  const [feedbackMap, setFeedbackMap] = useState<Record<string, 'up' | 'down' | null>>({});
-
-  /** 挂载时从 localStorage 加载反馈数据 */
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem('rag_feedback');
-      if (saved) setFeedbackMap(JSON.parse(saved));
-    } catch { /* 数据损坏时静默忽略 */ }
-  }, []);
-
-  /** 处理反馈（toggle 模式：同按钮再点取消，异按钮切换） */
-  const handleFeedback = useCallback((messageIndex: number, rating: 'up' | 'down') => {
-    const key = `${activeConversationId}:${messageIndex}`;
-    setFeedbackMap((prev) => {
-      const current = prev[key];
-      const newRating = current === rating ? null : rating;
-      const next = { ...prev, [key]: newRating };
-      try { localStorage.setItem('rag_feedback', JSON.stringify(next)); } catch { /* 静默降级 */ }
-      return next;
-    });
-  }, [activeConversationId]);
-
   // ── ref ──
   const bottomRef = useRef<HTMLDivElement>(null);
   const pendingRef = useRef({ query: '', history: [] as { role: string; content: string }[] });
   const messagesRef = useRef<MessageDTO[]>([]);
   const saveSuppressed = useRef(false); // 挂载加载后跳过首次 save
+  // module-060：verify 轮询 timer（2s 间隔 / 60s 上限；卸载/重试/切会话时清理）
+  const verifyTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   /** 同步 messages 到 ref（避免闭包过期） */
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
+
+  /** 组件卸载时清理 verify 轮询 timer（module-060，防泄漏） */
+  useEffect(() => {
+    return () => {
+      if (verifyTimerRef.current) {
+        clearInterval(verifyTimerRef.current);
+        verifyTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  /** 清理 verify 轮询 timer（重试/切换会话/新建会话/新发送时调用） */
+  const clearVerifyPolling = useCallback(() => {
+    if (verifyTimerRef.current) {
+      clearInterval(verifyTimerRef.current);
+      verifyTimerRef.current = null;
+    }
+  }, []);
+
+  /**
+   * 启动 verify 结果轮询（module-060：答案先交付、验证后到）
+   *
+   * chatStream done 事件带回 verifyTaskId → 每 2s 轮询 GET /ai/rag/chat/verify
+   * {task_id}（上限 60s/30 次）：done → 更新该消息 verifiedClaims（可信度面板）
+   * + 停止；failed/404/网络异常/超时 → 停止轮询、清除 verifying（不显示面板，
+   * fail-open，与现状空 claims 不显示一致）。
+   */
+  const startVerifyPolling = useCallback((taskId: string) => {
+    clearVerifyPolling();
+    let attempts = 0;
+    const maxAttempts = 30; // 2s × 30 = 60s 上限
+    const patchLastAssistant = (patch: Partial<MessageDTO>) => {
+      setMessages((prev) => {
+        const updated = [...prev];
+        const lastIdx = updated.length - 1;
+        if (lastIdx >= 0 && updated[lastIdx].role === 'assistant') {
+          updated[lastIdx] = { ...updated[lastIdx], ...patch };
+        }
+        return updated;
+      });
+    };
+    const stopTimer = () => {
+      clearInterval(timer);
+      if (verifyTimerRef.current === timer) verifyTimerRef.current = null;
+    };
+    const timer = setInterval(async () => {
+      attempts += 1;
+      try {
+        const result = await fetchVerifyResult(taskId);
+        if (result.status === 'done') {
+          stopTimer();
+          patchLastAssistant({
+            verifying: false,
+            verifiedClaims: {
+              claims: result.claims ?? [],
+              overall_confidence: result.overall_confidence ?? 0,
+              total_claims: result.total_claims ?? 0,
+              supported: result.supported ?? 0,
+              inferred: result.inferred ?? 0,
+              unsupported: result.unsupported ?? 0,
+            },
+          });
+        } else if (result.status === 'failed' || attempts >= maxAttempts) {
+          stopTimer();
+          patchLastAssistant({ verifying: false });
+        }
+        // pending：继续轮询
+      } catch {
+        // 网络异常：停止轮询 fail-open（不显示验证面板、不报错）
+        stopTimer();
+        patchLastAssistant({ verifying: false });
+      }
+    }, 2000);
+    verifyTimerRef.current = timer;
+  }, [clearVerifyPolling]);
 
   /**
    * 挂载时：加载会话列表 → 加载最近会话的消息
@@ -238,6 +292,9 @@ export default function ChatPage() {
     const history = messagesRef.current.map((m) => ({ role: m.role, content: m.content }));
     pendingRef.current = { query: text, history };
 
+    // 新发送前清理上一轮 verify 轮询（防跨消息竞态/泄漏）
+    clearVerifyPolling();
+
     setMessages((prev) => [...prev, { role: 'user', content: text }, { role: 'assistant', content: '' }]);
     setLoading(true);
     setError(null);
@@ -249,10 +306,20 @@ export default function ChatPage() {
         const updated = [...prev];
         const lastIdx = updated.length - 1;
         if (lastIdx >= 0 && updated[lastIdx].role === 'assistant') {
-          updated[lastIdx] = { ...updated[lastIdx], sources: data.sources };
+          updated[lastIdx] = {
+            ...updated[lastIdx],
+            sources: data.sources,
+            verifiedClaims: data.verified_claims,
+            // module-060：有异步验证任务 → 标记 verifying（轮询补结果）
+            verifying: data.verifyTaskId ? true : false,
+          };
         }
         return updated;
       });
+      // module-060：答案已交付、验证后到——启动轮询补 verifiedClaims
+      if (data.verifyTaskId) {
+        startVerifyPolling(data.verifyTaskId);
+      }
       if (agentMode) {
         setPipelineStep(6);
       } else {
@@ -265,7 +332,7 @@ export default function ChatPage() {
     } finally {
       setLoading(false);
     }
-  }, [loading, activeConversationId, agentMode, executeSend]);
+  }, [loading, activeConversationId, agentMode, executeSend, clearVerifyPolling, startVerifyPolling]);
 
   /** 流完成后自动保存（fire-and-forget，跳过挂载加载后的首次触发） */
   useEffect(() => {
@@ -306,6 +373,8 @@ export default function ChatPage() {
 
     setLoading(true);
     setError(null);
+    // module-060：重试前清理上一轮 verify 轮询（防跨消息竞态/泄漏）
+    clearVerifyPolling();
 
     setMessages((prev) => {
       const cleaned = [...prev];
@@ -325,10 +394,20 @@ export default function ChatPage() {
         const updated = [...prev];
         const lastIdx = updated.length - 1;
         if (lastIdx >= 0 && updated[lastIdx].role === 'assistant') {
-          updated[lastIdx] = { ...updated[lastIdx], sources: data.sources };
+          updated[lastIdx] = {
+            ...updated[lastIdx],
+            sources: data.sources,
+            verifiedClaims: data.verified_claims,
+            // module-060：有异步验证任务 → 标记 verifying（轮询补结果）
+            verifying: data.verifyTaskId ? true : false,
+          };
         }
         return updated;
       });
+      // module-060：重试后同样答案先交付、轮询补验证结果
+      if (data.verifyTaskId) {
+        startVerifyPolling(data.verifyTaskId);
+      }
       if (agentMode) {
         setPipelineStep(6);
       } else {
@@ -341,13 +420,16 @@ export default function ChatPage() {
     } finally {
       setLoading(false);
     }
-  }, [agentMode, executeSend]);
+  }, [agentMode, executeSend, clearVerifyPolling, startVerifyPolling]);
 
   // ── 会话管理操作（M9） ──
 
   /** 切换会话 */
   const handleSelectConversation = useCallback(async (id: number) => {
     if (id === activeConversationId) return;
+
+    // module-060：切换会话清理 verify 轮询（旧消息 task_id 轮询不再需要）
+    clearVerifyPolling();
 
     const currentMessages = messagesRef.current;
     if (activeConversationId && currentMessages.length > 0) {
@@ -372,10 +454,12 @@ export default function ChatPage() {
     } catch (err) {
       setError('加载消息失败: ' + (err instanceof Error ? err.message : ''));
     }
-  }, [activeConversationId]);
+  }, [activeConversationId, clearVerifyPolling]);
 
   /** 新建会话 */
   const handleNewConversation = useCallback(async () => {
+    // module-060：新建会话清理 verify 轮询（防旧 task_id 轮询残留）
+    clearVerifyPolling();
     try {
       const conv = await createConversation();
       setConversations((prev) => [conv, ...prev]);
@@ -388,7 +472,7 @@ export default function ChatPage() {
     } catch (err) {
       setError('创建会话失败: ' + (err instanceof Error ? err.message : ''));
     }
-  }, []);
+  }, [clearVerifyPolling]);
 
   /** 引用标记点击处理 */
   const handleCitationClick = useCallback(
@@ -544,18 +628,17 @@ export default function ChatPage() {
           {messages.map((msg, i) => {
             const isLastAssistant = msg.role === 'assistant' && i === messages.length - 1;
             const isStreaming = loading && isLastAssistant && msg.content.length > 0;
-            const feedbackKey = activeConversationId ? `${activeConversationId}:${i}` : '';
             return (
               <ChatMessage
                 key={i}
                 role={msg.role}
                 content={msg.content}
                 sources={msg.sources}
+                verifiedClaims={msg.verifiedClaims}
+                verifying={msg.verifying}
                 onCitationClick={handleCitationClick}
-                messageIndex={i}
+                messageId={msg.id}
                 isStreaming={isStreaming}
-                feedbackRating={feedbackMap[feedbackKey] ?? null}
-                onFeedback={handleFeedback}
               />
             );
           })}
@@ -649,6 +732,7 @@ export default function ChatPage() {
             <Input.TextArea
               value={input}
               onChange={(e) => setInput(e.target.value)}
+              maxLength={2000}
               onPressEnter={(e) => {
                 if (!e.shiftKey) {
                   e.preventDefault();

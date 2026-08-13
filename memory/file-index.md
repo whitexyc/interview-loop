@@ -51,6 +51,59 @@
 | ai_service/backfill_search_tokens.py | module-020 | 脚本 | search_tokens 回填 | ✅ |
 | ai_service/backfill_graph.py | module-016 | 脚本 | 图数据补跑 | ✅ |
 | ai_service/rag_metadata_tables.sql | module-018 | SQL | rag_config + document_chunk_stats | ✅ |
+| ai_service/scripts/ | module-050 | 脚本 | 12 个一次性脚本迁移目录（backfill_*/create_*/migrate_*/download_model/do_all/reindex_knowledge_base/test_embedding/test_m17/test_m18/test_models） | ✅ |
+| ai_service/rag/retrieval/ | module-050 | 代码 | 检索子包（retriever/reranker/chunker/embeddings/text_tokenizer/query_rewrite） | ✅ |
+| ai_service/rag/graph/ | module-050 | 代码 | 图谱子包（graph/graph_extractor/graph_store） | ✅ |
+| ai_service/rag/memory/ | module-050 | 代码 | 记忆子包（memory/memory_extractor/session_memory） | ✅ |
+| ai_service/eval/compare_factcheck_models.py | module-050 | 代码 | HHEM vs MiniCheck 真实对比（Accuracy/F1/kappa/一致率/耗时，--limit/--skip-*） | ✅ |
+| ai_service/tests/test_compare_factcheck.py | module-050 | 测试 | 对比脚本单元测试（build_pairs/指标/kappa/模型缺失报错）12 项 | ✅ |
+| ai_service/rag/retrieval/hhem_loader.py | module-051 | 代码 | HHEM 共享加载器（module-050 验证路径单一来源，compare 脚本 + 裁判共用） | ✅ |
+| ai_service/rag/retrieval/factcheck_judge.py | module-051 | 代码 | HHEM 裁判封装（延迟加载 + threading.Lock + to_thread + 失败返回 None） | ✅ |
+| ai_service/eval/golden_factcheck.py | module-051 | 代码 | factcheck 评测（50 条三态标注 + kappa 三态/二值 + eval_runs + --fixture） | ✅ |
+| ai_service/tests/test_factcheck_judge.py | module-051 | 测试 | 裁判单元测试（加载降级/三态映射/集成/降级链/开关 llm/评测脚本）32 项 | ✅ |
+| ai_service/eval/compare_nli_models.py | module-052 | 代码 | mDeBERTa vs HHEM 三分类对比（数据构造复用 + 三分类标注 + 加载/打分 + kappa 两口径 + 混淆矩阵 + --smoke） | ✅ |
+| ai_service/tests/test_compare_nli.py | module-052 | 测试 | NLI 对比脚本单元测试（三分类标注/阈值映射/指标/mock 模型/降级）15 项 | ✅ |
+| ai_service/scripts/migrate_module053.py | module-053 | 脚本 | DB 修复迁移（documents 补 last_mentioned_at/mention_count 两列幂等 + feedback 表建表复用 FEEDBACK_DDL） | ✅ |
+| ai_service/tests/test_rrf_fusion.py | module-053 | 测试 | 三通道融合单测（RRF 公式/三路融合/开关零回归/单路降级/abs_cosine 保留/加权/回退）16 项 | ✅ |
+| ai_service/eval/build_contradiction_dataset.py | module-054 | 脚本 | 矛盾样本构造（56 条：contradiction 32 两类 + entailment 16 + neutral 8 + 标注指南落盘） | ✅ |
+| ai_service/eval/contradiction_dataset.py | module-054 | 代码 | 矛盾样本集加载/校验 + golden_factcheck 双向转换（question/claim/doc/verdict ↔ question/documents/label） | ✅ |
+| ai_service/eval/contradiction_dataset.json | module-054 | 数据 | 56 条构造矛盾样本集落盘（part=constructed） | ✅ |
+| ai_service/eval/real_retrieval_pairs.json | module-054 | 数据 | 24 条真实检索对（LLM 真实答案句子 + DB golden 检索片段，人工标注 part=real_retrieval） | ✅ |
+| ai_service/eval/contradiction_annotation_guide.md | module-054 | 文档 | 矛盾样本标注指南（"什么是矛盾"判定标准 + 两类构造方法 + golden_factcheck 映射） | ✅ |
+| ai_service/eval/retest_nli.py | module-054 | 代码 | mDeBERTa 复测脚本（--gen-real 真实对生成 + kappa 三分类/二值 + 混淆矩阵 + 门槛判定 + eval_runs） | ✅ |
+| ai_service/tests/test_degradation_fix.py | module-054 | 测试 | 降级修复单测（reranker 三级路径/方案 A 向量路空+vector_only 抛错+零开销/方案 B 图兜底）9 项 | ✅ |
+| ai_service/tests/test_contradiction_dataset.py | module-054 | 测试 | 矛盾样本集单测（≥30 矛盾两类/结构/正例对照/golden_factcheck 兼容/标注指南）10 项 | ✅ |
+| ai_service/eval/prompt_variants.py | module-055 | 脚本 | Prompt 变体测试（5 变体 × golden_sufficiency → 对比表 Accuracy/insuff Recall/kappa/耗时；--variant/--limit/--save 落 eval_runs eval_type='prompt_variant'/--fixture；只度量不替换生产 prompt） | ✅ |
+| ai_service/tests/test_prompt_variants.py | module-055 | 测试 | 变体测试单测（prompt 注入/默认零回归/自洽同口径/变体定义/指标/CLI/对比表）12 项 | ✅ |
+| specs/adr/0011-prompt-eval-optimization.md | module-055 | 文档 | ADR-0011 提示词评估优化（四维评估 + 业界工具扫描 + 四代算法三步落地：变体测试→OPRO→DSPy；第一步已实施） | ✅ |
+| specs/module-055-prompt-eval/ | module-055 | 规划 | 模块文档（plan/acceptance/changelog，review/test-report 由 Reviewer/Tester 产出） | ✅ |
+| ai_service/eval/build_intent_dataset.py | module-056 | 脚本 | 人造意图训练集构造（337 条三类平衡 + 边界易混 32 含 E2E bug 类 + 专有术语 40 + 口语化 24；docstring 标注指南；build 校验含与评测集零重叠防泄漏） | ✅ |
+| ai_service/eval/intent_train_dataset.json | module-056 | 数据 | 人造意图训练集落盘（337 条 [{"query","intent","note"?}]，训练/评测分离） | ✅ |
+| ai_service/tests/test_intent_dataset.py | module-056 | 测试 | 数据集结构/类别平衡/边界样本/E2E bug query/训练评测分离/L4 回退三路径单测 11 项 | ✅ |
+| ai_service/models/intent_clf.joblib | module-056 | 产物 | L4 分类器模型（bge-m3 冻结 + 逻辑回归，449 条训练落盘；训练产物不进仓库） | ✅ |
+| specs/module-056-intent-classifier-live/ | module-056 | 规划 | 模块文档（plan/acceptance/changelog，review/test-report 由 Reviewer/Tester 产出） | ✅ |
+| ai_service/eval/benchmark_rrf_k.py | module-057 | 代码 | RRF k 扫描 + 图谱贡献归因（k=20-100 步长 10，最优 k±5 邻域补 k=25；曲线全平坦无拐点；两通道 vs 三通道 RRF；通道候选每题只收集一次逐 k 纯 CPU 融合；eval_runs 'rrf_k_scan'） | ✅ |
+| ai_service/eval/flywheel_smoke.py | module-057 | 脚本 | 飞轮冒烟（自造对话 → 真实 HTTP chat → POST /ai/feedback 👍👎 → feedback 表落库验证 → 防重复如实记录；数据保留为飞轮种子 identity=203.0.113.66 / message_id 990000+i 构造标识） | ✅ |
+| ai_service/tests/test_nli_improve.py | module-057 | 测试 | 矛盾改进单测（句切/低置信降级/最严聚合/拆解判定管线/阈值扫描/样本集扩充 ≥50 internal≥20 且首 56 保持 module-054 同集）32 项 | ✅ |
+| ai_service/tests/test_benchmark_rrf_k.py | module-057 | 测试 | RRF 融合纯函数单测（公式/两三通道/缺路/k 敏感/图谱按 hybrid_score 排序）8 项 | ✅ |
+| specs/module-057-data-validation-batch/ | module-057 | 规划 | 模块文档（plan/acceptance/changelog，review/test-report 由 Reviewer/Tester 产出） | ✅ |
+| ai_service/src/observability.py | module-058 | 代码 | 请求可观测性（contextvar 观测上下文：trace_id/timing/usage/cache 计数 + save_request_log fail-open 落库 + TraceIdFilter/install_trace_id_filter 日志 record.trace_id 注入；PW_REQUEST_LOGS 默认 true 关闭零埋点零落库；不引入新依赖） | ✅ |
+| ai_service/scripts/probe_prefix_cache.py | module-058 | 脚本 | WP-B 前缀缓存探测（真实 deepseek：单文档 <1024 token 未达缓存门槛 / 多文档 3001 token 同 docs 二次生成 billed miss -98% 命中；verify 口径核实 LLM 只拆句） | ✅ |
+| ai_service/scripts/probe_request_trace.py | module-058 | 脚本 | WP-C 真实 trace 样例（init_db 幂等建 request_logs + 真实 chat 全阶段计时/token 采集 + 落库查回；清理探测身份记忆行保留样例行） | ✅ |
+| ai_service/tests/test_prompt_order.py | module-058 | 测试 | prompt 区块顺序单测（sections→docs→query 顺序/标签格式不变/空 sections 零漂移/历史段仍最前）6 项 | ✅ |
+| ai_service/tests/test_tool_phase_split.py | module-058 | 测试 | 工具阶段切分单测（检索组 7/生成组 4/re_search 双组/group 元数据/初始 phase/advance_phase 单元/schemas_for_phase/调生成后下一轮切 generation/re_search 不回退/开关 false 全量 10/预算路径不变/langgraph 同步/_SYSTEM_PROMPT）18 项 | ✅ |
+| ai_service/tests/test_observability.py | module-058 | 测试 | 可观测性单测（timing/usage 累积/缓存命中计数/engine.chat 全阶段计时/request_logs 幂等落库/fail-open/端点 trace 接线/开关零埋点 + Review 修复：TraceIdFilter 日志 record.trace_id 注入/install 幂等/chat_with_tools 用量按供应商标签）16 项 | ✅ |
+| specs/module-058-retrieval-chain-opt/ | module-058 | 规划 | 模块文档（plan/acceptance/changelog；review/test-report 由 Reviewer/Tester 产出） | ✅ |
+| ai_service/src/verify_tasks.py | module-060 | 代码 | verify 后台任务池 + verify_results 表读写（submit_verify_task 先插 pending → create_task 调度返回 task_id + _run_verify 成功/失败落库 + get_verify_task 读 DB 为准；内存池只持执行期中间态、done callback 释放、DB 结果不清理飞轮数据源；PW_VERIFY_ASYNC 开关关闭返回 None） | ✅ |
+| ai_service/tests/test_verify_tasks.py | module-060 | 测试 | verify 异步化单测（submit 返回 uuid/pending 落库/后台执行/释放/异常 failed/开关关 None/pending 落库失败 fail-open/get 读 DB 四态/DDL 幂等/轮询端点状态机 pending/done/failed/404/chat_stream 开关两分支）17 项 | ✅ |
+| specs/module-060-verify-async/ | module-060 | 规划 | 模块文档（plan/acceptance/changelog；review/test-report 由 Reviewer/Tester 产出） | ✅ |
+| specs/adr/0013-verify-async.md | module-060 | 文档 | ADR-0013 verify 异步化决策（轮询送达 + 落库持久化 + 非流式保持同步 + 计时口径变化；✅ 已实施 2026-08-13） | ✅ |
+| ai_service/rag/memory/nli_loader.py | module-061 | 代码 | mDeBERTa NLI 本地加载器（镜像 eval compare_nli_models 已验证 transformers 5.x 路径单一来源，HF_HUB_OFFLINE + AutoModelForSequenceClassification fp32 + id2label 从 config；require_nli_model 缺文件明确报错；顶层零重依赖） | ✅ |
+| ai_service/rag/memory/nli_judge.py | module-061 | 代码 | 记忆冲突 NLI 裁判封装（MemoryNLIJudge：延迟加载 557MB + threading.Lock + to_thread + 20s 超时 + 失败/超时返回 None 降级；复用 nli_loader；对齐 factcheck_judge 模式） | ✅ |
+| ai_service/eval/memory_conflict_dataset.py | module-061 | 代码 | 记忆冲突 NLI 评测（30 条五类标注集：改口/迁移/过时/升级冲突/正例中性 + contradiction P/R/F1 + 达标判定 Recall≥0.8 且 Precision≥0.8 + --fixture 关键词启发式 + eval_runs 'memory_conflict'；真实 baseline id=31 Accuracy 0.60/P 1.0000/R 0.5000 未达门槛） | ✅ |
+| ai_service/tests/test_memory_correction.py | module-061 | 测试 | 记忆纠错单测（P0 升级留短期副本/superseded 标记与幂等/召回过滤 + P1 三分类分流/矛盾 SUPERSEDED+新增/一致追加/NLI None 降级/开关关零回归 + nli_judge 封装 + 评测基线一致性，mock NLI 不加载真实模型）27 项 | ✅ |
+| ai_service/scripts/migrate_module061.py | module-061 | 脚本 | DB 迁移（documents 补 superseded/updated_at 两列幂等，查 information_schema 已存在则跳过 + 校验输出；本地开发库 schema 未迁移先决，module-046 经验） | ✅ |
+| specs/module-061-memory-correction/ | module-061 | 规划 | 模块文档（plan/acceptance/changelog；review/test-report 由 Reviewer/Tester 产出） | ✅ |
 
 ## 三、前端核心文件（frontend/，module-003+）
 
@@ -62,6 +115,11 @@
 | frontend/src/services/ragService.ts | module-006/029 | 代码 | RAG API（chatStream/agentStream/chain） | ✅ |
 | frontend/src/pages/KnowledgePage.tsx | module-008 | 代码 | 知识库管理 | ✅ |
 | frontend/src/pages/ResumePage.tsx | module-003 | 代码 | 简历展示 | ✅ |
+| frontend/src/pages/ChatPage.tsx | module-006/029/060 | 代码 | 聊天页（流式 + Agent 工具轨迹 + **verify 异步轮询**：verifying 状态 + startVerifyPolling 2s/30 次上限 + done 更新 verifiedClaims + failed/404 fail-open + 生命周期清理；handleRetry 补齐与 doSend 一致） | ✅ |
+| frontend/src/services/ragService.ts | module-006/029/060 | 代码 | RAG API（chatStream/agentStream/chain + **chatStream 解析 done verify_task_id + fetchVerifyResult 轮询接口 404 归一化 failed**） | ✅ |
+| frontend/src/types/rag.ts | module-006/060 | 代码 | RAG 类型（**ChatResponse.verifyTaskId + VerifyTaskResult**） | ✅ |
+| frontend/src/types/conversation.ts | module-009/060 | 代码 | 消息类型（**MessageDTO.verifying**） | ✅ |
+| frontend/src/components/ChatMessage.tsx | module-006/048/060 | 代码 | 消息气泡（👍👎 反馈 + **verifying prop "正在验证…"提示**） | ✅ |
 
 ## 四、模块产出（specs/，按模块目录索引）
 
@@ -87,5 +145,11 @@
 | module-034 | specs/module-034-short-session-memory/ | ✅ 短期记忆+会话记忆（Tester 验收 36/36，2026-08-06） |
 | module-035 | specs/module-035-score-calibration/ | ✅ 分数口径校准（Tester 验收通过，35 项 32 通过 + 3 P3 不适用，2026-08-06） |
 | module-036 | specs/module-036-agent-memory/ | ✅ Agent 端点接入会话记忆（Tester 验收 29/29，全量 298/0 + 真实 E2E，2026-08-07） |
+| module-050 | specs/module-050-factcheck-compare/ | ✅ 幻觉检测模型对比（HHEM 0.77 vs MiniCheck 0.51；MiniCheck 中文退化）+ WP5 目录细分（rag 三子包 + scripts/），全量 579/0（2026-08-11） |
+| module-051 | specs/module-051-hhem-judge/ | ✅ verify_answer 接入 HHEM 专职裁判（LLM 拆句 + HHEM 判分三态 + 降级链 + kappa 评测），kappa 0.3252 未达门槛如实标注，全量 611/0（2026-08-11） |
+| module-052 | specs/module-052-nli-contradiction-scan/ | ✅ NLI 矛盾扫描前置决策（mDeBERTa-v3 中文实测 kappa 0.4711 vs HHEM 0.1351 → 替换方向推荐，ADR-0010 P1-③ 选型结论），全量 645/0（2026-08-12 Tester 复跑；在途快照 628/1 系 module-053 并行改造，非本模块回归） |
+| module-053 | specs/module-053-rrf-fusion/ | ✅ 检索融合升级（RRF 三通道消融验证：基线复测 0.9714 + RRF 0.9905 放行推荐启用 + 加权两组持平否决 + DB 修复 + 嵌入路径回归修复），全量 645/0（2026-08-12） |
+| module-060 | specs/module-060-verify-async/ | ✅ verify 异步化（ADR-0013：chat_stream 异步 verify + done 带 verify_task_id + 前端轮询补结果 + verify_results 表持久化），单测 17/0 + 前端 58/0 + build PASS；真实 E2E 待环境（本机无 PostgreSQL）（2026-08-13 Developer 产出） |
+| module-061 | specs/module-061-memory-correction/ | ✅ 记忆纠错（ADR-0007 P0+P1：P0 升级留后悔药——升级不删短期副本 + 长期 superseded/updated_at + 召回过滤；P1 写路径冲突消解——mDeBERTa NLI 判矛盾 → 旧父块 SUPERSEDED 不删除 + 新内容正常新增，PW_MEMORY_CONFLICT 默认 false 评测达标才启用；真实 baseline id=31 Accuracy 0.60/P 1.0000/R 0.5000 未达门槛如实标注），全量 824/0 = 797 基线 + 27 新增 + 存量 2 项按验收许可更新（2026-08-13 Developer 产出） |
 
 > 每个模块目录含 plan.md / acceptance-criteria.md / changelog.md / review-report.md / test-report.md。

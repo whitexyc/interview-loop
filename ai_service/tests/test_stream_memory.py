@@ -86,10 +86,11 @@ class _FakeLLM:
 
 
 def _hit_stream(gen_capture, memory_text="", recall_calls=None, classify_intent="knowledge",
-                xff="9.9.9.9"):
+                xff="9.9.9.9", docs=None):
     """发起一次 chat_stream 请求（mock 全链路），返回 (sse_events, status_code)
 
     附带收集 _recall_memory 的调用参数到 recall_calls（由调用方传入列表）。
+    docs 可指定 _retrieve 的返回（module-045 WP3 测试自定义 abs_cosine）。
     """
     events = []
     status = 0
@@ -98,7 +99,8 @@ def _hit_stream(gen_capture, memory_text="", recall_calls=None, classify_intent=
         with mock.patch("agent.router.router_agent.classify",
                         new=mock.AsyncMock(return_value={"intent": classify_intent})):
             with mock.patch("rag.engine.rag_engine._retrieve",
-                            new=mock.AsyncMock(return_value=[_doc()])):
+                            new=mock.AsyncMock(
+                                return_value=[_doc()] if docs is None else docs)):
                 with mock.patch("rag.engine.rag_engine._rerank",
                                 new=mock.AsyncMock(side_effect=lambda q, docs: docs)):
                     with mock.patch("rag.engine.rag_engine._recall_memory",
@@ -113,17 +115,29 @@ def _hit_stream(gen_capture, memory_text="", recall_calls=None, classify_intent=
                                                     side_effect=lambda identity, h: h)):
                                     with mock.patch("rag.engine.rag_engine._schedule_session_persist",
                                                     new=mock.MagicMock()):
-                                        transport = httpx.ASGITransport(
-                                            app=main.app, raise_app_exceptions=True)
-                                        async with httpx.AsyncClient(
-                                                transport=transport, base_url="http://test") as client:
-                                            resp = await client.post(
-                                                "/ai/rag/chat/stream",
-                                                headers={"X-Forwarded-For": xff} if xff else {},
-                                                json={"query": "回答风格", "history": []},
-                                            )
-                                        events.extend(_parse_sse(resp.content))
-                                        status = resp.status_code
+                                        with mock.patch("agent.reflector.reflector.verify_answer",
+                                                        new=mock.AsyncMock(return_value={
+                                                            "claims": [
+                                                                {"claim": "测试", "verdict": "supported",
+                                                                 "evidence": "[1]"},
+                                                            ],
+                                                            "overall_confidence": 1.0,
+                                                            "total_claims": 1,
+                                                            "supported": 1,
+                                                            "inferred": 0,
+                                                            "unsupported": 0,
+                                                        })):
+                                            transport = httpx.ASGITransport(
+                                                app=main.app, raise_app_exceptions=True)
+                                            async with httpx.AsyncClient(
+                                                    transport=transport, base_url="http://test") as client:
+                                                resp = await client.post(
+                                                    "/ai/rag/chat/stream",
+                                                    headers={"X-Forwarded-For": xff} if xff else {},
+                                                    json={"query": "回答风格", "history": []},
+                                                )
+                                            events.extend(_parse_sse(resp.content))
+                                            status = resp.status_code
         if recall_calls is not None:
             recall_calls.extend(recall.call_args_list)
     # module-033：mock 后台记忆自动写入（fire-and-forget 任务），避免真实 LLM 提取
@@ -144,8 +158,8 @@ class TestChatStreamMemoryInjection:
         assert gen.calls, "generate_answer_stream 应被调用"
         assert gen.calls[0]["memory"] == memory_text
         assert gen.calls[0]["query"] == "回答风格"
-        # SSE 事件格式不变：step/token/done 完整
-        assert [e["event"] for e in events] == ["step", "step", "step", "step", "token", "token", "done"]
+        # SSE 事件格式：step/token/verified/done 完整（module-039: 新增 verified 事件）
+        assert [e["event"] for e in events] == ["step", "step", "step", "step", "token", "token", "verified", "done"]
 
     def test_empty_memory_zero_regression(self):
         """无记忆：memory 为空串，生成照常（零回归）"""
@@ -180,3 +194,47 @@ class TestChatStreamMemoryInjection:
             _hit_stream(gen, memory_text="不应被召回", recall_calls=recall_calls,
                         classify_intent="casual_chat")
         assert recall_calls == [], "casual_chat 不应触发记忆召回"
+
+
+class TestChatStreamL3Flag:
+    """module-045 WP3: 流式路径 retrieval step 补 L3 标记（对齐非流式 ChatSteps）"""
+
+    @staticmethod
+    def _retrieval_data(events):
+        for e in events:
+            if e["event"] == "step":
+                data = json.loads(e["data"])
+                if data.get("step") == "retrieval":
+                    return data.get("data", {})
+        return {}
+
+    def test_low_abs_cosine_marks_flag_in_stream_steps(self):
+        """top-1 abs_cosine < 0.3 → retrieval step 带 suspected_misclassify=True"""
+        doc = _doc(1)
+        doc["abs_cosine"] = 0.1
+        events, status = _hit_stream(_GenCapture(), docs=[doc])
+        assert status == 200
+        step = self._retrieval_data(events)
+        assert step.get("suspected_misclassify") is True
+        assert step.get("top_abs_cosine") == 0.1
+
+    def test_high_abs_cosine_no_flag_in_stream_steps(self):
+        """top-1 abs_cosine ≥ 0.3 → 不标记（与 engine.chat 非流式口径一致）"""
+        doc = _doc(1)
+        doc["abs_cosine"] = 0.7
+        events, status = _hit_stream(_GenCapture(), docs=[doc])
+        assert status == 200
+        step = self._retrieval_data(events)
+        assert step.get("suspected_misclassify") is False
+        assert step.get("top_abs_cosine") == 0.7
+
+    def test_empty_docs_no_flag_keeps_stream_flow(self):
+        """无检索结果 → 不标记（(False, 0.0)），SSE 照常走无结果降级路径"""
+        with mock.patch("llm.client.LLMFactory.get_client") as gc:
+            gc.return_value = _FakeLLM()
+            events, status = _hit_stream(_GenCapture(), docs=[])
+        assert status == 200
+        step = self._retrieval_data(events)
+        assert step.get("suspected_misclassify") is False
+        assert step.get("top_abs_cosine") is None
+        assert [e["event"] for e in events][-1] == "done"
