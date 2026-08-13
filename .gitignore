@@ -44,6 +44,9 @@ specs/
 # Models (download separately, not source code)
 ai_service/models/
 
+# Uploaded original files (module-064 WP5 runtime artifacts, user content)
+ai_service/uploads/
+
 # Local tool caches / eval outputs (not source)
 ai_service/.ua/
 ai_service/eval/faithfulness.json

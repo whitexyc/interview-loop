@@ -223,6 +223,32 @@ class Settings(BaseSettings):
     # fixture 钉住 false（存量 chat_stream 测试零漂移）。
     verify_async_enabled: bool = True
 
+    # 多格式文档解析与清洗（module-064 / ADR-0014）：
+    #   image_ocr_enabled（PW_IMAGE_OCR）—— L1 PDF 内嵌图片 OCR（图内文字，
+    #       PaddleOCR/RapidOCR），默认关（重工具不默认启用，只路由复杂文档）；
+    #       组件缺失时该层自动降级（fail-open，图片标记未解析）。
+    #   image_caption_enabled（PW_IMAGE_CAPTION）—— L2 本地轻量 VLM 图片描述
+    #       插回 Markdown（显式占位符替换），默认关；模型缺失降级关（fail-open）。
+    #   pdf_engine（PW_PDF_ENGINE）—— PDF 解析引擎："anydoc"（默认，统一 GFM
+    #       Markdown 输出）；"mineru"（L3 复杂版面独立通道，MinerU 未安装时
+    #       fail-open 回退 anydoc/PyMuPDF）。三层全默认关 + 分层路由见
+    #       rag/retrieval/image_pipeline.py。
+    #   upload_dir（PW_UPLOAD_DIR）—— 上传原始文件落盘目录（WP5 原件留存，重灌
+    #       依赖；相对路径相对 ai_service 运行目录解析）。
+    #   doc_dedup_semantic_enabled（PW_DOC_DEDUP_SEMANTIC）—— 文档级语义去重
+    #       开关（WP6 L2：embedding 余弦≥doc_dedup_threshold 不删，标簇+canonical）。
+    #   doc_dedup_threshold（PW_DOC_DEDUP_THRESHOLD）—— 语义重复判定阈值（默认
+    #       0.95，对齐 module-035 记忆去重同款绝对余弦口径，复用 bge-m3）。
+    #   doc_dedup_boilerplate_enabled（PW_DOC_DEDUP_BOILERPLATE）—— 相似度计算
+    #       前剥离 Boilerplate（共同页脚/免责声明），防套话主导相似度。
+    image_ocr_enabled: bool = False
+    image_caption_enabled: bool = False
+    pdf_engine: Literal["anydoc", "mineru"] = "anydoc"
+    upload_dir: str = "uploads"
+    doc_dedup_semantic_enabled: bool = True
+    doc_dedup_threshold: float = 0.95
+    doc_dedup_boilerplate_enabled: bool = True
+
     model_config = {"env_prefix": "PW_", "env_file": ".env"}
 
 

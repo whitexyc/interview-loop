@@ -101,6 +101,21 @@ def default_memory_conflict_disabled(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def default_document_pipeline_switches(monkeypatch):
+    """测试环境钉住 module-064 文档管线新开关=保守值（对齐 056/058/060/061/062 模式）
+
+    生产默认 doc_dedup_semantic_enabled=True（WP6 L2 语义去重），但单测需
+    hermetic：语义去重要真实 bge-m3 embedding + DB 查询（慢/依赖模型）。钉住
+    false 防意外触发；新测试（test_document_ingest.py 等）体内显式 setattr True
+    + mock 各层验证。图片三层（image_ocr/image_caption）默认已关无需钉住，
+    pdf_engine 默认 anydoc 不触发额外通道。
+    """
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "doc_dedup_semantic_enabled", False)
+
+
+@pytest.fixture(autouse=True)
 def default_memory_evolution2_disabled(monkeypatch):
     """测试环境统一钉住 module-062 新开关=保守值（对齐 056/058/060/061 模式）
 

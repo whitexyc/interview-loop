@@ -369,6 +369,50 @@ export async function uploadDocument(data: DocumentUpload): Promise<{ id: number
   return body.data || { id: 0 };
 }
 
+/** 多格式上传结果（module-064：解析→清洗→归一化→去重→入库） */
+export interface UploadFileResult {
+  id: number;
+  duplicate?: boolean;
+  /** exact=内容哈希完全重复直接丢弃；semantic=语义重复已标簇（不删，检索隐藏） */
+  dup_kind?: 'exact' | 'semantic';
+  duplicate_cluster_id?: string;
+  canonical?: boolean;
+  page_count?: number;
+  original_path?: string;
+}
+
+/**
+ * 多格式文档上传（module-064 / ADR-0014 WP1）：multipart FormData 传原始文件字节
+ *
+ * 后端 POST /ai/rag/documents/upload 统一解析（AnyDoc 多格式 → Markdown → 清洗
+ * → 归一化 → 三级去重 → 原件留存 → 分块嵌入入库）。支持 md/txt/pdf/docx/xlsx/
+ * pptx/epub/csv。二进制格式（pdf/docx/xlsx/...）不能走旧 JSON 文本通道
+ * （uploadDocument），必须传文件字节。
+ *
+ * @param file - 原始文件（File 对象）
+ * @param title - 可选标题（缺省后端按文件名推导）
+ * @param source - 可选来源标识
+ * @returns { id, duplicate, dup_kind, duplicate_cluster_id, canonical, page_count, original_path }
+ * @throws Error - 网络异常或后端错误（code!==0 抛后端 msg）
+ */
+export async function uploadDocumentFile(
+  file: File,
+  title?: string,
+  source?: string,
+): Promise<UploadFileResult> {
+  const form = new FormData();
+  form.append('file', file);
+  if (title) form.append('title', title);
+  if (source) form.append('source', source);
+  // 不显式设 Content-Type：axios 检测 FormData 自动带 multipart boundary
+  const response = await http.post<ApiResponse<UploadFileResult>>('/rag/documents/upload', form);
+  const body = response.data;
+  if (body.code !== 0) {
+    throw new Error(body.msg || '上传失败');
+  }
+  return body.data || { id: 0 };
+}
+
 /** 获取知识库文档列表（分页） */
 export async function listDocuments(page = 1, pageSize = 20): Promise<DocumentListResponse> {
   const response = await http.get<ApiResponse<DocumentListResponse>>('/documents', { params: { page, page_size: pageSize } });

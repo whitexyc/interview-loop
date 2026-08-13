@@ -118,6 +118,19 @@
 | ai_service/tests/agent/test_multi_turn_routing.py | module-063 | 测试 | 多轮意图路由单测（WP-A 空历史零回归/LLM 上下文/L4 prev 拼接 2048 维/L4+L2 修正 + WP-B 去语气词/短句继承/话题漂移不继承/单轮不继承/有特征正常路由/链式继承/history[-6:] + WP-C engine 改写喂路由/precise 短路/失败回退/默认关零回归/流式+LangGraph 接 history + WP-D 工具信号/轨迹不可得跳过）35 项 | ✅ |
 | ai_service/tests/eval/test_golden_multi_turn.py | module-063 | 测试 | golden_multi_turn 评测脚本单测（数据集校验/启发式改写+意图/重叠度/三指标纯函数/fixture 运行/非法集校验）19 项 | ✅ |
 | specs/module-063-multi-turn-intent-routing/ | module-063 | 规划 | 模块文档（plan/acceptance/task-brief/changelog；review/test-report 由 Reviewer/Tester 产出） | ✅ |
+| ai_service/rag/retrieval/document_parser.py | module-064 | 代码 | 统一文档解析层（parse_document(bytes,filename)→Markdown；格式识别读字节魔数 anydoc.format_from_bytes + 扩展名兜底；AnyDoc 主解析 + PyMuPDF PDF 回退 + docx/xlsx/csv 轻量回退 + pptx/epub 明确报错；错误变体 Unsupported/Malformed/Encrypted 映射中文提示；SUPPORTED_EXTENSIONS 8 格式） | ✅ |
+| ai_service/rag/retrieval/document_cleaner.py | module-064 | 代码 | 五步清洗层（clean 白名单哲学按块类型作用：code/math/table/body 四区域 + 正文内联 ⟦N⟧ 占位符保护；格式清理/冗余过滤/⭐结构恢复合并 PDF 断行/语义修复 OCR_TYPO_MAP 空表/分块准备 `#`→`##`）+ 无损归一化（normalize NFKC/去零宽/统一空白/表格保持 MD/超长截断） | ✅ |
+| ai_service/rag/retrieval/image_pipeline.py | module-064 | 代码 | PDF 内嵌图片三层开关（PW_IMAGE_OCR / PW_IMAGE_CAPTION / PW_PDF_ENGINE=mineru 全默认关 + 占位符替换 + 图片价值过滤 image_value_filter 接口 + fail-open；扫描版无文本层如实附"图片未解析"提示） | ✅ |
+| ai_service/rag/retrieval/document_dedup.py | module-064 | 代码 | 文档去重三级（L1 exact_hash 文档级 sha256 / L2 find_semantic_duplicate bge-m3 绝对余弦≥0.95 标簇 + strip_boilerplate 先剥离 / L3 simhash_lsh 接口预留；compute_doc_embedding async await embed_text） | ✅ |
+| ai_service/rag/retrieval/document_ingest.py | module-064 | 代码 | ingestion 管线编排（parse→图片→clean→normalize→L1 去重→原件落盘 save_original→L2 标簇→rag_engine.add_document；各层失败 fail-open 不阻断入库；无有效文本明确报扫描版/纯图片无 OCR） | ✅ |
+| ai_service/scripts/migrate_module064.py | module-064 | 脚本 | DB 迁移（documents 补 original_path/doc_content_hash/duplicate_cluster_id/is_canonical 四列 + 2 索引幂等；本地库已执行） | ✅ |
+| ai_service/tests/core/test_document_parser.py | module-064 | 测试 | 解析层单测（格式识别/纯文本解码/AnyDoc mock/错误映射/分层回退/上传端点接线）21 项 | ✅ |
+| ai_service/tests/core/test_document_cleaner.py | module-064 | 测试 | 清洗层 + 归一化单测（白名单不误伤/页码含 PyMuPDF 分页标记/断行合并/标题规范化/NFKC/表格保持/截断/chunker 零破坏）26 项 | ✅ |
+| ai_service/tests/core/test_document_dedup.py | module-064 | 测试 | 去重三级单测（exact_hash/boilerplate/余弦/语义命中与 miss/fail-open/跨源排除/SimHash 预留）15 项 | ✅ |
+| ai_service/tests/core/test_document_ingest.py | module-064 | 测试 | ingestion 管线单测（成功字段透传/L1 exact 丢弃/L2 语义标簇/无有效文本报错/入库侧向量剥离 Boilerplate 同查询侧口径）5 项 | ✅ |
+| ai_service/tests/core/test_document_image.py | module-064 | 测试 | PDF 图片三层开关直接单测（Review 修复轮补齐：extract_image_refs Markdown/HTML 提取去重 + image_value_filter 三阈值 + 三层默认关原样返回 + L1/L2 缺失占位符替换附注 fail-open + L3 MinerU 未装降级 + 扫描版"图片未解析"提示）18 项 | ✅ |
+| specs/module-064-document-parsing-cleaning/ | module-064 | 规划 | 模块文档（plan/acceptance/task-brief/changelog；review/test-report 由 Reviewer/Tester 产出） | ✅ |
+| specs/adr/0014-document-parsing-cleaning.md | module-064 | 文档 | ADR-0014 多格式解析 + 清洗 + 去重决策（✅ 已实施 2026-08-14：AnyDoc 统一解析 + 五步清洗白名单 + 无损归一化 + PDF 图片三层默认关 + original_path 原件留存 + 去重三级 + canonical 抑制） | ✅ |
 
 ## 三、前端核心文件（frontend/，module-003+）
 

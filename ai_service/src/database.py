@@ -177,6 +177,39 @@ async def ensure_memory_type_columns() -> None:
         await session.commit()
 
 
+# documents 表加列 DDL（module-064 多格式解析/清洗/去重）：与 module-061/062 同款
+# 模式——init_db 自愈幂等 ALTER（ADD COLUMN IF NOT EXISTS + CREATE INDEX IF NOT
+# EXISTS，重复启动不报错）。四列对应 ADR-0014 WP5/WP6：
+#   original_path —— WP5 原件留存（上传原始文件落盘路径，重灌依赖）；
+#   doc_content_hash —— WP6 L1 文档级全文本 SHA256（完全相同直接丢弃）；
+#   duplicate_cluster_id / is_canonical —— WP6 L2 语义重复簇 + canonical 选择
+#   （不删，标簇 + 检索抑制只出 canonical）。
+# 默认值兜底存量行（NULL / TRUE）零迁移 fail-open。本地开发库 schema 未迁移
+# 先决：手动跑 scripts/migrate_module064.py（module-046/061/062 经验）。
+DOCUMENT_PARSING_COLUMNS_DDL = """
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS original_path VARCHAR(512);
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS doc_content_hash VARCHAR(64);
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS duplicate_cluster_id VARCHAR(64);
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS is_canonical BOOLEAN NOT NULL DEFAULT TRUE;
+CREATE INDEX IF NOT EXISTS idx_documents_doc_content_hash ON documents (doc_content_hash);
+CREATE INDEX IF NOT EXISTS idx_documents_duplicate_cluster_id ON documents (duplicate_cluster_id);
+COMMENT ON COLUMN documents.original_path IS '上传原始文件落盘路径（module-064 WP5 原件留存，重灌依赖）';
+COMMENT ON COLUMN documents.doc_content_hash IS '文档级全文本 SHA256（module-064 WP6 L1 内容哈希去重）';
+COMMENT ON COLUMN documents.duplicate_cluster_id IS '语义重复簇 ID（module-064 WP6 L2，检索抑制只出 canonical）';
+COMMENT ON COLUMN documents.is_canonical IS '簇内 canonical：true=检索可见，false=重复副本检索抑制（module-064）';
+"""
+
+
+async def ensure_document_parsing_columns() -> None:
+    """幂等补 documents 表 original_path/doc_content_hash/duplicate_cluster_id/is_canonical
+    四列（与 superseded 同款拆分执行模式）"""
+    statements = [s.strip() for s in DOCUMENT_PARSING_COLUMNS_DDL.split(";") if s.strip()]
+    async with async_session_factory() as session:
+        for stmt in statements:
+            await session.execute(text(stmt))
+        await session.commit()
+
+
 async def init_db():
     """初始化数据库：启用 pgvector 扩展 + 自愈建表/加列（feedback / request_logs / verify_results / superseded / type+last_recalled_at）"""
     async with engine.begin() as conn:
@@ -192,6 +225,8 @@ async def init_db():
     logger.info("documents 表 superseded/updated_at 列已就绪（module-061）")
     await ensure_memory_type_columns()
     logger.info("documents 表 type/last_recalled_at 列已就绪（module-062）")
+    await ensure_document_parsing_columns()
+    logger.info("documents 表 original_path/doc_content_hash/duplicate_cluster_id/is_canonical 列已就绪（module-064）")
 
 
 async def get_db() -> AsyncSession:

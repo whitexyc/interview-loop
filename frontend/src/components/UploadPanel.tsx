@@ -13,7 +13,10 @@ import { useState, useCallback } from 'react';
 import { Typography, Alert, Upload, Flex, Modal } from 'antd';
 import { PlusOutlined, CheckCircleFilled, LoadingOutlined, InboxOutlined } from '@ant-design/icons';
 import PasswordGuard from './PasswordGuard';
-import { uploadDocument } from '../services/ragService';
+import { uploadDocumentFile } from '../services/ragService';
+
+// 多格式上传（module-064）：与后端 document_parser.SUPPORTED_EXTENSIONS 同源
+const ACCEPT_EXTENSIONS = '.md,.txt,.pdf,.docx,.xlsx,.pptx,.epub,.csv';
 
 const { Text } = Typography;
 const { Dragger } = Upload;
@@ -53,11 +56,12 @@ export default function UploadPanel() {
       setUploadStep(1);
 
       try {
-        const text = await file.text();
+        // module-064：二进制格式（pdf/docx/xlsx/...）不能走 file.text()，
+        // 直接传原始文件字节走统一解析管线
         setTimeout(() => setUploadStep(2), 400);
         setTimeout(() => setUploadStep(3), 1000);
 
-        const result = await uploadDocument({ title: name, content: text });
+        const result = await uploadDocumentFile(file, name);
         if (result.duplicate) {
           setDuplicate(true);
           setUploadStep(0);
@@ -146,7 +150,7 @@ export default function UploadPanel() {
         <Dragger
           name="file"
           multiple={false}
-          accept=".md,.txt"
+          accept={ACCEPT_EXTENSIONS}
           beforeUpload={handleFileDrop}
           showUploadList={false}
           disabled={isUploading}
@@ -183,7 +187,9 @@ export default function UploadPanel() {
             <Flex vertical align="center" gap={8} style={{ padding: '8px 0' }}>
               <InboxOutlined style={{ fontSize: 36, color: '#94a3b8' }} />
               <Text strong style={{ fontSize: 15, color: '#0f172a' }}>拖拽文件到此处</Text>
-              <Text style={{ fontSize: 13, color: '#64748b' }}>或点击选择文件（支持 .md / .txt）</Text>
+              <Text style={{ fontSize: 13, color: '#64748b' }}>
+                或点击选择文件（支持 Markdown / 文本 / PDF / Word / Excel / PPT / EPUB / CSV）
+              </Text>
             </Flex>
           )}
         </Dragger>
