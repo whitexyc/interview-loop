@@ -87,6 +87,23 @@
 | ai_service/tests/test_nli_improve.py | module-057 | 测试 | 矛盾改进单测（句切/低置信降级/最严聚合/拆解判定管线/阈值扫描/样本集扩充 ≥50 internal≥20 且首 56 保持 module-054 同集）32 项 | ✅ |
 | ai_service/tests/test_benchmark_rrf_k.py | module-057 | 测试 | RRF 融合纯函数单测（公式/两三通道/缺路/k 敏感/图谱按 hybrid_score 排序）8 项 | ✅ |
 | specs/module-057-data-validation-batch/ | module-057 | 规划 | 模块文档（plan/acceptance/changelog，review/test-report 由 Reviewer/Tester 产出） | ✅ |
+| ai_service/src/observability.py | module-058 | 代码 | 请求可观测性（contextvar 观测上下文：trace_id/timing/usage/cache 计数 + save_request_log fail-open 落库 + TraceIdFilter/install_trace_id_filter 日志 record.trace_id 注入；PW_REQUEST_LOGS 默认 true 关闭零埋点零落库；不引入新依赖） | ✅ |
+| ai_service/scripts/probe_prefix_cache.py | module-058 | 脚本 | WP-B 前缀缓存探测（真实 deepseek：单文档 <1024 token 未达缓存门槛 / 多文档 3001 token 同 docs 二次生成 billed miss -98% 命中；verify 口径核实 LLM 只拆句） | ✅ |
+| ai_service/scripts/probe_request_trace.py | module-058 | 脚本 | WP-C 真实 trace 样例（init_db 幂等建 request_logs + 真实 chat 全阶段计时/token 采集 + 落库查回；清理探测身份记忆行保留样例行） | ✅ |
+| ai_service/tests/test_prompt_order.py | module-058 | 测试 | prompt 区块顺序单测（sections→docs→query 顺序/标签格式不变/空 sections 零漂移/历史段仍最前）6 项 | ✅ |
+| ai_service/tests/test_tool_phase_split.py | module-058 | 测试 | 工具阶段切分单测（检索组 7/生成组 4/re_search 双组/group 元数据/初始 phase/advance_phase 单元/schemas_for_phase/调生成后下一轮切 generation/re_search 不回退/开关 false 全量 10/预算路径不变/langgraph 同步/_SYSTEM_PROMPT）18 项 | ✅ |
+| ai_service/tests/test_observability.py | module-058 | 测试 | 可观测性单测（timing/usage 累积/缓存命中计数/engine.chat 全阶段计时/request_logs 幂等落库/fail-open/端点 trace 接线/开关零埋点 + Review 修复：TraceIdFilter 日志 record.trace_id 注入/install 幂等/chat_with_tools 用量按供应商标签）16 项 | ✅ |
+| specs/module-058-retrieval-chain-opt/ | module-058 | 规划 | 模块文档（plan/acceptance/changelog；review/test-report 由 Reviewer/Tester 产出） | ✅ |
+| ai_service/src/verify_tasks.py | module-060 | 代码 | verify 后台任务池 + verify_results 表读写（submit_verify_task 先插 pending → create_task 调度返回 task_id + _run_verify 成功/失败落库 + get_verify_task 读 DB 为准；内存池只持执行期中间态、done callback 释放、DB 结果不清理飞轮数据源；PW_VERIFY_ASYNC 开关关闭返回 None） | ✅ |
+| ai_service/tests/test_verify_tasks.py | module-060 | 测试 | verify 异步化单测（submit 返回 uuid/pending 落库/后台执行/释放/异常 failed/开关关 None/pending 落库失败 fail-open/get 读 DB 四态/DDL 幂等/轮询端点状态机 pending/done/failed/404/chat_stream 开关两分支）17 项 | ✅ |
+| specs/module-060-verify-async/ | module-060 | 规划 | 模块文档（plan/acceptance/changelog；review/test-report 由 Reviewer/Tester 产出） | ✅ |
+| specs/adr/0013-verify-async.md | module-060 | 文档 | ADR-0013 verify 异步化决策（轮询送达 + 落库持久化 + 非流式保持同步 + 计时口径变化；✅ 已实施 2026-08-13） | ✅ |
+| ai_service/rag/memory/nli_loader.py | module-061 | 代码 | mDeBERTa NLI 本地加载器（镜像 eval compare_nli_models 已验证 transformers 5.x 路径单一来源，HF_HUB_OFFLINE + AutoModelForSequenceClassification fp32 + id2label 从 config；require_nli_model 缺文件明确报错；顶层零重依赖） | ✅ |
+| ai_service/rag/memory/nli_judge.py | module-061 | 代码 | 记忆冲突 NLI 裁判封装（MemoryNLIJudge：延迟加载 557MB + threading.Lock + to_thread + 20s 超时 + 失败/超时返回 None 降级；复用 nli_loader；对齐 factcheck_judge 模式） | ✅ |
+| ai_service/eval/memory_conflict_dataset.py | module-061 | 代码 | 记忆冲突 NLI 评测（30 条五类标注集：改口/迁移/过时/升级冲突/正例中性 + contradiction P/R/F1 + 达标判定 Recall≥0.8 且 Precision≥0.8 + --fixture 关键词启发式 + eval_runs 'memory_conflict'；真实 baseline id=31 Accuracy 0.60/P 1.0000/R 0.5000 未达门槛） | ✅ |
+| ai_service/tests/test_memory_correction.py | module-061 | 测试 | 记忆纠错单测（P0 升级留短期副本/superseded 标记与幂等/召回过滤 + P1 三分类分流/矛盾 SUPERSEDED+新增/一致追加/NLI None 降级/开关关零回归 + nli_judge 封装 + 评测基线一致性，mock NLI 不加载真实模型）27 项 | ✅ |
+| ai_service/scripts/migrate_module061.py | module-061 | 脚本 | DB 迁移（documents 补 superseded/updated_at 两列幂等，查 information_schema 已存在则跳过 + 校验输出；本地开发库 schema 未迁移先决，module-046 经验） | ✅ |
+| specs/module-061-memory-correction/ | module-061 | 规划 | 模块文档（plan/acceptance/changelog；review/test-report 由 Reviewer/Tester 产出） | ✅ |
 
 ## 三、前端核心文件（frontend/，module-003+）
 
@@ -98,6 +115,11 @@
 | frontend/src/services/ragService.ts | module-006/029 | 代码 | RAG API（chatStream/agentStream/chain） | ✅ |
 | frontend/src/pages/KnowledgePage.tsx | module-008 | 代码 | 知识库管理 | ✅ |
 | frontend/src/pages/ResumePage.tsx | module-003 | 代码 | 简历展示 | ✅ |
+| frontend/src/pages/ChatPage.tsx | module-006/029/060 | 代码 | 聊天页（流式 + Agent 工具轨迹 + **verify 异步轮询**：verifying 状态 + startVerifyPolling 2s/30 次上限 + done 更新 verifiedClaims + failed/404 fail-open + 生命周期清理；handleRetry 补齐与 doSend 一致） | ✅ |
+| frontend/src/services/ragService.ts | module-006/029/060 | 代码 | RAG API（chatStream/agentStream/chain + **chatStream 解析 done verify_task_id + fetchVerifyResult 轮询接口 404 归一化 failed**） | ✅ |
+| frontend/src/types/rag.ts | module-006/060 | 代码 | RAG 类型（**ChatResponse.verifyTaskId + VerifyTaskResult**） | ✅ |
+| frontend/src/types/conversation.ts | module-009/060 | 代码 | 消息类型（**MessageDTO.verifying**） | ✅ |
+| frontend/src/components/ChatMessage.tsx | module-006/048/060 | 代码 | 消息气泡（👍👎 反馈 + **verifying prop "正在验证…"提示**） | ✅ |
 
 ## 四、模块产出（specs/，按模块目录索引）
 
@@ -127,5 +149,7 @@
 | module-051 | specs/module-051-hhem-judge/ | ✅ verify_answer 接入 HHEM 专职裁判（LLM 拆句 + HHEM 判分三态 + 降级链 + kappa 评测），kappa 0.3252 未达门槛如实标注，全量 611/0（2026-08-11） |
 | module-052 | specs/module-052-nli-contradiction-scan/ | ✅ NLI 矛盾扫描前置决策（mDeBERTa-v3 中文实测 kappa 0.4711 vs HHEM 0.1351 → 替换方向推荐，ADR-0010 P1-③ 选型结论），全量 645/0（2026-08-12 Tester 复跑；在途快照 628/1 系 module-053 并行改造，非本模块回归） |
 | module-053 | specs/module-053-rrf-fusion/ | ✅ 检索融合升级（RRF 三通道消融验证：基线复测 0.9714 + RRF 0.9905 放行推荐启用 + 加权两组持平否决 + DB 修复 + 嵌入路径回归修复），全量 645/0（2026-08-12） |
+| module-060 | specs/module-060-verify-async/ | ✅ verify 异步化（ADR-0013：chat_stream 异步 verify + done 带 verify_task_id + 前端轮询补结果 + verify_results 表持久化），单测 17/0 + 前端 58/0 + build PASS；真实 E2E 待环境（本机无 PostgreSQL）（2026-08-13 Developer 产出） |
+| module-061 | specs/module-061-memory-correction/ | ✅ 记忆纠错（ADR-0007 P0+P1：P0 升级留后悔药——升级不删短期副本 + 长期 superseded/updated_at + 召回过滤；P1 写路径冲突消解——mDeBERTa NLI 判矛盾 → 旧父块 SUPERSEDED 不删除 + 新内容正常新增，PW_MEMORY_CONFLICT 默认 false 评测达标才启用；真实 baseline id=31 Accuracy 0.60/P 1.0000/R 0.5000 未达门槛如实标注），全量 824/0 = 797 基线 + 27 新增 + 存量 2 项按验收许可更新（2026-08-13 Developer 产出） |
 
 > 每个模块目录含 plan.md / acceptance-criteria.md / changelog.md / review-report.md / test-report.md。

@@ -167,6 +167,8 @@
 | `specs/adr/0010-hallucination-detection-upgrade.md` | 幻觉检测升级方案（HHEM 专职裁判+逐句报分+矛盾扫描，P0 可先行） |
 | `specs/adr/0011-prompt-eval-optimization.md` | 提示词评估与自动优化（四维判断+四代优化算法+DSPy 选型+三步落地路径，📋 暂不实施） |
 | `specs/adr/0012-tool-governance.md` | 工具治理与分层工具选择（数量退化数据+A/B/C 三档方案，工具口径 10→7 已修正；📋 P1 已立项 module-059：阶段切分状态机） |
+| `specs/adr/0013-verify-async.md` | verify 异步化决策（✅ 已实施 module-060：轮询送达 + 落库持久化 + 非流式保持同步 + 计时口径变化） |
+| `specs/module-060-verify-async/` | verify 异步化（✅ 已实施：chat_stream 异步 verify + done 带 verify_task_id + 前端轮询补结果 + verify_results 表持久化，单测 17/0 + 前端 58/0；真实 E2E 待环境——本机无 PostgreSQL） |
 | `specs/module-052-nli-contradiction-scan/task-brief.md` | NLI 矛盾扫描前置决策任务简报（📋 复测进行中 module-057 v2，数据集 86 条，kappa 门槛判定中） |
 | `specs/module-053-rrf-fusion/` | 检索融合升级（✅ RRF 三通道已实施放行：Hit@5 0.9714→0.9905，加权否决，changelog 含放行决策表；上线 `PW_RETRIEVAL_FUSION_MODE=rrf` 一键开启，默认 hybrid 零回归） |
 | `specs/module-058-retrieval-chain-opt/task-brief.md` | 检索链优化+可观测性任务简报（📋 WP-A 拼标题+防扎堆 / WP-B prompt 顺序前缀缓存 / WP-C 可观测性，基线 Hit@5 0.9905 id=18） |
@@ -174,3 +176,34 @@
 | `specs/module-042-harness-guardrails/test-report.md` | 校验验收测试报告 |
 | `ai_service/rag/schemas.py:18-28` | ChatRequest 模型 + 截断 validator |
 | `ai_service/agent/router.py:76-122` | LLM 输出校验 + 保守路由 |
+
+## 检索链优化 + 可观测性 + 工具治理（2026-08-13 module-058 追加，只增不删）
+
+- **prompt 区块顺序（docs 前置前缀缓存）**：`_GENERATE_PROMPT` 顺序 = sections → 检索到的文档 → 用户问题（docs 前移、query 最后）。原理：LLM API 对 prompt 开头重复前缀自动打折（DeepSeek 硬盘缓存），前提 = 前缀逐字一致——同 docs 重复生成时 docs 段成为可复用前缀。实测（deepseek-v4-flash）：单文档（prompt 637 token）未达缓存门槛（cached 恒 512 固定 prompt 头）；**多文档（3001 token）同 docs 二次生成 billed miss 3001→57-60（-98%，cached 0→2944）缓存命中**。
+- **verify 场景前缀缓存口径**：module-051 拆分后 verify 的 LLM 调用只拆句（prompt=answer 文本），docs 不进 LLM prompt（docs 进 HHEM/LLM 判分）——"同 docs 验多 claim"无 LLM token 前缀可复用；docs 前置的真实受益面是 **generate_answer 同 docs 重复生成**。
+- **请求可观测性（request_logs）**：`src/observability.py` 用 contextvar 承载每请求观测上下文（trace_id/阶段计时/token 用量/缓存命中计数），中间件请求入口初始化，引擎/重排/LLM 客户端在请求任务内读取——**contextvar 是每请求上下文而非全局状态**（多会话并发隔离）。请求结束（含流式 finally）fire-and-forget 落库 request_logs 表（init_db 幂等 DDL，timings/usage 为 JSONB），失败 fail-open 不阻塞主链路；开关 PW_REQUEST_LOGS=false 零埋点零落库。
+- **阶段计时口径**：意图路由 / 分诊改写 / 检索（retriever 并行融合主路径三通道各自：retrieve_fts/retrieve_vector/retrieve_graph，降级串行路径不单独计时）/ rerank / 反思 / 生成 / 幻觉检测（verify）；engine.chat 路径无检索缓存故 cache_hits/misses 恒 0（命中计数只在 _retrieve 路径统计）。
+- **token 用量采集**：llm/client.py `_extract_usage` 兼容 OpenAI SDK usage / langchain response_metadata.token_usage / Anthropic usage；非流式调用采集，流式（SSE 逐 token）不采集；无 usage 静默跳过不中断。
+- **工具阶段切分（ADR-0012 方案 A）**：10 工具按执行阶段暴露——检索组 7（search_* 4 + extract_entities + recall_memory + **re_search**）、生成组 4（generate_answer + verify_answer + note_to_self + **re_search 双组**）；ctx.phase 初始 retrieval，本轮调用过 generate_answer/verify_answer → **下一轮**切 generation（"本轮调用前"确定 schema，强制"先检后生"）；generation 内调 re_search **不回退**（单向前进防死循环）；判定以"是否已调用过生成工具"为界（非 docs 非空——保留补检能力）。收益：省 schema token + **结构性防误调**（检索阶段 schema 不含生成工具，替代工具内部"尚未检索"字符串防御）。开关 PW_TOOL_PHASE_SPLIT 默认 true、false 回退全量 10。
+- **工具数量毒害选择准确率（业界硬数据）**：~50 个工具选对率 84-95% → 200 个 41-83% → 740 个接近 0%；Lost in the Middle 效应（列表中间工具最易漏选）。升级路线三档：10-20 阶段切分（已实施）→ 20-50 分组路由（可复用 intent 路由）→ 50+ 动态工具检索（description 向量化进 pgvector，业界语义路由 86.4% vs 全量 <50%）。
+
+## verify 异步化（2026-08-13 module-060 追加，只增不删）
+
+- **verify 后置推送（答案先交付、验证后到）**：verify（证据链幻觉检测）原本同步阻塞在 chat_stream SSE 主链路尾部（15-50s：LLM 拆句 15s + HHEM 20s + LLM 判分 15s 降级），答案已流完但 done 事件卡在 verify 之后、前端 loading 空转。module-060 改为：流式生成完**立即发 done（带 verify_task_id、verified:false、不再发 verified 事件）→ 关闭连接 → loading 立即结束**；verify 走 `asyncio.create_task` 后台执行（fire-and-forget，对齐 `_schedule_persist` 成熟模式，内部沿用 15/20/15s 超时不会无限 hang）。
+- **前端轮询补结果**：前端凭 done 的 verify_task_id 每 2s 轮询 `GET /ai/rag/chat/verify/{task_id}`（60s/30 次上限）——pending 继续 / done 更新消息 verifiedClaims（ChatMessage 可信度面板）/ failed 或 404 停止轮询不显示面板（fail-open，与现状空 claims 不显示一致）。轮询 timer 在卸载/重试/切会话/新发送时清理。
+- **DB 为准 + 落库持久化（verify_results 表）**：submit 先插一条 pending 记录 → 后台跑完 UPDATE done/failed；轮询端点**读 DB 不读内存**。**重启丢未完成任务 → 404 → 前端 fail-open；已 done 结果 DB 不丢**。表 init_db 幂等 DDL（对齐 feedback/request_logs 模式），done 结果永久保留不清理（**飞轮数据源**——verify 含逐句 verdict 可支撑答案可信度/幻觉调优）。
+- **开关与逃生口**：`PW_VERIFY_ASYNC` 默认 true；false 时 chat_stream 走现状同步路径（verified→done 顺序逐字一致）。测试环境 conftest autouse 钉住 false（对齐 056/058 开关模式）。
+- **非流式端点保持同步**：/ai/rag/chat（engine.chat 同步 verify）**零改动**（前端已不用，契约稳定）；agent/agent-lg 端点不做 verify 零改动；request_logs 零改动。
+- **计时口径变化（如实记录）**：异步化后 request_logs 不再有 verify 阶段（module-058 有该字段预期）；verify 耗时改由轮询接口返回的 `verified_in_ms`（后台 `perf_counter` 计时）。
+
+## 记忆纠错领域（2026-08-13 讨论，module-061，ADR-0007 P0+P1）
+
+- **SUPERSEDED（不删除可审计，Zep 模式）**：`documents.superseded` 列（默认 FALSE）——记忆被新说法取代时标记 true 而非硬删；召回侧过滤 superseded=true（`_expand_to_parents`/`_evolve_recall`），旧说法不参与召回但可审计可回溯。**"标过期 ≠ 删记忆"**（数据安全红线：不得硬删用户记忆）。
+- **升级留后悔药（P0）**：`_promote_memory` 短期→长期升级**不再删除短期副本**（"抄进笔记本不撕草稿纸"）——旧实现复制后删短期（升级单向不可逆）；改后短期层 30 天硬上限 + 衰减 + 提及刷新（module-046）自然淘汰被取代副本；长期新条目带 superseded=false + updated_at=now。
+- **写路径冲突消解（P1）**：语义去重命中（cosine>0.85）后 mDeBERTa NLI 判新事实 vs 旧父块——contradiction → 旧父块 superseded=true + updated_at + 新内容按**正常新增**入库（不拼接共存，"讨厌咖啡\n喜欢咖啡"不再让 LLM 猜哪句是新）；entailment/neutral/NLI 不可用/开关关 → 保持追加拼接（旧行为零回归）。
+- **NLI 封装（nli_judge）**：mDeBERTa 三分类（entailment/neutral/contradiction），延迟加载 557MB + threading.Lock + to_thread + 20s 超时 + 任何失败返回 None（上层降级旧行为）；加载路径镜像 eval/compare_nli_models 已验证 transformers 5.x（HF_HUB_OFFLINE + fp32 + id2label 从 config 读）。
+- **开关默认关（不预设成功）**：`PW_MEMORY_CONFLICT` 默认 false——评测达标（contradiction Recall≥0.8 且 Precision≥0.8）才切 true。**真实 baseline（eval_runs id=31，30 条五类记忆标注集）：Accuracy 0.60 / contradiction Precision 1.0000（0 误判）/ Recall 0.5000（漏判一半）→ 未达门槛**。数据说话：mDeBERTa 判矛盾精准但只抓得住一半（与 module-054/057 矛盾判别短板结论一致），记忆级短句场景 Precision 极高值得注意。
+- **记忆级 vs claim_vs_doc 矛盾判别（口径区分）**：module-052/054/057 是 claim_vs_doc（长句对文档片段，kappa<0.7）；module-061 是记忆级（短句/偏好/事件级改口），更聚焦但同样以数据验证（未达门槛不预设成功）。
+- **标记+新增分两步（事务口径）**：`_merge_duplicate` 标记 superseded 提交后，save 正常新增路径插入新内容——新增失败旧记忆已标记但未删除（内容保留不丢数据 fail-open）。
+- **`is True` 判断（测试兼容）**：`_is_superseded` 用 `getattr(doc, "superseded", False) is True` 而非 truthy——MagicMock 缺字段时 `.superseded` 返回真值 MagicMock，truthy 判断会误伤全部存量测试父块。
+- **子包 import 注册（module-050 别名机制）**：`rag.memory` 被旧路径别名（rag/__init__ `_OLD_PATHS["memory"]`）覆盖为普通模块后，新子模块（nli_loader/nli_judge）必须在 `rag/memory/__init__.py` 导入一次注册进 sys.modules，否则 `from rag.memory.nli_judge import X` 报 "'rag.memory' is not a package"（实测坑：eval baseline 首跑 30/30 skip 系此原因）。
