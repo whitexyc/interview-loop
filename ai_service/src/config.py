@@ -82,6 +82,18 @@ class Settings(BaseSettings):
     # RRF 常数 k（业界默认 60；本模块不做 k 扫描，扫 k 留后续）
     rrf_constant_k: int = 60
 
+    # 重排性能优化（非 module 批）：
+    #   reranker_quantize_enabled —— bge-reranker-v2-m3 int8 动态量化（CPU 实测
+    #     约 2x 提速：6 pair/250 字符 0.89s/pair → 0.42s/pair）。弱相关文档分数
+    #     有漂移但相关文档排序保持。量化失败 fail-open 回退原始模型。false 回退
+    #     fp32（逃生口）。
+    #   rerank_max_candidates —— 粗筛上限：候选超过该值先按现有融合分
+    #     （hybrid_score/rrf_score）截断再进 CrossEncoder 精排（粗筛后精排，
+    #     降交叉对数）。上限不低于 top_k（保证返回足够结果）。实测 Hit@5 不降
+    #     才采纳，见性能优化记录。
+    reranker_quantize_enabled: bool = True
+    rerank_max_candidates: int = 6
+
     # Agent 工具化（module-028）：ReAct 循环工具总调用次数预算（防空转烧钱）
     max_agent_tools: int = 4
 

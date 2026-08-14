@@ -44,6 +44,19 @@ def default_intent_classifier_disabled(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def default_reranker_quantize_disabled(monkeypatch):
+    """测试环境统一钉住 reranker int8 量化开关=关闭（非 module 性能优化批）
+
+    生产默认开启（PW_RERANKER_QUANTIZE_ENABLED 默认 true，CPU 实测 ~2x 提速），
+    但单测需 hermetic：不加载真实模型（存量用例全 mock CrossEncoder），钉住
+    false 防任何真实加载路径触发 11s 量化；新用例体内显式 setattr True 可覆盖。
+    """
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "reranker_quantize_enabled", False)
+
+
+@pytest.fixture(autouse=True)
 def default_tool_phase_split_disabled(monkeypatch):
     """测试环境统一钉住工具阶段切分开关=关闭（module-058，对齐 056 模式）
 
