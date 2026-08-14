@@ -51,5 +51,8 @@ ai_service/uploads/
 ai_service/.ua/
 ai_service/eval/faithfulness.json
 
+# Public benchmark dataset cache (module-065 WP3 downloads, re-downloadable)
+ai_service/eval/datasets/public/
+
 # Local Claude Code settings (per-machine, not shared)
 .claude/settings.local.json

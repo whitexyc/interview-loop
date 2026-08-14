@@ -131,6 +131,11 @@
 | ai_service/tests/core/test_document_image.py | module-064 | 测试 | PDF 图片三层开关直接单测（Review 修复轮补齐：extract_image_refs Markdown/HTML 提取去重 + image_value_filter 三阈值 + 三层默认关原样返回 + L1/L2 缺失占位符替换附注 fail-open + L3 MinerU 未装降级 + 扫描版"图片未解析"提示）18 项 | ✅ |
 | specs/module-064-document-parsing-cleaning/ | module-064 | 规划 | 模块文档（plan/acceptance/task-brief/changelog；review/test-report 由 Reviewer/Tester 产出） | ✅ |
 | specs/adr/0014-document-parsing-cleaning.md | module-064 | 文档 | ADR-0014 多格式解析 + 清洗 + 去重决策（✅ 已实施 2026-08-14：AnyDoc 统一解析 + 五步清洗白名单 + 无损归一化 + PDF 图片三层默认关 + original_path 原件留存 + 去重三级 + canonical 抑制） | ✅ |
+| ai_service/eval/benchmarks/benchmark_embed_write.py | module-065 | 脚本 | 写入侧嵌入性能基准（WP1 探路证伪固化：循环 vs List 批量 10/50/200 + 串行 vs 多进程 2/4×200，--quick/--no-mp；实测批量 ~1.0x 无加速、多进程 0.4x/0.3x 负优化——写入吞吐为 bge-m3 Q8 固有成本，生产零改动） | ✅ |
+| ai_service/eval/benchmarks/benchmark_public_retrieval.py | module-065 | 脚本 | 公开基准检索评测（WP3：BEIR nfcorpus / C-MTEB EcomRetrieval 中文；hf-mirror 直链下载缓存 eval/datasets/public/ gitignored + bge-m3 余弦暴力检索 + Hit@5/MRR/nDCG@10 trec 口径 + eval_runs 落库；--corpus-sample 固定种子抽样代理口径，--corpus-sample 0 全量待 GPU 环境） | ✅ |
+| ai_service/rag/retrieval/document_dedup.py | module-065 | 代码 | WP4 minor-1：find_semantic_duplicate 候选查询过滤 is_canonical=True（非 canonical 副本不参与比对，对齐检索抑制语义） | ✅ |
+| ai_service/tests/core/test_document_dedup.py | module-065 | 测试 | WP4 minor-1 单测（+1：is_canonical IS true SQL 编译捕获断言，15→16 项） | ✅ |
+| specs/module-065-ingest-perf-and-e2e/ | module-065 | 规划 | 模块文档（plan/acceptance/changelog；review/test-report 由 Reviewer/Tester 产出） | ✅ |
 
 ## 三、前端核心文件（frontend/，module-003+）
 

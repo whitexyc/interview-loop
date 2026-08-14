@@ -133,6 +133,10 @@ async def find_semantic_duplicate(
             select(Document).where(
                 Document.parent_id.is_(None),
                 Document.embedding.is_not(None),
+                # 候选只出 canonical（module-064 minor-1）：非 canonical 重复副本
+                # 虽存文档级 embedding，但检索侧已抑制（_expand_to_parents 只出
+                # canonical），语义对齐——副本不参与比对防低概率误判
+                Document.is_canonical.is_(True),
                 # 同源内语义去重：不跨 source 折叠（记忆文档 source=memory:% 排除，
                 # 对齐 retriever._source_condition 口径——旧格式单文档记忆
                 # parent_id=None 且带向量，须排除防把知识库文档折叠进记忆簇）

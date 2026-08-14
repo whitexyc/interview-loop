@@ -170,7 +170,7 @@
 | `specs/adr/0013-verify-async.md` | verify 异步化决策（✅ 已实施 module-060：轮询送达 + 落库持久化 + 非流式保持同步 + 计时口径变化） |
 | `specs/adr/0015-multi-turn-intent-routing.md` | 多轮对话意图路由升级（✅ 已实施 module-063：会话级路由 classify(query,history[-6:]) + 短句继承（去语气词 <6 无特征零 LLM）+ 分诊式改写喂路由 + 工具历史信号 + L4 路径补 L2；golden_multi_turn 12 对实测意图保持 12/12 / 检索 +0.4363） |
 | `specs/adr/0014-document-parsing-cleaning.md` | 多格式文档解析 + 清洗 + 去重（✅ 已实施 module-064：AnyDoc 统一解析 + 五步清洗白名单哲学 + 无损归一化 + PDF 图片三层默认关 + original_path 原件留存 + 去重三级 + canonical 检索抑制） |
-| `specs/module-064-document-parsing-cleaning/` | 多格式解析 + 清洗 + 去重执行简报（✅ 已实施 2026-08-14，全量 pytest 951 基线 + 64 新增全绿；ADR-0014 落地；真实 DB 冒烟 md/pdf/docx/xlsx 全管线通过） |
+| `specs/module-064-document-parsing-cleaning/` | 多格式解析 + 清洗 + 去重执行简报（✅ 已实施 2026-08-14，全量 pytest 951 基线 + 85 新增全绿（1036/0，66/64 系交付快照口径，module-065 minor-2 统一回写 85）；ADR-0014 落地；真实 DB 冒烟 md/pdf/docx/xlsx 全管线通过） |
 | `specs/module-063-multi-turn-intent-routing/task-brief.md` | 多轮意图路由升级执行简报（✅ 已实施 2026-08-14，全量 951/0；ADR-0015 落地） |
 | `specs/module-060-verify-async/` | verify 异步化（✅ 已实施：chat_stream 异步 verify + done 带 verify_task_id + 前端轮询补结果 + verify_results 表持久化，单测 17/0 + 前端 58/0；真实 E2E 待环境——本机无 PostgreSQL） |
 | `specs/module-052-nli-contradiction-scan/task-brief.md` | NLI 矛盾扫描前置决策任务简报（📋 复测进行中 module-057 v2，数据集 86 条，kappa 门槛判定中） |
