@@ -155,6 +155,19 @@ async def lifespan(app: FastAPI):
     global _HHEM_WARMUP_TASK
     _HHEM_WARMUP_TASK = _asyncio.create_task(_warmup_hhem())
 
+    # P3 性能优化：预热 reranker（int8 量化后首次加载约 20-30s），首个请求不再
+    # 冷加载 20s（TTFT 最大头之一）。与 HHEM 后台 fail-soft 不同，reranker 在
+    # 首个 chat/search 请求的同步关键路径上，故**阻塞启动**等待就绪；失败
+    # fail-open（首个请求退回冷加载路径，与无预热行为一致）。CPU 密集加载挪到
+    # 线程池，不阻塞事件循环。
+    try:
+        from rag.retrieval.reranker import reranker as _reranker
+        logger.info("预热 reranker 模型中...")
+        await _asyncio.to_thread(_reranker._lazy_load)
+        logger.info("reranker 模型已预热")
+    except Exception as e:
+        logger.warning("reranker 预热失败（可接受，首个请求将含冷加载）: %s", e)
+
     yield
     logger.info("AI 服务关闭")
 
