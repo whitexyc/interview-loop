@@ -169,6 +169,7 @@
 | `specs/adr/0012-tool-governance.md` | 工具治理与分层工具选择（数量退化数据+A/B/C 三档方案，工具口径 10→7 已修正；📋 P1 已立项 module-059：阶段切分状态机） |
 | `specs/adr/0013-verify-async.md` | verify 异步化决策（✅ 已实施 module-060：轮询送达 + 落库持久化 + 非流式保持同步 + 计时口径变化） |
 | `specs/adr/0015-multi-turn-intent-routing.md` | 多轮对话意图路由升级（✅ 已实施 module-063：会话级路由 classify(query,history[-6:]) + 短句继承（去语气词 <6 无特征零 LLM）+ 分诊式改写喂路由 + 工具历史信号 + L4 路径补 L2；golden_multi_turn 12 对实测意图保持 12/12 / 检索 +0.4363） |
+| `specs/adr/0016-rag-architecture-positioning.md` | RAG 架构定位与演进路线（✅ 已记录：类型 = Agentic RAG（Modular 架构 + Advanced 检索链）+ 九类对比优缺点 + 5 特点 + 演进主线（路由体系：意图→多轮→自适应复杂度）+ 3 局限 + 面试话术） |
 | `specs/adr/0014-document-parsing-cleaning.md` | 多格式文档解析 + 清洗 + 去重（✅ 已实施 module-064：AnyDoc 统一解析 + 五步清洗白名单哲学 + 无损归一化 + PDF 图片三层默认关 + original_path 原件留存 + 去重三级 + canonical 检索抑制） |
 | `specs/module-064-document-parsing-cleaning/` | 多格式解析 + 清洗 + 去重执行简报（✅ 已实施 2026-08-14，全量 pytest 951 基线 + 85 新增全绿（1036/0，66/64 系交付快照口径，module-065 minor-2 统一回写 85）；ADR-0014 落地；真实 DB 冒烟 md/pdf/docx/xlsx 全管线通过） |
 | `specs/module-063-multi-turn-intent-routing/task-brief.md` | 多轮意图路由升级执行简报（✅ 已实施 2026-08-14，全量 951/0；ADR-0015 落地） |
