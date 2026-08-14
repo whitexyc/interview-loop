@@ -190,6 +190,27 @@ def test_semantic_duplicate_query_excludes_memory():
     assert "NOT LIKE" in captured["sql"]
 
 
+def test_semantic_duplicate_query_filters_non_canonical():
+    """候选查询过滤 is_canonical=True（module-065 minor-1）
+
+    非 canonical 重复副本虽存文档级 embedding，但检索侧已抑制（只出
+    canonical），候选比对语义对齐——副本不参与比对防低概率误判。fake
+    session 不执行 SQL 过滤，故编译捕获的语句断言条件真实存在于查询。
+    """
+    captured = {}
+
+    class CapturingSession(FakeSession):
+        async def execute(self, stmt, *args, **kwargs):
+            compiled = stmt.compile(compile_kwargs={"literal_binds": True})
+            captured["sql"] = str(compiled)
+            return FakeResult([])
+
+    emb = FakeEmb(vec=[1.0, 0.0, 0.0])
+    _run(find_semantic_duplicate("新", embedding_service=emb,
+                                 session=CapturingSession([]), threshold=0.95))
+    assert "is_canonical IS true" in captured["sql"]      # 候选只出 canonical
+
+
 def test_default_threshold_is_095():
     assert DEFAULT_DEDUP_THRESHOLD == 0.95
 
