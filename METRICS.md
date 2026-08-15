@@ -173,6 +173,7 @@
 
 - **L2 语义去重实测**：截断 80%+改序变体 → dup_kind=semantic、标簇、canonical=False（43.6s 含文档级嵌入）✓
 - **⚠️ CSV 瓶颈**：1.3MB 数据集 7231 块 × 逐块嵌入 ~0.4s ≈ 50 分钟——**写入侧无批量嵌入**（与嵌入基准"无批量加速"印证），大数据集入库性能优化点（批量嵌入可提数倍，待办）
+  - **补充（2026-08-15 module-065 WP1 证伪）**：上行"批量嵌入可提数倍"为 064 记录时的乐观估计，原文字保留。实测：llama.cpp `create_embedding(List[str])` 内部逐条解码无批量加速（10 条 0.8x / 50 条 1.3x / 200 条 0.9x），多进程并行 Windows spawn 负优化（0.3-0.4x）——**现有引擎路径已证伪，不做投机改动**；真 batch 需换引擎（sentence-transformers/ONNX），GPU 上才显著、CPU 未验证，暂缓。若后续优化入库耗时，更现实方向是断点续传而非批量加速（复跑验证：`python -m eval.benchmarks.benchmark_embed_write`）
 - 测试文档本地留存（uploads/realdoc-test-2026-08-14/ + 知识库 source=realdoc_test:2026-08-14）
 
 ### 真实文档检索验证（bge-m3 向量通道，6 题）
