@@ -289,6 +289,9 @@ class RouterAgent:
         开启时拼接最近一轮 user query 向量（2048 维，需多轮重训模型——当前
         落盘 intent_clf.joblib 为单 query 1024 维训练，拼接会触发 sklearn
         维度不匹配抛异常 → 捕获回退 LLM，fail-open 零回归）。
+        （2026-08-16 架构评估：多轮拼接已降级不做——能力已被 LLM 路径
+        （省略句 12/12 全对）+ WP-B 规则层覆盖，性价比不足，见 METRICS
+        待办区 #8；代码 fail-open 保留不删，开关恒 false）
 
         Args:
             query: 用户问题

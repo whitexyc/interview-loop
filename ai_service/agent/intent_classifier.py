@@ -132,7 +132,9 @@ class IntentClassifier:
         **注意**：当前落盘模型 intent_clf.joblib 为单 query 1024 维训练，传入
         prev 会触发 sklearn 特征维度不匹配抛 ValueError → 调用方（router）捕获
         回退 LLM 分类（fail-open 零回归）；待多轮标注数据重训（config
-        intent_classifier_multi_turn 置 true）后生效。
+        intent_classifier_multi_turn 置 true）后生效。（2026-08-16 架构评估：
+        多轮拼接已降级不做——能力已被 LLM 路径覆盖 + WP-B 规则层兜底，
+        性价比不足，见 METRICS 待办区 #8；prev 拼接代码保留不删，开关恒 false）
 
         模型未加载时抛 RuntimeError——调用方（router）捕获后回退 LLM 分类，
         不阻断主链路。

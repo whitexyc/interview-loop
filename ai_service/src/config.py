@@ -192,6 +192,8 @@ class Settings(BaseSettings):
     # 2048）；未重训置 true 会令 L4 推理维度不匹配抛异常 → router 捕获回退
     # LLM（fail-open 零回归，仅损失多轮场景 L4 成本优势）。默认 false =
     # 存量模型零回归（多轮路由走 LLM 上下文 + 短句继承，见 ADR-0015）。
+    # （2026-08-16 架构评估：多轮拼接已降级不做——能力已被 LLM 路径覆盖
+    # + WP-B 规则层兜底，性价比不足，见 METRICS 待办区 #8；恒 false 不启用）
     intent_classifier_multi_turn: bool = False
 
     # 反思充分性自洽性检查（module-044 层 2）：true 时 check_sufficiency 对
