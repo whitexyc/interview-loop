@@ -136,6 +136,15 @@
 | ai_service/rag/retrieval/document_dedup.py | module-065 | 代码 | WP4 minor-1：find_semantic_duplicate 候选查询过滤 is_canonical=True（非 canonical 副本不参与比对，对齐检索抑制语义） | ✅ |
 | ai_service/tests/core/test_document_dedup.py | module-065 | 测试 | WP4 minor-1 单测（+1：is_canonical IS true SQL 编译捕获断言，15→16 项） | ✅ |
 | specs/module-065-ingest-perf-and-e2e/ | module-065 | 规划 | 模块文档（plan/acceptance/changelog；review/test-report 由 Reviewer/Tester 产出） | ✅ |
+| specs/module-066-agent-evaluation/ | module-066 | 规划 | 模块文档（plan/acceptance/changelog 已产出 2026-08-17；review-report 已产出 2026-08-17 Reviewer ✅ Pass；test-report 由 Tester 产出）。产出文件：ai_service/src/database.py（tool_call_logs 表 DDL + ensure + init_db 挂接）/ ai_service/agent/react.py + langgraph_react.py（execute_tool_with_log 执行处落库）/ ai_service/src/config.py（tool_call_logs_enabled PW_TOOL_CALL_LOGS 默认 true）/ ai_service/eval/agent_tasks.json（36 条任务集六类路径）/ ai_service/eval/agent_tasks.py（三层指标评测 + agent_eval_runs 落库）/ ai_service/tests/agent/test_tool_call_logs.py（12 项）/ ai_service/tests/eval/test_agent_tasks.py（26 项） | ✅ |
+| ai_service/src/database.py | module-066 | 代码 | +TOOL_CALL_LOGS_DDL + ensure_tool_call_logs_table + init_db 挂接（对齐 feedback/request_logs 幂等模式，ADR-0017 决策 2 结构一字不改） | ✅ |
+| ai_service/src/config.py | module-066 | 配置 | +tool_call_logs_enabled（PW_TOOL_CALL_LOGS，默认 true，与 request_logs 同生命周期） | ✅ |
+| ai_service/agent/react.py | module-066 | 代码 | +execute_tool_with_log/record_tool_call（计时包住 run + result_ok 语义 + fail-open 落库；react_loop 与 langgraph 共用防漂移）+ react_loop 执行处接线（循环逻辑/事件格式零改动） | ✅ |
+| ai_service/agent/langgraph_react.py | module-066 | 代码 | execute_tools 节点同构接线（复用 execute_tool_with_log） | ✅ |
+| ai_service/eval/agent_tasks.json | module-066 | 数据 | Agent 任务级评测集 36 条（六类路径：knowledge 单轮 17/多轮 7/casual 3/realtime 3/重检 3/记忆 3；id/task（可数组）/expected_tools/answer_points） | ✅ |
+| ai_service/eval/agent_tasks.py | module-066 | 代码 | Agent 任务级评估脚本（三层指标 pass^k·工具正确率·步数/token/P50-P95 + 判定器四规则确定性 + --mode chat|agent/--sample 种子 42/--pass_k/--limit/--no-save/--fixture 假 LLM 回放 + agent_eval_runs 落库 eval_type='agent_eval' + 评测身份 eval-066-anon 测后清理） | ✅ |
+| ai_service/tests/agent/test_tool_call_logs.py | module-066 | 测试 | tool_call_logs 落库单测（DDL 幂等/成功落库/截断 200/args 兜底/开关 false 零开销/fail-open/result_ok 语义/react+langgraph 接线只记实际执行/trace_id contextvar）12 项 | ✅ |
+| ai_service/tests/eval/test_agent_tasks.py | module-066 | 测试 | 任务集 schema 校验/六类路径/阶段顺序/判定器四规则/outcome/失败分类/指标聚合/percentile/fixture 全量确定性/chat 无轨迹/grounding 读回/清理/agent_eval_runs 落库/CLI no-save 26 项 | ✅ |
 
 ## 三、前端核心文件（frontend/，module-003+）
 
@@ -185,5 +194,6 @@
 | module-061 | specs/module-061-memory-correction/ | ✅ 记忆纠错（ADR-0007 P0+P1：P0 升级留后悔药——升级不删短期副本 + 长期 superseded/updated_at + 召回过滤；P1 写路径冲突消解——mDeBERTa NLI 判矛盾 → 旧父块 SUPERSEDED 不删除 + 新内容正常新增，PW_MEMORY_CONFLICT 默认 false 评测达标才启用；真实 baseline id=31 Accuracy 0.60/P 1.0000/R 0.5000 未达门槛如实标注），全量 824/0 = 797 基线 + 27 新增 + 存量 2 项按验收许可更新（2026-08-13 Developer 产出） |
 | module-062 | specs/module-062-memory-evolution2/ | ✅ 记忆进化 2（ADR-0007 P2 类型化衰减——documents.type + _evolve_recall 按 type 半衰期 preference 30/event 1/其余 3 + 类型来源 clf 1.0000/LLM 1.0000 同分取 clf memory_type_mode=clf + P3 冷记忆降权——documents.last_recalled_at + 长期层久未召回 ×0.3-1.0 不删除 + 刷新升温 + WP4 矛盾检测启用——142 案例 clf Precision 0.9048 vs mDeBERTa Precision 1.0，按用户规则取 Precision 高者 → PW_MEMORY_CONFLICT=true + JUDGE=nli），全量 895/0 = 825 基线 + 70 新增 + 存量 test_memory_extractor 3 处精确结构断言按验收许可补 type 字段（2026-08-13 Developer 产出） |
 | module-063 | specs/module-063-multi-turn-intent-routing/ | ✅ 多轮对话意图路由升级（ADR-0015：会话级路由 classify(query,history[-6:]) + LLM 上下文 + L4 拼接 2048 维（未重训默认关）+ 短句继承（去语气词 <6 无特征零 LLM）+ 改写提前喂路由（非流式）+ 工具历史信号 + L4 路径补 L2 确定性信号 + golden_multi_turn 12 对三指标实测：意图保持 12/12 / 检索 +0.4363），全量 **951/0** = 897 基线 + 54 新增（test_multi_turn_routing 35 + test_golden_multi_turn 19，存量零改动），真实 E2E 两轮"为什么"→knowledge 走检索链路（2026-08-14 Developer 产出） |
+| module-066 | specs/module-066-agent-evaluation/ | ✅ Agent 级评估体系（ADR-0017：tool_call_logs 工具明细落库（react/langgraph 两循环执行处）+ agent_tasks.json 36 条六类路径 + eval/agent_tasks.py 三层指标 pass^k·工具正确率·步数/token/P50-P95 + agent_eval_runs 版本化落库 + 确定性判定），全量 **1075/0** = 1037 基线 + 38 新增（test_tool_call_logs 12 + test_agent_tasks 26，存量零改动仅 conftest 加 autouse 钉住开关）；真实冒烟发现 generate_answer 在默认阶段切分下循环内不可达（Agent 行为盲区如实标注）（2026-08-17 Developer 产出） |
 
 > 每个模块目录含 plan.md / acceptance-criteria.md / changelog.md / review-report.md / test-report.md。

@@ -170,8 +170,10 @@
 | `specs/adr/0013-verify-async.md` | verify 异步化决策（✅ 已实施 module-060：轮询送达 + 落库持久化 + 非流式保持同步 + 计时口径变化） |
 | `specs/adr/0015-multi-turn-intent-routing.md` | 多轮对话意图路由升级（✅ 已实施 module-063：会话级路由 classify(query,history[-6:]) + 短句继承（去语气词 <6 无特征零 LLM）+ 分诊式改写喂路由 + 工具历史信号 + L4 路径补 L2；golden_multi_turn 12 对实测意图保持 12/12 / 检索 +0.4363） |
 | `specs/adr/0016-rag-architecture-positioning.md` | RAG 架构定位与演进路线（✅ 已记录：类型 = Agentic RAG（Modular 架构 + Advanced 检索链）+ 九类对比优缺点 + 5 特点 + 演进主线（路由体系：意图→多轮→自适应复杂度）+ 3 局限 + 面试话术） |
+| `specs/adr/0017-agent-evaluation.md` | Agent 级评估体系（✅ 已实施 module-066：三层指标 Outcome pass^1/pass^3 + Trajectory 工具调用正确率（覆盖/无多调/参数类型/Grounding，确定性判定不用 LLM judge）+ System 步数/token/P50-P95；tool_call_logs 工具明细落库 + agent_tasks.json 36 条任务集（六类路径）+ agent_eval_runs 版本化落库；真实冒烟发现：默认阶段切分下 react_loop 检索阶段 schema 不含生成工具 → generate_answer 不可达（module-058 设计使然），任务按覆盖规则判 fail，如实标注为 Agent 行为盲区发现） |
 | `specs/adr/0014-document-parsing-cleaning.md` | 多格式文档解析 + 清洗 + 去重（✅ 已实施 module-064：AnyDoc 统一解析 + 五步清洗白名单哲学 + 无损归一化 + PDF 图片三层默认关 + original_path 原件留存 + 去重三级 + canonical 检索抑制） |
 | `specs/module-064-document-parsing-cleaning/` | 多格式解析 + 清洗 + 去重执行简报（✅ 已实施 2026-08-14，全量 pytest 951 基线 + 85 新增全绿（1036/0，66/64 系交付快照口径，module-065 minor-2 统一回写 85）；ADR-0014 落地；真实 DB 冒烟 md/pdf/docx/xlsx 全管线通过） |
+| `specs/module-066-agent-evaluation/` | Agent 级评估体系执行简报（✅ 已实施 2026-08-17：tool_call_logs 表（init_db 幂等）+ react/langgraph 两循环执行处落库（PW_TOOL_CALL_LOGS 默认 true，fail-open）+ agent_tasks.json 36 条任务集（六类路径）+ eval/agent_tasks.py 三层指标（--mode chat|agent / --sample / --pass_k / --limit / --no-save / --fixture）+ agent_eval_runs 落库（eval_type='agent_eval'）；ADR-0017 落地；全量 pytest 1037 基线 + 38 新增全绿） |
 | `specs/module-063-multi-turn-intent-routing/task-brief.md` | 多轮意图路由升级执行简报（✅ 已实施 2026-08-14，全量 951/0；ADR-0015 落地） |
 | `specs/module-060-verify-async/` | verify 异步化（✅ 已实施：chat_stream 异步 verify + done 带 verify_task_id + 前端轮询补结果 + verify_results 表持久化，单测 17/0 + 前端 58/0；真实 E2E 待环境——本机无 PostgreSQL） |
 | `specs/module-052-nli-contradiction-scan/task-brief.md` | NLI 矛盾扫描前置决策任务简报（📋 复测进行中 module-057 v2，数据集 86 条，kappa 门槛判定中） |

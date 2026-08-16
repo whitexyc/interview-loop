@@ -110,6 +110,13 @@ class Settings(BaseSettings):
     # 测试环境由 conftest autouse fixture 钉住 false（测试不污染落库）。
     request_logs_enabled: bool = True
 
+    # 工具调用明细落库（module-066 / ADR-0017 决策 2）：react 循环每次实际
+    # 执行工具落一行 tool_call_logs（trace_id/工具名/参数/成败/预览/耗时），
+    # 补 request_logs 缺工具调用明细的核心缺口。默认 true（与 request_logs
+    # 同生命周期）；false 零开销跳过（不构造记录）。测试环境由 conftest
+    # autouse fixture 钉住 false（测试不污染落库）。
+    tool_call_logs_enabled: bool = True
+
     # 长期记忆（module-033/035）：提取 / 去重 / 动态K 阈值（参考 llm-push/19-Agent记忆管理）
     memory_importance_threshold: float = 0.6    # 提取事实 importance < 0.6 丢弃
     # module-035 校准：真实 bge-m3 同义改写 cosine≈0.88，0.95 太严导致漏去重 → 下调 0.85

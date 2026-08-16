@@ -29,9 +29,11 @@ LLM 自己决定调用什么工具、以什么顺序，直到信息足够直接�
 """
 import json
 import logging
+import time
 from typing import AsyncGenerator, Optional
 
 from src.config import settings
+from src.observability import get_trace_id
 from llm.client import LLMFactory
 from agent.reflector import reflector
 from agent.tool_registry import ToolRegistry, registry
@@ -161,6 +163,94 @@ def advance_phase(ctx: ReactContext, executed_names: list[str]) -> None:
         ctx.phase = "generation"
 
 
+# ─── 工具执行 + tool_call_logs 落库（module-066 / ADR-0017 决策 2） ───
+# 两条 ReAct 循环（react_loop + langgraph_react_loop）共用本辅助，只改一处
+# = 回归（防两处漂移，对齐 schemas_for_phase 模式）。落库语义：
+#   - 只记录实际执行的 tool_calls（预算截断掉的 LLM 提议不记，无对应结果）
+#   - 工具不存在/run 抛出异常 → result_ok=false；AgentTool.run 返回空串属
+#     正常路径（run 内部捕获失败），result_ok=true
+#   - 落库失败 fail-open（不阻断工具执行循环，对齐 save_request_log 哲学）
+#   - 开关 tool_call_logs_enabled=false 时零开销跳过（不构造记录）
+
+
+async def record_tool_call(name: str, args: dict, result_ok: bool,
+                           result: str, duration_ms: int) -> None:
+    """落库 tool_call_logs 一行（fail-open：失败仅日志告警，不阻断循环）
+
+    建表走 init_db 自愈幂等 DDL（ensure_tool_call_logs_table），本函数不建表；
+    trace_id 从观测上下文读取（module-058 contextvar，无请求上下文时为空串）。
+
+    Args:
+        name: 工具名
+        args: 工具参数（非 JSON 序列化时兜底 {}）
+        result_ok: 执行成功标记（工具不存在/异常才 false）
+        result: 工具结果文本（截断 200 字符）
+        duration_ms: 单次工具执行耗时（毫秒）
+    """
+    if not settings.tool_call_logs_enabled:
+        return
+    try:
+        from sqlalchemy import text
+        from src.database import async_session_factory
+
+        try:
+            args_json = json.dumps(args, ensure_ascii=False)
+        except TypeError:  # 防御：个别供应商传入非 JSON 序列化参数 → 兜底 {}
+            args_json = "{}"
+        async with async_session_factory() as session:
+            await session.execute(
+                text("""
+                    INSERT INTO tool_call_logs
+                        (trace_id, tool_name, args, result_ok,
+                         result_preview, duration_ms)
+                    VALUES (:trace_id, :tool_name, CAST(:args AS jsonb),
+                            :result_ok, :result_preview, :duration_ms)
+                """),
+                {
+                    "trace_id": get_trace_id() or "",
+                    "tool_name": name,
+                    "args": args_json,
+                    "result_ok": result_ok,
+                    "result_preview": (result or "")[:200],
+                    "duration_ms": int(duration_ms or 0),
+                },
+            )
+            await session.commit()
+    except Exception as e:
+        logger.warning("tool_call_logs 落库失败（fail-open，不影响工具执行）: %s", e)
+
+
+async def execute_tool_with_log(name: str, args: dict, tool,
+                                ctx: ReactContext) -> str:
+    """执行单个工具并落库 tool_call_logs（module-066 / ADR-0017 决策 2）
+
+    计时包住 tool.run，result_ok 语义：工具不存在/run 抛出异常才 false
+    （AgentTool.run 内部捕获失败返回空串属正常路径，result_ok=true）。
+
+    Args:
+        name: 工具名
+        args: 工具参数
+        tool: 工具实例（tools.get 未命中为 None）
+        ctx: ReAct 会话上下文
+
+    Returns:
+        工具结果文本（与旧 `"" if tool is None else await tool.run(...)` 等价）
+    """
+    started = time.perf_counter()
+    result_ok = tool is not None
+    result = ""
+    if tool is not None:
+        try:
+            result = await tool.run(args, ctx)
+        except Exception as e:
+            result_ok = False
+            logger.warning("工具 %s 执行异常（tool_call_logs result_ok=false）: %s",
+                           name, e)
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    await record_tool_call(name, args, result_ok, result, duration_ms)
+    return result
+
+
 async def react_agent(
     query: str,
     history: Optional[list[dict]] = None,
@@ -287,8 +377,9 @@ async def react_loop(
             tool_count += 1
             yield {"type": "tool_call", "name": name, "args": args,
                    "tool_count": tool_count}
-            # 工具失败时 AgentTool.run 内部返回空结果，LLM 判断继续/放弃
-            result = "" if tool is None else await tool.run(args, ctx)
+            # module-066（ADR-0017）：执行工具并落库 tool_call_logs（计时包住
+            # run；工具失败时 AgentTool.run 内部返回空结果，LLM 判断继续/放弃）
+            result = await execute_tool_with_log(name, args, tool, ctx)
             yield {"type": "tool_result", "name": name, "args": args,
                    "result": result, "tool_count": tool_count}
             # 工具结果追加到消息历史（LLM 下一轮能看到）

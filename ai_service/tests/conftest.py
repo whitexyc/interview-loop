@@ -71,6 +71,20 @@ def default_tool_phase_split_disabled(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def tool_call_logs_disabled(monkeypatch):
+    """测试环境统一钉住 tool_call_logs 落库开关=关闭（module-066，对齐 056/058 模式）
+
+    生产默认已开启（PW_TOOL_CALL_LOGS 默认 true），但单测需 hermetic：不
+    依赖真实 DB 落库、不污染 tool_call_logs 表（存量 react 循环测试全量
+    覆盖执行路径，默认 true 会触发真实连接）。新测试（test_tool_call_logs.py）
+    体内显式开启验证落库（配合假 session 打桩）。
+    """
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "tool_call_logs_enabled", False)
+
+
+@pytest.fixture(autouse=True)
 def request_logs_disabled(monkeypatch):
     """测试环境统一钉住 request_logs 落库开关=关闭（module-058 WP-C）
 

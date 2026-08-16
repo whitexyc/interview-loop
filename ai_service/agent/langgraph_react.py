@@ -34,7 +34,7 @@ from src.config import settings
 from llm.client import LLMFactory
 from agent.react import (
     ReactContext, _assistant_message, _build_messages,
-    advance_phase, schemas_for_phase,
+    advance_phase, execute_tool_with_log, schemas_for_phase,
 )
 from agent.reflector import reflector
 from agent.tool_registry import ToolRegistry, registry
@@ -147,8 +147,10 @@ async def execute_tools(state: ReActGraphState) -> dict:
         tool_count += 1
         events.append({"type": "tool_call", "name": name, "args": args,
                        "tool_count": tool_count})
-        # 工具失败时 AgentTool.run 内部返回空结果，LLM 判断继续/放弃
-        result = "" if tool is None else await tool.run(args, ctx)
+        # module-066（ADR-0017）：执行工具并落库 tool_call_logs（与手写
+        # react_loop 共用 execute_tool_with_log；工具失败时 run 内部返回
+        # 空结果，LLM 判断继续/放弃）
+        result = await execute_tool_with_log(name, args, tool, ctx)
         events.append({"type": "tool_result", "name": name, "args": args,
                        "result": result, "tool_count": tool_count})
         # 工具结果追加到消息历史（LLM 下一轮能看到）

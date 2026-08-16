@@ -86,6 +86,41 @@ async def ensure_request_logs_table() -> None:
         await session.commit()
 
 
+# tool_call_logs 表 DDL（module-066 / ADR-0017 决策 2，一字不改）：与 feedback/
+# request_logs 同款模式——独立建表 + 启动 init_db 自愈建表（CREATE TABLE IF NOT
+# EXISTS，幂等）。补 request_logs 缺工具调用明细的核心缺口：Agent 每次实际执行
+# 工具落一行（trace_id/工具名/参数/成败/预览/耗时）；args 用 JSONB 存参数，
+# result_preview 截断 200 防大文档撑爆列，duration_ms 为单次工具执行耗时。
+TOOL_CALL_LOGS_DDL = """
+CREATE TABLE IF NOT EXISTS tool_call_logs (
+    id             BIGSERIAL    PRIMARY KEY,
+    trace_id       VARCHAR(64)  NOT NULL,
+    tool_name      VARCHAR(64)  NOT NULL,
+    args           JSONB        NOT NULL DEFAULT '{}',
+    result_ok      BOOLEAN      NOT NULL DEFAULT TRUE,
+    result_preview VARCHAR(200) NOT NULL DEFAULT '',
+    duration_ms    INTEGER      NOT NULL DEFAULT 0,
+    created_at     TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+COMMENT ON TABLE tool_call_logs IS '工具调用明细日志（Agent 每次实际执行的工具一行，ADR-0017）';
+COMMENT ON COLUMN tool_call_logs.trace_id IS '请求追踪 ID（UUID hex，关联 request_logs）';
+COMMENT ON COLUMN tool_call_logs.tool_name IS '工具名（ToolRegistry 注册名）';
+COMMENT ON COLUMN tool_call_logs.args IS '工具参数（JSONB，LLM 传入的 args）';
+COMMENT ON COLUMN tool_call_logs.result_ok IS '执行成功标记（工具不存在/执行异常才 false，空结果属正常）';
+COMMENT ON COLUMN tool_call_logs.result_preview IS '结果预览（截断 200 字符，防大文档撑爆列）';
+COMMENT ON COLUMN tool_call_logs.duration_ms IS '单次工具执行耗时（毫秒）';
+"""
+
+
+async def ensure_tool_call_logs_table() -> None:
+    """幂等创建 tool_call_logs 表（与 feedback/request_logs 同款拆分执行模式）"""
+    statements = [s.strip() for s in TOOL_CALL_LOGS_DDL.split(";") if s.strip()]
+    async with async_session_factory() as session:
+        for stmt in statements:
+            await session.execute(text(stmt))
+        await session.commit()
+
+
 # verify_results 表 DDL（module-060 verify 异步化）：与 feedback/request_logs
 # 同款模式——独立建表 + 启动 init_db 自愈建表（CREATE TABLE IF NOT EXISTS，幂等）。
 # claims 用 JSONB 存逐句验证结果（claim/verdict/evidence），overall_confidence/
@@ -211,7 +246,7 @@ async def ensure_document_parsing_columns() -> None:
 
 
 async def init_db():
-    """初始化数据库：启用 pgvector 扩展 + 自愈建表/加列（feedback / request_logs / verify_results / superseded / type+last_recalled_at）"""
+    """初始化数据库：启用 pgvector 扩展 + 自愈建表/加列（feedback / request_logs / verify_results / superseded / type+last_recalled_at / tool_call_logs）"""
     async with engine.begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         logger.info("pgvector extension 已就绪")
@@ -227,6 +262,8 @@ async def init_db():
     logger.info("documents 表 type/last_recalled_at 列已就绪（module-062）")
     await ensure_document_parsing_columns()
     logger.info("documents 表 original_path/doc_content_hash/duplicate_cluster_id/is_canonical 列已就绪（module-064）")
+    await ensure_tool_call_logs_table()
+    logger.info("tool_call_logs 表已就绪（module-066）")
 
 
 async def get_db() -> AsyncSession:
