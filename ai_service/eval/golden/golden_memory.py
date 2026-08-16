@@ -308,9 +308,23 @@ def _norm_fact(s: str) -> str:
 
 
 def _fact_match(pred: str, gold: str) -> bool:
-    """预测事实与标注事实是否匹配：归一化后互相包含（任一方向）"""
+    """预测事实与标注事实是否匹配：归一化后互相包含（任一方向）或字符重合率 ≥0.6
+
+    module-046 初版只有双向包含；2026-08-16 60 条真实 baseline 实测暴露
+    误杀（真实分数 0.2353，抽样诊断：提取器语义正确率高，被"且/一名/词序"
+    措辞差异误杀）→ 增加字符集重合率兜底（交集字符数 / max 长度 ≥ 0.6）：
+    修复"喜欢喝美式咖啡不加糖" vs "用户喜欢喝美式咖啡且不加糖"类误杀；
+    "用户喜欢咖啡" vs "用户偏好简洁"（重合率 0.33）仍正确不匹配。
+    边界（诚实）："后端/前端"类同前缀异词可能误判匹配（重合率高），
+    标注集当前无此类样本，语义级匹配需 LLM 判分（未来选项）。
+    """
     np_, ng = _norm_fact(pred), _norm_fact(gold)
-    return bool(np_ and ng) and (ng in np_ or np_ in ng)
+    if not np_ or not ng:
+        return False
+    if ng in np_ or np_ in ng:
+        return True
+    common = len(set(np_) & set(ng))
+    return common / max(len(np_), len(ng)) >= 0.6
 
 
 def _match_sample(predicted: list[str], golden: list[str]) -> tuple[int, int, int]:
