@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     # 环境变量：PW_JWT_SECRET（.env 本地配置，不进仓库）
     jwt_secret: str = ""
 
+    # MCP 集成（module-067 / ADR-0018）：MCP HTTP 模式（/ai/mcp）访问 token，
+    # 认证头 Authorization: Bearer <token>。fail-closed：未设置时 HTTP 模式
+    # 拒绝启动（宁可不用不能裸奔）；stdio 本地模式零认证是设计（本地进程）。
+    # 环境变量：PW_MCP_TOKEN（.env 本地配置，不进仓库）
+    mcp_token: str = ""
+
     # 混合检索
     hybrid_search_alpha: float = 0.3  # BM25 权重，向量权重为 1-alpha
 

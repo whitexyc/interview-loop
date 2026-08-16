@@ -6,6 +6,7 @@ import logging
 import json
 import time
 import asyncio
+import hmac
 from collections import defaultdict
 from typing import Optional
 
@@ -22,6 +23,7 @@ from src.cache import cache
 from src.identity import parse_jwt, resolve_identity
 from src import observability
 from src.verify_tasks import submit_verify_task, get_verify_task
+from mcp_server import mcp as mcp_server, mcp_http_lifespan
 from rag.engine import rag_engine
 from rag.schemas import (
     SearchRequest, SearchResponse, ChatRequest, ChatResponse,
@@ -109,6 +111,15 @@ async def lifespan(app: FastAPI):
             "JWT_SECRET 未配置：请在 .env 设置 PW_JWT_SECRET（与 Java application.yml 同值）"
         )
 
+    # module-067: MCP HTTP 模式 fail-closed —— PW_MCP_TOKEN 未配置拒绝启动
+    #（宁可不用不能裸奔；stdio 本地模式零认证是设计，不受影响）。
+    # 放 lifespan 不放 import 期（存量测试全量 import main，import 期 raise 全炸；
+    # 测试用 ASGITransport 不触发 lifespan，零影响）。
+    if not settings.mcp_token:
+        raise RuntimeError(
+            "PW_MCP_TOKEN 未设置：MCP HTTP 模式 fail-closed 拒绝启动（请在 .env 配置）"
+        )
+
     await init_db()
 
     # 预热 embedding 模型 + LLM 客户端，避免首次请求卡顿
@@ -168,7 +179,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("reranker 预热失败（可接受，首个请求将含冷加载）: %s", e)
 
-    yield
+    # module-067: MCP Streamable HTTP 会话任务组——Starlette Mount 不转发
+    # lifespan scope 给挂载子应用，手动进入（等价 FastMCP 独立 uvicorn 运行
+    # 的 lifespan；不初始化则每个 /ai/mcp 请求抛 "Task group is not
+    # initialized"，见 mcp_server.mcp_http_lifespan）
+    mcp_http_ctx = mcp_http_lifespan()
+    await mcp_http_ctx.__aenter__()
+    try:
+        yield
+    finally:
+        await mcp_http_ctx.__aexit__(None, None, None)
     logger.info("AI 服务关闭")
 
 
@@ -230,6 +250,35 @@ async def rate_limit_middleware(request: Request, call_next):
         )
 
     return await call_next(request)
+
+
+# ─── MCP Server 挂载（module-067 / ADR-0018） ───
+def _mcp_auth_middleware(mcp_app):
+    """/ai/mcp 认证包装（ASGI）：Authorization: Bearer <PW_MCP_TOKEN>
+
+    fail-closed：token 为空恒 401（双保险——lifespan 已拒绝空 token 启动）；
+    每次请求实时读 settings.mcp_token（不缓存，改 token 立即生效）；
+    比较用 hmac.compare_digest（常量时间，防时序侧信道）。
+    """
+    async def auth_wrapper(scope, receive, send):
+        if scope["type"] != "http":
+            await mcp_app(scope, receive, send)
+            return
+        headers = dict(scope.get("headers") or [])
+        token = settings.mcp_token
+        expected = f"Bearer {token}".encode()
+        auth = headers.get(b"authorization", b"")
+        if not token or not hmac.compare_digest(auth, expected):
+            await JSONResponse(
+                status_code=401,
+                content={"message": "未授权：MCP token 缺失或错误（fail-closed）"},
+            )(scope, receive, send)
+            return
+        await mcp_app(scope, receive, send)
+    return auth_wrapper
+
+
+app.mount("/ai/mcp", _mcp_auth_middleware(mcp_server.streamable_http_app()))
 
 
 # ─── 保存消息到 IP 会话缓存 ───

@@ -36,6 +36,7 @@
 - **多层记忆**：长期记住用户偏好（自动抽取、永久保存）/ 短期记住近期内容（30 天自然衰减、反复提及自动升级为长期）/ 会话记住完整对话（刷新恢复 + 长对话自动摘要），按用户隔离互不串扰；记忆纠错——升级留底可回溯、冲突旧记忆标记废弃
 - **流式 SSE**：逐 token 输出 + 管线步骤实时展示
 - **引用溯源**：回答 `[N]` 标注来源，点击弹出原文
+- **MCP 标准工具服务**：ToolRegistry 工具经官方 MCP SDK（FastMCP）暴露为标准 MCP Server——**6 个只读检索工具**（混合/全文/向量/图谱检索 + 实体提取 + 记忆召回）双传输对外提供：**stdio**（本地 Cursor / Claude Code / Claude Desktop 即插即用）与 **Streamable HTTP**（挂载 `/ai/mcp`，Bearer token 认证）；工具定义单一事实源（ToolRegistry），改描述 MCP 自动同步；HTTP 模式 `PW_MCP_TOKEN` 未配置拒绝启动（fail-closed，宁可不用不能裸奔）；stdio 为本地进程模式零认证（安全边界如实声明）；工具返回自动截断 2000 字符
 
 ### 工程实践
 
@@ -108,6 +109,7 @@ npm run dev
 | `PW_DEEPSEEK_API_KEY` | DeepSeek API Key | — |
 | `PW_CLAUDE_API_KEY` | Claude API Key | — |
 | `PW_JWT_SECRET` | JWT 共享密钥（与 Java 后端一致，HS256） | — |
+| `PW_MCP_TOKEN` | MCP HTTP 模式访问 token（`/ai/mcp`，Bearer 认证；**未设置拒绝启动**，fail-closed） | — |
 | `VITE_EDIT_PASSWORD` | 文档上传密码 | — |
 | `PW_RETRIEVAL_FUSION_MODE` | 检索融合模式：`rrf`（默认）/ `hybrid` / `weighted` | `rrf` |
 | `PW_INTENT_CLASSIFIER_ENABLED` | 意图分类器开关 | `true` |
