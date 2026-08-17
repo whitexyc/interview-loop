@@ -101,7 +101,10 @@ class Settings(BaseSettings):
     rerank_max_candidates: int = 6
 
     # Agent 工具化（module-028）：ReAct 循环工具总调用次数预算（防空转烧钱）
-    max_agent_tools: int = 4
+    # module-068：默认 4→5——总预算 = 检索阶段 ≤3 + 生成阶段 ≤2 的兜底和
+    # （旧环境显式 PW_MAX_AGENT_TOOLS=4 时总预算仍 4，阶段预算让位取 min，
+    # 行为正确）。测试环境由 conftest autouse fixture 钉住 4（存量断言保持）。
+    max_agent_tools: int = 5
 
     # 工具阶段切分（module-058 / ADR-0012 方案 A，原 module-059 并入）：
     # 按 ctx.phase 状态机只暴露当前阶段工具（检索组 7 / 生成组 4，re_search
@@ -109,6 +112,17 @@ class Settings(BaseSettings):
     # verify，不再靠工具内部字符串防御）。默认 true；false 回退全量 10 个
     # 零回归（逃生口）。测试环境由 conftest autouse fixture 钉住 false。
     tool_phase_split: bool = True
+
+    # Agent 阶段推进死锁修复（module-068）：
+    #   agent_retrieval_max_rounds —— 检索阶段轮次 ≥ 该值且始终未命中 →
+    #     强制切 generation（防空转兜底；066 实测 4 轮预算耗尽，取 3 = 预算-1）
+    #   agent_retrieval_budget / agent_generation_budget —— 阶段预算：检索阶段
+    #     累计工具调用 ≤3、生成阶段 ≤2（总 5 = max_agent_tools；生成 2 轮留
+    #     一次 re_search 补检余量）。仅 tool_phase_split=true 生效（false 回退
+    #     纯总预算，存量行为逐字）；总预算仍为硬上限（截断取 min）。
+    agent_retrieval_max_rounds: int = 3
+    agent_retrieval_budget: int = 3
+    agent_generation_budget: int = 2
 
     # 请求可观测性（module-058 WP-C）：trace_id + 阶段计时 + token 用量 +
     # 缓存命中 → request_logs 落库（init_db 自愈幂等 DDL）。默认 true；

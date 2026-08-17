@@ -34,7 +34,7 @@ from src.config import settings
 from llm.client import LLMFactory
 from agent.react import (
     ReactContext, _assistant_message, _build_messages,
-    advance_phase, execute_tool_with_log, schemas_for_phase,
+    advance_phase, execute_tool_with_log, schemas_for_phase, _phase_budget,
 )
 from agent.reflector import reflector
 from agent.tool_registry import ToolRegistry, registry
@@ -55,6 +55,8 @@ class ReActGraphState(TypedDict):
         response: llm_call 节点的 LLM 工具调用响应
         answer: 最终答案（finalize/fallback 产出）
         max_answer_len: 答案最大长度（0=不限制），超出截断并附加标记
+        phase_exhausted: 阶段额度耗尽标记（module-068：工具数仍 < 总预算但
+            当前阶段预算已满 → 路由走 fallback，防回 llm_call 死循环）
     """
     ctx: ReactContext
     messages: list
@@ -65,6 +67,7 @@ class ReActGraphState(TypedDict):
     response: dict
     answer: str
     max_answer_len: int
+    phase_exhausted: bool
 
 
 # ==================== Node 函数 ====================
@@ -124,9 +127,20 @@ async def execute_tools(state: ReActGraphState) -> dict:
     tools = state["tools"]
 
     tool_calls = response.get("tool_calls", []) or []
-    allowed = tool_calls[: max(0, budget - tool_count)]
+    # 预算内本轮可执行的工具数（module-068：总预算与阶段预算取 min——阶段预算
+    # 仅 tool_phase_split=true 生效，false 回退纯总预算存量行为逐字）
+    total_remaining = max(0, budget - tool_count)
+    if settings.tool_phase_split:
+        phase_remaining = max(
+            0, _phase_budget(ctx.phase) - ctx.phase_count[ctx.phase])
+        allowed = tool_calls[: min(total_remaining, phase_remaining)]
+    else:
+        allowed = tool_calls[: total_remaining]
     if not allowed:
-        return {"tool_count": tool_count}
+        # 预算/阶段额度已满：总预算耗尽由路由判断走 fallback；阶段额度耗尽
+        #（工具数仍 < 总预算）需标记 phase_exhausted 防回 llm_call 死循环
+        return {"tool_count": tool_count,
+                "phase_exhausted": total_remaining > 0}
 
     # 先追加 assistant 消息（保留 reasoning_content + 仅含实际执行的 tool_calls），
     # 再逐个执行并追加 tool 结果消息（OpenAI 要求 assistant 在前、tool 结果在后）
@@ -134,6 +148,7 @@ async def execute_tools(state: ReActGraphState) -> dict:
     messages.append(_assistant_message(response, executed_ids))
 
     executed_names: list[str] = []
+    executed_results: list[str] = []
     for tc in allowed:
         name = tc.get("name", "")
         executed_names.append(name)
@@ -145,19 +160,22 @@ async def execute_tools(state: ReActGraphState) -> dict:
                 args = {}
         tool = tools.get(name)
         tool_count += 1
+        ctx.phase_count[ctx.phase] += 1  # module-068: 按执行时阶段计数
         events.append({"type": "tool_call", "name": name, "args": args,
                        "tool_count": tool_count})
         # module-066（ADR-0017）：执行工具并落库 tool_call_logs（与手写
         # react_loop 共用 execute_tool_with_log；工具失败时 run 内部返回
         # 空结果，LLM 判断继续/放弃）
         result = await execute_tool_with_log(name, args, tool, ctx)
+        executed_results.append(result)
         events.append({"type": "tool_result", "name": name, "args": args,
                        "result": result, "tool_count": tool_count})
         # 工具结果追加到消息历史（LLM 下一轮能看到）
         messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                          "content": result})
-    # 本轮调用过生成工具 → 下一轮切 generation（单向前进，与手写 react_loop 共用）
-    advance_phase(ctx, executed_names)
+    # 本轮触发阶段推进（生成工具 / 检索命中 / 防空转兜底）→ 下一轮切
+    # generation（单向前进，与手写 react_loop 共用）
+    advance_phase(ctx, executed_names, executed_results)
 
     return {"messages": messages, "tool_count": tool_count, "events": events}
 
@@ -229,7 +247,11 @@ def route_after_llm(state: ReActGraphState) -> str:
 
 
 def route_after_tools(state: ReActGraphState) -> str:
-    """execute_tools 后路由：工具数 < budget 继续 llm_call；否则 fallback
+    """execute_tools 后路由：预算/阶段额度耗尽走 fallback；否则继续 llm_call
+
+    module-068：阶段额度耗尽（phase_exhausted=true，工具数仍 < 总预算）也走
+    fallback——与手写 react_loop 的 `if not allowed: break` 语义对齐（防
+    回 llm_call 后 allowed 恒空死循环）。
 
     Args:
         state: 当前图状态
@@ -237,7 +259,9 @@ def route_after_tools(state: ReActGraphState) -> str:
     Returns:
         目标节点名
     """
-    return "llm_call" if state["tool_count"] < state["budget"] else "fallback"
+    if state.get("phase_exhausted") or state["tool_count"] >= state["budget"]:
+        return "fallback"
+    return "llm_call"
 
 
 # ==================== 图构建 ====================
@@ -330,6 +354,7 @@ async def langgraph_react_loop(
         "response": {},
         "answer": "",
         "max_answer_len": max_answer_len,
+        "phase_exhausted": False,
     }
     # recursion_limit 覆盖默认 25：预算大时循环步数 = 2*budget + 兜底/收尾
     final_state = await react_graph.ainvoke(

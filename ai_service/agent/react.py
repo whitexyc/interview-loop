@@ -93,6 +93,8 @@ class ReactContext:
         self.memory = ""
         self.scratchpad: list[str] = []  # module-041: Agent 工作笔记，按写入序
         self.phase: str = "retrieval"    # module-058: 工具执行阶段状态机
+        self.retrieval_rounds: int = 0   # module-068: 检索阶段未切换轮次计数（防空转兜底）
+        self.phase_count: dict[str, int] = {"retrieval": 0, "generation": 0}  # module-068: 各阶段实际执行工具数
 
     def add_note(self, note: str) -> None:
         """记录一条工作笔记到 scratchpad（module-041）"""
@@ -139,6 +141,54 @@ def _assistant_message(response: dict, executed_ids: set) -> dict:
 # 不回退（单向前进，防死循环）。归组见 tool_registry.register_builtin_tools。
 _GENERATION_GATE_TOOLS = {"generate_answer", "verify_answer"}
 
+# module-068：检索命中即切 generation 的命中工具清单（task-brief 6 个，
+# 不含 re_search——双组补检工具，命中判定排除；零 LLM 判断，066 已证 LLM
+# 行为性不可靠）。推进规则见 advance_phase docstring。
+_RETRIEVAL_HIT_TOOLS = {
+    "search_knowledge", "search_fts", "search_vector", "search_graph",
+    "extract_entities", "recall_memory",
+}
+# 空结果标记（与 tool_registry.py 文案耦合——红线不碰 tool_registry，若未来
+# 改文案此处判定失效，解耦方案见 changelog backlog）
+_EMPTY_RESULT_MARKERS = ("（无检索结果）", "（无相关历史记忆）")
+
+
+def _retrieval_hit(name: str, result: str) -> bool:
+    """检索命中判定（module-068，确定性零 LLM 判断）
+
+    规则：工具名 ∈ 检索命中集合 + 结果非空 + 非空结果标记（"（无检索结果）"/
+    "（无相关历史记忆）" 均为非空字符串，bool(result) 会误判命中）+ extract_
+    entities 解析 JSON 判 entities 非空（解析失败/无 entities 键按非空文本判定）。
+
+    Args:
+        name: 工具名
+        result: 工具执行返回的结果文本
+
+    Returns:
+        是否命中（命中 → 下一轮切 generation）
+    """
+    if name not in _RETRIEVAL_HIT_TOOLS:
+        return False
+    if not result:
+        return False
+    if result in _EMPTY_RESULT_MARKERS:
+        return False
+    if name == "extract_entities":
+        try:
+            data = json.loads(result)
+        except (json.JSONDecodeError, TypeError):
+            data = None
+        if isinstance(data, dict) and "entities" in data:
+            return bool(data["entities"])
+    return True
+
+
+def _phase_budget(phase: str) -> int:
+    """阶段预算（module-068 WP-B）：检索 ≤ agent_retrieval_budget / 生成 ≤ agent_generation_budget"""
+    if phase == "generation":
+        return settings.agent_generation_budget
+    return settings.agent_retrieval_budget
+
 
 def schemas_for_phase(tools: ToolRegistry, ctx: ReactContext) -> list[dict]:
     """按当前阶段选工具 schema（开关 false → 全量 10 个，零回归逃生口）
@@ -151,15 +201,36 @@ def schemas_for_phase(tools: ToolRegistry, ctx: ReactContext) -> list[dict]:
     return tools.to_llm_schemas()
 
 
-def advance_phase(ctx: ReactContext, executed_names: list[str]) -> None:
-    """本轮调用过生成工具 → 下一轮切 generation（单向前进）
+def advance_phase(ctx: ReactContext, executed_names: list[str],
+                  executed_results: Optional[list[str]] = None) -> None:
+    """本轮触发阶段推进 → 下一轮切 generation（单向前进）
+
+    module-068 扩展：原条件（本轮调用过生成工具）保留；新增确定性分支——
+    任一检索命中工具本轮返回非空真实结果 → 切 generation（零 LLM 判断，打破
+    "检索阶段 schema 无生成工具 → LLM 无法调 generate_answer → 永不切
+    generation"死锁）。防空转兜底：检索阶段轮次 ≥ agent_retrieval_max_rounds
+    且始终未命中 → 强制切 generation（阈值判定在本轮未因其他条件切换之后）。
+
+    executed_results 缺省 None 时行为 = 旧逻辑（仅生成工具判定）——存量
+    test_advance_phase_unit 单列表调用零改动（向后兼容红线）。
 
     Args:
         ctx: 会话上下文（phase 原地更新，跨轮次/跨节点可见）
         executed_names: 本轮实际执行的工具名列表（含预算截断后实际执行者）
+        executed_results: 与 executed_names 同序的结果文本列表；None = 旧行为
     """
-    if ctx.phase == "retrieval" and any(
-            n in _GENERATION_GATE_TOOLS for n in executed_names):
+    if ctx.phase != "retrieval":
+        return
+    if any(n in _GENERATION_GATE_TOOLS for n in executed_names):
+        ctx.phase = "generation"
+        return
+    if executed_results is not None and any(
+            _retrieval_hit(n, r)
+            for n, r in zip(executed_names, executed_results)):
+        ctx.phase = "generation"
+        return
+    ctx.retrieval_rounds += 1
+    if ctx.retrieval_rounds >= settings.agent_retrieval_max_rounds:
         ctx.phase = "generation"
 
 
@@ -353,8 +424,16 @@ async def react_loop(
         if content:
             yield {"type": "token", "content": content}
 
-        # 预算内本轮可执行的工具数（预算截断时只执行前 N 个）
-        allowed = tool_calls[: max(0, budget - tool_count)]
+        # 预算内本轮可执行的工具数（预算截断时只执行前 N 个；module-068：
+        # 总预算与阶段预算取 min——阶段预算仅 tool_phase_split=true 生效，
+        # false 回退纯总预算存量行为逐字）
+        total_remaining = max(0, budget - tool_count)
+        if settings.tool_phase_split:
+            phase_remaining = max(
+                0, _phase_budget(ctx.phase) - ctx.phase_count[ctx.phase])
+            allowed = tool_calls[: min(total_remaining, phase_remaining)]
+        else:
+            allowed = tool_calls[: total_remaining]
         if not allowed:
             break  # 预算已满，无可用额度 → 兜底生成
 
@@ -364,6 +443,7 @@ async def react_loop(
         messages.append(_assistant_message(response, executed_ids))
 
         executed_names: list[str] = []
+        executed_results: list[str] = []
         for tc in allowed:
             name = tc.get("name", "")
             executed_names.append(name)
@@ -375,18 +455,21 @@ async def react_loop(
                     args = {}
             tool = tools.get(name)
             tool_count += 1
+            ctx.phase_count[ctx.phase] += 1  # module-068: 按执行时阶段计数
             yield {"type": "tool_call", "name": name, "args": args,
                    "tool_count": tool_count}
             # module-066（ADR-0017）：执行工具并落库 tool_call_logs（计时包住
             # run；工具失败时 AgentTool.run 内部返回空结果，LLM 判断继续/放弃）
             result = await execute_tool_with_log(name, args, tool, ctx)
+            executed_results.append(result)
             yield {"type": "tool_result", "name": name, "args": args,
                    "result": result, "tool_count": tool_count}
             # 工具结果追加到消息历史（LLM 下一轮能看到）
             messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                              "content": result})
-        # 本轮调用过生成工具 → 下一轮切 generation（单向前进）
-        advance_phase(ctx, executed_names)
+        # 本轮触发阶段推进（生成工具 / 检索命中 / 防空转兜底）→ 下一轮切
+        # generation（单向前进）
+        advance_phase(ctx, executed_names, executed_results)
 
     # 预算耗尽：用已收集 docs 兜底生成
     logger.warning("工具预算耗尽 (budget=%d)，用 %d 篇已收集文档兜底生成",

@@ -71,6 +71,21 @@ def default_tool_phase_split_disabled(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def default_max_agent_tools_4(monkeypatch):
+    """测试环境钉住总预算=4（module-068）
+
+    生产默认 max_agent_tools 已 4→5（总预算 = 检索阶段 ≤3 + 生成阶段 ≤2
+    的兜底和），但存量 react/langgraph 测试断言 budget==4
+    （test_agent_tools.py:585/679/705、test_rerank_langgraph.py:456）——
+    钉住 4 使存量断言逐字保持（对齐 056/058/066 模式）；新测试
+    （test_agent_phase_fix.py）体内显式 setattr 覆盖验证阶段预算。
+    """
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "max_agent_tools", 4)
+
+
+@pytest.fixture(autouse=True)
 def tool_call_logs_disabled(monkeypatch):
     """测试环境统一钉住 tool_call_logs 落库开关=关闭（module-066，对齐 056/058 模式）
 

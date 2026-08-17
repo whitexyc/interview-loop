@@ -168,10 +168,10 @@ class TestPhaseStateMachine:
         assert result["tool_count"] == 2
         assert result["answer"] == "最终答案"
         assert set(fake.tools_seen[0]) == RETRIEVAL_7   # 第 1 轮：检索阶段 7 个
-        # 第 2 轮调 generate_answer：阶段按"本轮调用前"确定仍为检索组
-        #（切分在本轮执行后生效——"先检后生"强制语义，见 059 brief 事实 6）
-        assert set(fake.tools_seen[1]) == RETRIEVAL_7
-        assert set(fake.tools_seen[2]) == GENERATION_4  # 下一轮切 generation
+        # 第 2 轮已切 generation（module-068：第 1 轮 search_knowledge 检索命中
+        # → 确定性推进规则，不再等调生成工具；原"先检后生"等待语义被命中即切取代）
+        assert set(fake.tools_seen[1]) == GENERATION_4
+        assert set(fake.tools_seen[2]) == GENERATION_4  # 下一轮仍 generation
 
     def test_verify_answer_switches_to_generation(self):
         """调 verify_answer 同样切 generation（下一轮 schema = 生成组 4）"""
@@ -189,8 +189,9 @@ class TestPhaseStateMachine:
                         result = asyncio.run(react_agent("q", budget=4))
 
         assert set(fake.tools_seen[0]) == RETRIEVAL_7
-        assert set(fake.tools_seen[1]) == RETRIEVAL_7   # 调用轮 schema 仍为检索组
-        assert set(fake.tools_seen[2]) == GENERATION_4  # 下一轮切 generation
+        # module-068：第 1 轮 search_knowledge 检索命中 → 调用轮 schema 已为生成组
+        assert set(fake.tools_seen[1]) == GENERATION_4
+        assert set(fake.tools_seen[2]) == GENERATION_4  # 下一轮仍 generation
 
     def test_re_search_in_generation_no_regression(self):
         """generation 内调 re_search → 不回退（补检口仍在生成组）"""
@@ -212,9 +213,9 @@ class TestPhaseStateMachine:
                             result = asyncio.run(react_agent("q", budget=4))
 
         assert result["tool_count"] == 3
-        # 第 2 轮（调 generate_answer 轮）schema 仍为检索组；第 3 轮已切
-        # generation 且 re_search 在生成组可见；补检后仍 generation（不回退）
-        assert set(fake.tools_seen[1]) == RETRIEVAL_7
+        # module-068：第 1 轮 search_knowledge 检索命中 → 第 2 轮已切 generation；
+        # re_search 在生成组可见；补检后仍 generation（不回退）
+        assert set(fake.tools_seen[1]) == GENERATION_4
         assert set(fake.tools_seen[2]) == GENERATION_4
         assert set(fake.tools_seen[3]) == GENERATION_4
         assert check.called
@@ -259,9 +260,10 @@ class TestPhaseStateMachine:
 
         assert result["tool_count"] == 2
         assert result["answer"] == "兜底答案"
-        # 全程检索阶段（未调生成工具），schema 恒为检索组 7
+        # module-068：第 1 轮 search_knowledge 检索命中 → 第 2 轮已切 generation
+        #（search_fts 在生成阶段执行，执行层不校验 schema 暴露——预算耗尽兜底不变）
         assert set(fake.tools_seen[0]) == RETRIEVAL_7
-        assert set(fake.tools_seen[1]) == RETRIEVAL_7
+        assert set(fake.tools_seen[1]) == GENERATION_4
 
 
 class TestLangGraphPhaseSplit:
@@ -290,8 +292,9 @@ class TestLangGraphPhaseSplit:
 
         assert result["answer"] == "LG答案"
         assert set(fake.tools_seen[0]) == RETRIEVAL_7
-        assert set(fake.tools_seen[1]) == RETRIEVAL_7   # 调用轮 schema 仍为检索组
-        assert set(fake.tools_seen[2]) == GENERATION_4  # 下一轮切 generation
+        # module-068：第 1 轮 search_knowledge 检索命中 → 调用轮 schema 已为生成组
+        assert set(fake.tools_seen[1]) == GENERATION_4
+        assert set(fake.tools_seen[2]) == GENERATION_4  # 下一轮仍 generation
 
     def test_langgraph_re_search_in_generation_no_regression(self):
         """langgraph 版 generation 内调 re_search 不回退（与手写版一致）"""
@@ -314,7 +317,9 @@ class TestLangGraphPhaseSplit:
                             result = asyncio.run(langgraph_react_agent("q", budget=4))
 
         assert result["tool_count"] == 3
-        assert set(fake.tools_seen[1]) == RETRIEVAL_7
+        # module-068：第 1 轮 search_knowledge 检索命中 → 第 2 轮已切 generation；
+        # re_search 在生成组可见；补检后仍 generation（不回退）
+        assert set(fake.tools_seen[1]) == GENERATION_4
         assert set(fake.tools_seen[2]) == GENERATION_4
         assert set(fake.tools_seen[3]) == GENERATION_4
 
