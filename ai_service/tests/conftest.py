@@ -158,6 +158,20 @@ def default_document_pipeline_switches(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def default_pdf_fallback_md_disabled(monkeypatch):
+    """测试环境统一钉住 PDF 回退 Markdown 升级开关=关闭（module-069）
+
+    生产默认已开启（PW_PDF_FALLBACK_MD 默认 true），但存量 _parse_pdf_pymupdf
+    测试以旧行为（page.get_text() 裸文本）为准——默认 true 会漂移走 pymupdf4llm
+    路径导致存量断言失败。钉住 false 是"存量测试全绿"的真正保证；新测试体内
+    显式 setattr True 验证 pymupdf4llm 行为（配合 mock）。
+    """
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "pdf_fallback_md", False)
+
+
+@pytest.fixture(autouse=True)
 def default_memory_evolution2_disabled(monkeypatch):
     """测试环境统一钉住 module-062 新开关=保守值（对齐 056/058/060/061 模式）
 

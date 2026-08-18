@@ -290,6 +290,14 @@ class Settings(BaseSettings):
     doc_dedup_threshold: float = 0.95
     doc_dedup_boilerplate_enabled: bool = True
 
+    # PDF 回退路径 Markdown 升级（module-069）：
+    #   true（默认）—— PyMuPDF 回退路径用 pymupdf4llm.to_markdown() 输出
+    #     Markdown（标题/列表/表格恢复），双栏页面先走中线重组再出 MD。
+    #   false —— 走旧路径 page.get_text() 裸文本（存量行为零回归，逃生口）。
+    #   pymupdf4llm 仍 AGPL-3.0（与 PyMuPDF 同许可），输出仍过清洗层
+    #   （document_cleaner.clean()）——pymupdf4llm 解决结构，清洗层解决格式噪声。
+    pdf_fallback_md: bool = True
+
     model_config = {"env_prefix": "PW_", "env_file": ".env"}
 
 

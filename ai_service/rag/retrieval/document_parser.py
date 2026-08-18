@@ -148,25 +148,141 @@ def _pdf_page_count(data: bytes) -> Optional[int]:
         return None
 
 
+def _reorder_columns(page) -> str:
+    """双栏中线重组：检测双栏页面并按阅读顺序拼接文本块（module-069 WP-A）
+
+    纯函数（输入 page 对象，输出 str），可独立测试。
+
+    流程：
+      1. get_text("blocks") 获取带坐标的文本块 (x0, y0, x1, y1, text, ...)
+      2. 双栏检测：左右各 >=2 块才算双栏（单栏走正常 y 序防误切）
+      3. 分三组：跨中线块 → 置顶；左栏按 y0 排序；右栏按 y0 排序
+      4. 跨栏表格跳过：含 | 的块不参与重组（表格内列顺序不能乱）
+      5. 拼接：跨中线块 + 左栏 + 右栏
+
+    三个坑：
+      - 单栏误切：必须"左右各 >=2 块"才算双栏
+      - 跨中线块：横跨左右的大标题/宽表格 → 置顶
+      - 跨栏表格：| 行不参与重组（原位保留在 left/right 中）
+    """
+    blocks = page.get_text("blocks")  # [(x0, y0, x1, y1, text, block_no, block_type), ...]
+    if not blocks:
+        return ""
+
+    # 过滤文本块（block_type=0 为文本，1 为图片）
+    text_blocks = [b for b in blocks if b[6] == 0 and b[4].strip()]
+    if not text_blocks:
+        return ""
+
+    mid_x = page.rect.width / 2
+
+    # 双栏检测：统计严格左栏（x1 <= mid_x）和严格右栏（x0 >= mid_x）的块数
+    left_count = sum(1 for b in text_blocks if b[2] <= mid_x)
+    right_count = sum(1 for b in text_blocks if b[0] >= mid_x)
+
+    # 单栏走正常 y 序（左右各 >=2 块才算双栏）
+    if left_count < 2 or right_count < 2:
+        text_blocks.sort(key=lambda b: b[1])
+        return "\n".join(b[4].rstrip() for b in text_blocks)
+
+    # 双栏重组：分三组
+    cross_blocks = []  # 跨中线块（置顶）
+    left_blocks = []   # 左栏
+    right_blocks = []  # 右栏
+
+    for b in text_blocks:
+        x0, y0, x1, y1, text = b[0], b[1], b[2], b[3], b[4]
+        # 跨栏表格跳过重组：含 | 的块保留原位（表格列顺序不能乱）
+        is_table = "|" in text
+        if is_table:
+            # 跨栏表格按 x0 归入对应栏（不重组）
+            if x0 < mid_x:
+                left_blocks.append((y0, text.rstrip()))
+            else:
+                right_blocks.append((y0, text.rstrip()))
+        elif x0 < mid_x < x1:
+            # 跨中线块 → 置顶
+            cross_blocks.append((y0, text.rstrip()))
+        elif x1 <= mid_x:
+            # 严格左栏
+            left_blocks.append((y0, text.rstrip()))
+        elif x0 >= mid_x:
+            # 严格右栏
+            right_blocks.append((y0, text.rstrip()))
+        else:
+            # 边界情况：归入左栏
+            left_blocks.append((y0, text.rstrip()))
+
+    # 各组按 y0 排序
+    cross_blocks.sort(key=lambda x: x[0])
+    left_blocks.sort(key=lambda x: x[0])
+    right_blocks.sort(key=lambda x: x[0])
+
+    # 拼接：跨中线块 + 左栏 + 右栏
+    parts = [t for _, t in cross_blocks] + [t for _, t in left_blocks] + [t for _, t in right_blocks]
+    return "\n".join(parts)
+
+
 def _parse_pdf_pymupdf(data: bytes) -> ParsedDocument:
     """PyMuPDF 回退解析（存量 main.py:911 逻辑提取为可复用函数）
 
     每页文本前加 `--- Page i/N ---` 分隔（与存量上传行为一致，零回归）。
+
+    module-069 升级：
+      - pdf_fallback_md=true 时：双栏中线重组（WP-A）→ pymupdf4llm 输出 Markdown
+      - pdf_fallback_md=false 时：走旧路径 page.get_text() 裸文本（存量行为逐字一致）
     """
+    from src.config import settings
+
     try:
         import fitz
     except ImportError as e:
         raise DocumentParseError("PDF 解析库不可用，请安装 PyMuPDF") from e
+
+    # 延迟导入 pymupdf4llm（不可用时降级 get_text() + warning）
+    _pymupdf4llm = None
+    if settings.pdf_fallback_md:
+        try:
+            import pymupdf4llm as _pymupdf4llm
+        except ImportError:
+            logger.warning("pymupdf4llm 未安装，降级为 get_text() 裸文本")
+            _pymupdf4llm = None
+
     try:
         pdf_doc = fitz.open(stream=data, filetype="pdf")
         try:
             page_count = pdf_doc.page_count
             pages_text = []
             for i, page in enumerate(pdf_doc, start=1):
-                text = page.get_text()
+                if _pymupdf4llm is not None:
+                    # WP-A: 双栏检测 + 中线重组（坐标阶段）
+                    # WP-B: pymupdf4llm 输出 Markdown（重组后）
+                    reordered = _reorder_columns(page)
+                    if reordered.strip():
+                        # 用 pymupdf4llm.to_markdown() 生成 Markdown
+                        # 注意：pymupdf4llm 接受文档对象或页面列表
+                        # 为保持每页独立分页标记，逐页调用
+                        try:
+                            md_text = _pymupdf4llm.to_markdown(
+                                pdf_doc, pages=[i - 1], page_chunks=True,
+                            )
+                            if md_text and isinstance(md_text, list):
+                                text = md_text[0].get("text", reordered) if md_text else reordered
+                            elif md_text and isinstance(md_text, str):
+                                text = md_text
+                            else:
+                                text = reordered
+                        except Exception:
+                            # pymupdf4llm 失败时用重组后的文本
+                            text = reordered
+                    else:
+                        text = ""
+                else:
+                    text = page.get_text()
                 pages_text.append(f"--- Page {i}/{page_count} ---\n{text}")
             full_text = "\n\n".join(pages_text)
-            return ParsedDocument(text=full_text, format="pdf", engine="pymupdf",
+            engine = "pymupdf4llm" if _pymupdf4llm is not None else "pymupdf"
+            return ParsedDocument(text=full_text, format="pdf", engine=engine,
                                   page_count=page_count)
         finally:
             pdf_doc.close()
