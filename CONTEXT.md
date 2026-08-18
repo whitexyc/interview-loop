@@ -266,3 +266,12 @@
 - **conflict_hint 评测口径**：`run_eval` VERDICTS 校验拒绝 "conflict_hint" → `dual_judge` 内映射 neutral（contradiction P/R 主指标等价，accuracy_3class 参考口径失真如实声明）；eval_runs 三方案用 scores["judge"] 字段区分（对齐 memory_type eval "model" 字段先例）。
 - **评测集 70 条（30→70）**：40 条新增全部基于用户真实信息派生（真实分布打底）；4 条**语义边界陷阱**（scenario=边界：计划 vs 事实 / 想法 vs 结果 / "不买"vs"不喝" / 场景限定并存，verdict=neutral 用户已确认不可改）；1 条措辞去重（"用户喜欢摄影"与训练集 premise 精确重叠破坏零重叠不变式 → "用户平时喜欢摄影"，verdict 不变）。
 - **`_merge_duplicate` 判定逻辑零改动**：仅 `verdict == "contradiction"` 触发 superseded；"conflict_hint" 自然落入追加分支（+info 日志"记忆冲突提示（双判不一致）"）。
+
+## 幻觉检测 kappa 校准（2026-08-18 module-071 追加，只增不删，METRICS 待办 #2）
+
+- **结论：重跑三态 kappa 0.2981 < 0.7 → 不达标，不改生产配置**（阈值 0.7/0.3 保持）——阈值校准方向证伪（新 136 集全网格最优 0.3309、旧 50 集最优 0.3711，天花板 0.33-0.37 远低于 0.7 门槛）。HHEM 中文场景"相关背景/部分覆盖"区分是核心短板（乐观偏差 + 分数压缩共存），下一步与 module-057 结论汇合：中文专用/更大 NLI 或针对性微调、两阶段 LLM 拆句 + 保守矛盾门控、飞轮数据积累后定向补样本。
+- **阈值扫描基建（分数只算一次）**：`max_score_to_verdict(max_score, high, low)` 纯函数 = 三态映射**唯一实现**（judge_factcheck 引用之，与生产 _judge_by_hhem 逐字同口径）；`scan_thresholds(per_question, highs, lows)` 25 组纯后处理（只消费 per_question.max_score，回归锁单测断言 judge 调用次数==样本数）；CLI `--scan-thresholds`（落库 **1 行** eval_type='factcheck_scan'，对照表内嵌 scores，module-057 rrf_k_scan 先例）+ `--threshold-high X --threshold-low Y`（覆盖 settings 即时生效）；`--fixture + --scan-thresholds` 显式报错。
+- **标注集 50 → 136（supported 57 / inferred 20 / unsupported 59）**：SUFFICIENCY 前 50+50（原 20+20）+ `eval/datasets/factcheck_real_samples.json` 新增（24 条 real_retrieval_pairs 真实 claim 转换 + 8 条构造"部分覆盖"）+ INFERRED_SAMPLES；按 question 去重（real_retrieval > constructed > sufficiency）强制 question 唯一；JSON 缺失明确 ValueError 不走降级。
+- **inferred 口径重写（标注指南写死）**：inferred = 至少一个核心断言被文档**直接**支持 + 至少一个未被覆盖且无冲突——"相关背景"不算支持（答非所问落 unsupported）。变更清单 11 条（INFERRED 8 改判 + real neutral 3 改判，每条 note 含核心断言拆解）。
+- **失败模式（61 条误判）**：supported 误杀 24（多文档中文分数压缩：RDB/AOF 0.334、B+树 0.061）/ inferred 混淆 15（HHEM 把部分覆盖判 supported 10 条：Kafka ISR 0.964、RocketMQ 0.924、Redis 哨兵 0.822 等 + 判 unsupported 5 条：MyBatis 0.059、JWT vs Session 0.071 等）/ unsupported 漏判 22（口径复核改判样本被 HHEM 打 0.79-0.90 高分：JWT 刷新 0.904、AOP 0.896——归因②实证）。
+- **eval_runs**：id=49（旧 50 集扫描）、id=50/51（新 136 集 0.65/0.35 重跑，数字一致确定性）、id=52（新 136 集扫描）；最优组合移动 0.65/0.35 → 0.65/0.40（阈值对标注集敏感，未写入生产）。

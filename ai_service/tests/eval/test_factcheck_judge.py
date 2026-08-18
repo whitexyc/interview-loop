@@ -18,6 +18,7 @@
 """
 import asyncio
 import json
+import sys
 import time
 from unittest import mock
 
@@ -475,16 +476,24 @@ class TestParseClaims:
 class TestGoldenFactcheck:
     """eval/golden_factcheck.py：数据集 / 启发式 / kappa / run_eval / 落库契约"""
 
-    def test_dataset_structure_50_three_classes(self):
+    def test_dataset_structure_100_three_classes(self):
+        """module-071 数据集扩充（50→136）：验收许可更新（原 50 条精确结构断言，
+        module-061/062 先例；plan §WP-B + AC-7 声明）"""
         data = golden_factcheck.build_factcheck_dataset()
-        assert len(data) == 50
+        assert len(data) >= 100
         counts = {c: 0 for c in golden_factcheck.FACTCHECK_CLASSES}
+        questions: set[str] = set()
         for item in data:
             assert item["question"].strip()
             assert item["documents"]
             assert item["label"] in golden_factcheck.FACTCHECK_CLASSES
+            assert item.get("keywords")  # fixture 启发式依赖
+            assert item.get("part") in ("sufficiency", "constructed", "real_retrieval")
+            assert item["question"] not in questions  # question 唯一
+            questions.add(item["question"])
             counts[item["label"]] += 1
-        assert counts == {"supported": 20, "inferred": 10, "unsupported": 20}
+        # module-071 实际类分布（支持 57 / inferred 20 / unsupported 59）
+        assert counts == {"supported": 57, "inferred": 20, "unsupported": 59}
 
     def test_dataset_borrows_from_sufficiency(self):
         data = golden_factcheck.build_factcheck_dataset()
@@ -493,6 +502,93 @@ class TestGoldenFactcheck:
         # inferred 为人工构造样例（含 note 说明部分覆盖性质）
         inferred = [d for d in data if d["label"] == "inferred"]
         assert all(d.get("note") for d in inferred)
+
+    def test_dataset_inferred_calibration_change_list(self):
+        """module-071 inferred 口径变更清单回归锁（AC-10 可审计，changelog §二清单钉死）：
+        ① INFERRED_SAMPLES 复核 = 保持 2 + 改判 8（具名）；② real neutral 改判 3 +
+        contradiction 2（part=real_retrieval）；③ 去重保留语义：联合索引 real supported
+        版接管构造版；④ part×label 交叉计数与 changelog §六记账（57/20/59）封闭"""
+        # ① INFERRED_SAMPLES 10 条：2 条保持 inferred + 8 条改判 unsupported
+        kept = {s["question"] for s in golden_factcheck.INFERRED_SAMPLES
+                if s["label"] == "inferred"}
+        changed = {s["question"] for s in golden_factcheck.INFERRED_SAMPLES
+                   if s["label"] == "unsupported"}
+        assert kept == {
+            "线程池的四种拒绝策略分别是什么？",
+            "Redis 哨兵触发故障转移的流程是怎样的？",
+        }
+        assert changed == {
+            "G1 垃圾收集器的调优参数怎么设置？",
+            "Kafka 生产者端怎么配置才能保证消息不丢失？",
+            "联合索引的最左前缀原则是什么？",
+            "Spring AOP 的代理失效场景有哪些？",
+            "Netty 是怎么解决粘包问题的？",
+            "JWT 的刷新机制是怎么设计的？",
+            "CAS 的 ABA 问题是怎么产生的？",
+            "HashMap 的扩容时机是怎么决定的？",
+        }
+        # ② real_retrieval unsupported 5 条 = neutral 改判 3 + contradiction 2（具名）
+        real_unsup = {s["question"] for s in
+                      golden_factcheck.load_factcheck_real_samples()
+                      if s["label"] == "unsupported"}
+        assert real_unsup == {
+            "张三的主要技术方向是什么？",
+            "张三的个人网站项目包含哪些技术栈？",
+            "什么是微服务架构？与单体架构相比有哪些优缺点？",
+            "类加载过程分为哪几个阶段？初始化阶段做了什么？",
+            "雪花算法生成的 ID 由哪几部分组成？",
+        }
+        # ③ 去重保留语义：联合索引构造 unsupported 版被 real supported 版接管
+        by_q = {d["question"]: d for d in golden_factcheck.build_factcheck_dataset()}
+        joint = by_q["联合索引的最左前缀原则是什么？"]
+        assert joint["label"] == "supported" and joint["part"] == "real_retrieval"
+        # ④ part×label 交叉计数 = changelog §六 记账（unsupported 47+2+7+3 / inferred
+        # 2+10+8 / supported 48+9）——Review 修复② docstring 数字的实证底座
+        cross: dict[tuple, int] = {}
+        for d in golden_factcheck.build_factcheck_dataset():
+            cross[(d["part"], d["label"])] = cross.get((d["part"], d["label"]), 0) + 1
+        assert cross == {
+            ("sufficiency", "supported"): 48,
+            ("sufficiency", "unsupported"): 47,
+            ("constructed", "inferred"): 10,
+            ("constructed", "unsupported"): 7,
+            ("real_retrieval", "supported"): 9,
+            ("real_retrieval", "inferred"): 10,
+            ("real_retrieval", "unsupported"): 5,
+        }
+        assert sum(cross.values()) == 136
+
+    def test_load_dataset_rejects_missing_json(self, monkeypatch):
+        """factcheck_real_samples.json 缺失 → ValueError（数据入库仓库不走降级）"""
+        monkeypatch.setattr(golden_factcheck, "FACTCHECK_REAL_SAMPLES_PATH",
+                            r"Z:\nonexistent\factcheck_real_samples.json")
+        with pytest.raises(ValueError, match="factcheck_real_samples.json 缺失"):
+            golden_factcheck.load_factcheck_real_samples()
+
+    def test_load_dataset_rejects_too_small(self, monkeypatch):
+        """样本 < 100 → ValueError（module-071 扩充后下限）"""
+        monkeypatch.setattr(golden_factcheck, "build_factcheck_dataset",
+                            lambda: [{"question": "q", "documents": [{"content": "x"}],
+                                      "label": "supported", "keywords": ["k"]}])
+        with pytest.raises(ValueError, match="需 ≥ 100 条"):
+            golden_factcheck.load_factcheck_dataset()
+
+    def test_load_dataset_rejects_duplicate_question(self, monkeypatch):
+        """question 重复 → ValueError（结构校验强制唯一）"""
+        small = [{"question": "q", "documents": [{"content": "x"}],
+                  "label": "supported", "keywords": ["k"]} for _ in range(101)]
+        monkeypatch.setattr(golden_factcheck, "build_factcheck_dataset", lambda: small)
+        with pytest.raises(ValueError, match="question 重复"):
+            golden_factcheck.load_factcheck_dataset()
+
+    def test_load_dataset_rejects_empty_keywords(self, monkeypatch):
+        """keywords 缺失 → ValueError（fixture 启发式 heuristic_judge 依赖）"""
+        items = [{"question": f"q{i}", "documents": [{"content": "x"}],
+                  "label": "supported", "keywords": ["k"]} for i in range(100)]
+        items[0]["keywords"] = []
+        monkeypatch.setattr(golden_factcheck, "build_factcheck_dataset", lambda: items)
+        with pytest.raises(ValueError, match="keywords 必填"):
+            golden_factcheck.load_factcheck_dataset()
 
     def test_heuristic_judge_three_states(self):
         doc_hit2 = [{"title": "t", "content": "G1 使用 Region 分区实现 MixedGC"}]
@@ -612,3 +708,154 @@ class TestGoldenFactcheck:
         assert "[fixture]" in out
         assert "不构成 ADR-0010 P1-④ 门槛判定" in out
         assert "达标" not in out
+
+
+class TestMaxScoreToVerdict:
+    """max_score_to_verdict 三态映射（module-071：唯一实现，与生产 _judge_by_hhem 逐字同口径）"""
+
+    def test_above_high_supported(self):
+        assert golden_factcheck.max_score_to_verdict(0.9, 0.7, 0.3) == "supported"
+
+    def test_equal_high_supported(self):
+        """==high（含等号）→ supported"""
+        assert golden_factcheck.max_score_to_verdict(0.7, 0.7, 0.3) == "supported"
+
+    def test_between_low_and_high_inferred(self):
+        assert golden_factcheck.max_score_to_verdict(0.5, 0.7, 0.3) == "inferred"
+
+    def test_equal_low_inferred(self):
+        """==low（含等号）→ inferred"""
+        assert golden_factcheck.max_score_to_verdict(0.3, 0.7, 0.3) == "inferred"
+
+    def test_below_low_unsupported(self):
+        assert golden_factcheck.max_score_to_verdict(0.1, 0.7, 0.3) == "unsupported"
+
+    def test_zero_score_unsupported(self):
+        assert golden_factcheck.max_score_to_verdict(0.0, 0.5, 0.2) == "unsupported"
+
+    def test_judge_factcheck_uses_pure_mapping(self, monkeypatch):
+        """judge_factcheck 引用 max_score_to_verdict：settings 覆盖即时生效（同口径）"""
+        async def run():
+            with mock.patch("rag.retrieval.factcheck_judge.hhem_judge.predict",
+                            new=mock.AsyncMock(return_value=[0.65])):
+                return await golden_factcheck.judge_factcheck("q", [{"content": "d"}])
+
+        verdict, score = asyncio.run(run())
+        assert verdict == "inferred"           # 默认 0.7/0.3：0.65 落 [0.3, 0.7) → inferred
+        assert score == 0.65
+        # --threshold-high 0.6 覆盖后：0.65 ≥ 0.6 → supported（judge 每次读 settings）
+        from src.config import settings
+        monkeypatch.setattr(settings, "verify_hhem_threshold_high", 0.6)
+        verdict2, _ = asyncio.run(run())
+        assert verdict2 == "supported"
+
+
+class TestScanThresholds:
+    """scan_thresholds 阈值网格扫描（纯后处理，HHEM 分数只算一次）"""
+
+    @staticmethod
+    def _per_question():
+        # 3 条 evaluated + 1 条 max_score=None（skipped 同口径不参与）
+        return [
+            {"question": "s", "label": "supported", "predicted": "inferred",
+             "max_score": 0.7},
+            {"question": "i", "label": "inferred", "predicted": "inferred",
+             "max_score": 0.65},
+            {"question": "u", "label": "unsupported", "predicted": "unsupported",
+             "max_score": 0.1},
+            {"question": "none", "label": "supported", "predicted": "unsupported",
+             "max_score": None},
+        ]
+
+    def test_full_grid_25_rows_and_sorted(self):
+        rows = golden_factcheck.scan_thresholds(self._per_question())
+        assert len(rows) == 25
+        kappas = [r["kappa_three_state"] for r in rows]
+        assert kappas == sorted(kappas, reverse=True)  # 按三态 kappa 降序
+
+    def test_best_combo_follows_written_rule(self):
+        """最优选择规则写死：三态 kappa 最高 → 二值 kappa 高者 → 贴近生产 0.7/0.3"""
+        rows = golden_factcheck.scan_thresholds(self._per_question())
+        best = rows[0]
+        # 0.7/0.65/0.1 在 (0.7, 0.4) 也全对（0.65 ≥ 0.4 → inferred）——同 kappa 并列
+        # 时取更贴近生产 0.7/0.3 者
+        assert best["high"] == 0.7 and best["low"] == 0.3
+        assert best["kappa_three_state"] == pytest.approx(1.0)
+        assert best["evaluated"] == 3          # max_score=None 的样本不参与
+
+    def test_no_extra_judge_calls_score_once(self):
+        """回归锁：run_eval 后扫描零额外 judge 调用（分数只算一次）"""
+        calls = {"n": 0}
+
+        async def _judge(question, documents):
+            calls["n"] += 1
+            return "supported", 0.9
+
+        dataset = [{"question": f"q{i}", "documents": [{"content": "x"}],
+                    "label": "supported", "category": "c"} for i in range(5)]
+        scores, per_question, skipped = asyncio.run(
+            golden_factcheck.run_eval(judge=_judge, dataset=dataset))
+        assert calls["n"] == 5                 # 每条样本恰好一次推理
+        rows = golden_factcheck.scan_thresholds(per_question)
+        assert calls["n"] == 5                 # 25 组阈值映射纯后处理零模型调用
+        assert len(rows) == 25
+        assert rows[0]["evaluated"] == 5
+
+    def test_empty_input(self):
+        assert golden_factcheck.scan_thresholds([]) == []
+
+    def test_all_none_scores_empty_table(self):
+        """全部 max_score=None（模型不可用）→ 无可评估样本 → []（不抛异常）"""
+        rows = golden_factcheck.scan_thresholds(
+            [{"question": "q", "label": "supported", "max_score": None}])
+        assert rows == []
+
+    def test_apply_threshold_overrides(self, monkeypatch):
+        """--threshold-high/low 覆盖 settings；None 不覆盖"""
+        from src.config import settings
+        monkeypatch.setattr(settings, "verify_hhem_threshold_high", 0.7)
+        monkeypatch.setattr(settings, "verify_hhem_threshold_low", 0.3)
+        golden_factcheck.apply_threshold_overrides(0.6, 0.2)
+        assert settings.verify_hhem_threshold_high == 0.6
+        assert settings.verify_hhem_threshold_low == 0.2
+        golden_factcheck.apply_threshold_overrides(None, None)
+        assert settings.verify_hhem_threshold_high == 0.6  # 不覆盖保持
+
+    def test_scan_cli_rejects_fixture(self, monkeypatch):
+        """--fixture + --scan-thresholds 显式报错（启发式判官无 max_score）"""
+        monkeypatch.setattr(sys, "argv",
+                            ["golden_factcheck", "--fixture", "--scan-thresholds"])
+        with pytest.raises(SystemExit):
+            asyncio.run(golden_factcheck.main())
+
+    def test_record_scan_run_contract(self, monkeypatch):
+        """扫描落库契约：eval_type='factcheck_scan' 单行，scores 含对照表 + best + 网格"""
+        captured = {}
+
+        async def _fake_save(eval_type, git_commit, config_snapshot, scores, per_question):
+            captured.update({"eval_type": eval_type, "scores": scores,
+                             "per_question": per_question})
+            return 7
+
+        async def _fake_config():
+            return {"verify_judge_model": "hhem"}
+
+        monkeypatch.setattr(golden_factcheck, "get_git_commit", lambda: "abc123def")
+        monkeypatch.setattr(golden_factcheck, "load_rag_config", _fake_config)
+        monkeypatch.setattr(golden_factcheck, "save_eval_run", _fake_save)
+
+        rows = [{"high": 0.65, "low": 0.35, "evaluated": 50,
+                 "kappa_three_state": 0.3711, "kappa_binary_supported_vs_rest": 0.3697,
+                 "accuracy": 0.6}]
+        best = rows[0]
+        commit, saved_id = asyncio.run(golden_factcheck.record_scan_run(
+            rows=rows, best=best, per_question=[{"question": "q", "max_score": 0.8}],
+            dataset_size=50, evaluated=50, skipped=0,
+            thresholds_used={"highs": [0.5], "lows": [0.2]}))
+        assert commit == "abc123def"
+        assert saved_id == 7
+        assert captured["eval_type"] == "factcheck_scan"
+        assert captured["scores"]["best"] == best
+        assert captured["scores"]["table"] == rows
+        assert captured["scores"]["thresholds_used"] == {"highs": [0.5], "lows": [0.2]}
+        assert captured["per_question"][0]["max_score"] == 0.8  # per_question 带 max_score
