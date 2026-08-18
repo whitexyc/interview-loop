@@ -19,9 +19,14 @@ Golden Multi-Turn 评测脚本 — 多轮追问对意图保持 + 检索提升（
         如实声明代理口径）
 
 评测只度量不接线:
-    本脚本不改变生产行为。真实模式对话改写用 eval-only 的 contextual_rewrite
-    （降级链 LLM + 10s 超时）；生产多轮路由走 router_agent.classify(query,
-    history)——本脚本直接调用生产路由测量。
+    本脚本不改变生产行为。真实模式对话改写用生产 contextual_rewrite
+    （module-072 起：rag/retrieval/query_rewrite.py 分诊式改写链的上下文
+    分支单一来源——triage + LLM 改写 + 保真门控，含 10s 超时；自包含
+    记 0 语义 = 改写失败/保真被拒/句子已自包含（triage precise）均算
+    失败）；生产多轮路由走 router_agent.classify(query, history)——本脚本
+    直接调用生产路由测量。query_rewrite_enabled 开启时 _classify 先走引擎
+    短路路由语义（分诊命中 FTS 术语且非规则词 → knowledge，engine.chat
+    同款确定性信号）。
 
 降级策略:
     - 对话改写失败/超时 → 该对按原 follow_up 参与意图/检索（自包含记 0），不中断
@@ -35,7 +40,9 @@ import sys
 
 from agent.router import RouterAgent
 from eval.golden.golden_retrieval import get_git_commit, load_rag_config, save_eval_run
+from rag.retrieval.query_rewrite import contextual_rewrite
 from rag.retrieval.retriever import hybrid_retriever
+from src.config import settings
 
 logging.basicConfig(
     level=logging.INFO,
@@ -129,40 +136,6 @@ def heuristic_intent(query: str) -> str:
     if RouterAgent._kb_terms(query):
         return "knowledge"
     return "casual_chat"
-
-
-async def contextual_rewrite(prev: str, follow_up: str) -> str | None:
-    """对话上下文化改写（eval-only，不接生产）：省略句补全成自包含 query
-
-    用现有降级链（LLMFactory fallback，temp 0.1，10s 超时）；失败/超时/无变化
-    → 返回 None（调用方回退原 follow_up，不中断）。生产改写是 module-063 的
-    分诊式改写（rag/retrieval/query_rewrite.py，喂路由+检索）。
-
-    Args:
-        prev: 上一轮完整问题
-        follow_up: 当前省略句
-
-    Returns:
-        改写后自包含 query；失败 → None
-    """
-    prompt = f"""你是技术知识库的检索助手。用户在多轮对话中说了省略句/指代句（如"为什么""那它呢"），
-请结合上一轮问题，把它改写成可独立检索的自包含问题。
-
-上一轮问题: {prev}
-当前省略句: {follow_up}
-
-改写后的自包含问题:"""
-    try:
-        from llm.client import LLMFactory
-        client = LLMFactory.get_client("fallback", temperature=0.1)
-        rewritten = await asyncio.wait_for(client.generate(prompt), timeout=10)
-    except Exception as e:
-        logger.warning("多轮对话改写失败，回退原句: %s", e)
-        return None
-    rewritten = (rewritten or "").strip()
-    if not rewritten or rewritten == follow_up:
-        return None
-    return rewritten
 
 
 def overlap_ratio(a_titles: list[str], b_titles: list[str]) -> float:
@@ -311,6 +284,10 @@ async def _eval_question(item: dict, top_k: int,
 async def _classify(query: str, history, fixture: bool):
     """路由封装：fixture 用启发式意图（不依赖 LLM/DB）；真实用生产 router
 
+    module-072（WP-C）：query_rewrite_enabled 开启且非 fixture 时先走引擎
+    短路路由语义（分诊命中 FTS 术语 precise 且非闲聊/实时规则词 → 短路
+    knowledge，engine.chat 同款确定性信号，reason 与生产逐字一致）。
+
     Args:
         query: 用户问题
         history: 对话历史（None = 单句）
@@ -323,6 +300,12 @@ async def _classify(query: str, history, fixture: bool):
         return {"intent": heuristic_intent(query), "confidence": 0.0,
                 "reason": "fixture 启发式意图"}
     from agent.router import router_agent
+    if settings.query_rewrite_enabled:
+        from rag.retrieval.query_rewrite import triage
+        if (await triage(query) == "precise"
+                and not router_agent._rule_hits(query)):
+            return {"intent": "knowledge", "confidence": 0.0,
+                    "reason": "分诊命中 FTS 术语，短路 knowledge"}
     return await router_agent.classify(query, history=history)
 
 
@@ -382,6 +365,10 @@ async def record_eval_run(scores: dict, per_question: list[dict]) -> tuple[str, 
     """
     commit = get_git_commit()
     config_snapshot = await load_rag_config()
+    # module-072（WP-C）：补运行时开关快照（rag_config 表无此键），使
+    # eval_runs 可回溯本次评估的两开关启用态（off/on 四跑可区分）
+    config_snapshot["query_rewrite_enabled"] = str(settings.query_rewrite_enabled)
+    config_snapshot["contextual_rewrite_enabled"] = str(settings.contextual_rewrite_enabled)
     saved_id = await save_eval_run(
         eval_type="multi_turn",
         git_commit=commit,

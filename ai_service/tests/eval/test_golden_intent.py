@@ -132,6 +132,69 @@ class TestRunEval:
         assert all(s["reason"].startswith("error:") for s in skipped)
 
 
+class TestRunEvalShortcut:
+    """module-072 WP-C：短路路由测量（query_rewrite_enabled 开启时的确定性信号）
+
+    precise AND NOT rule_hits → knowledge（engine.chat 同款），零 LLM。
+    per_question 打 reason 标记（与 engine.chat 字符串逐字一致）供过滤统计。
+    """
+
+    @staticmethod
+    def _dataset():
+        return [
+            {"query": "什么是G1？", "intent": "knowledge"},
+            {"query": "你好呀", "intent": "casual_chat"},
+            {"query": "现在几点了？", "intent": "realtime"},
+        ]
+
+    def test_shortcut_applied_and_statistics(self, monkeypatch):
+        from src.config import settings
+        from unittest import mock
+
+        monkeypatch.setattr(settings, "query_rewrite_enabled", True)
+
+        async def _clf(query):
+            return {"什么是G1？": "knowledge", "你好呀": "casual_chat", "现在几点了？": "realtime"}[query]
+
+        # 前两题分诊命中术语（precise 且非规则词 → 短路 knowledge）；
+        # "现在几点了？" 分诊 vague（不进短路，走 classify）
+        async def _fake_triage(query):
+            return "precise" if query != "现在几点了？" else "vague"
+
+        with mock.patch("rag.retrieval.query_rewrite.triage",
+                        new=mock.AsyncMock(side_effect=_fake_triage)):
+            with mock.patch.object(golden_intent.router_agent, "_rule_hits",
+                                   return_value=False):
+                scores, per_question, _ = asyncio.run(
+                    golden_intent.run_eval(classifier=_clf, dataset=self._dataset())
+                )
+
+        # "你好呀" 被短路误归 knowledge（casual 被术语句信号吞掉）→ 判对率 1/2，
+        # 短路统计如实记录（这正是 WP-C 要暴露的风险面）
+        assert scores["shortcut_fired"] == 2
+        assert scores["shortcut_correct"] == 1
+        assert scores["shortcut_accuracy"] == 0.5
+        fired = [q for q in per_question if "分诊命中 FTS 术语" in q.get("reason", "")]
+        assert len(fired) == 2
+        assert all(q["predicted"] == "knowledge" for q in fired)
+        # 非短路样本无 reason 标记，走 classify
+        normal = [q for q in per_question if "reason" not in q]
+        assert normal[0]["query"] == "现在几点了？"
+        assert normal[0]["predicted"] == "realtime"
+
+    def test_shortcut_disabled_by_default(self):
+        # 默认关闭（query_rewrite_enabled=False）→ 全走 classify，短路统计为空
+        async def _clf(query):
+            return "knowledge"
+
+        scores, per_question, _ = asyncio.run(
+            golden_intent.run_eval(classifier=_clf, dataset=self._dataset())
+        )
+        assert scores["shortcut_fired"] == 0
+        assert scores["shortcut_accuracy"] is None
+        assert all("reason" not in q for q in per_question)
+
+
 class TestRecordEvalRun:
     """eval_runs 落库契约（打桩，不依赖数据库）"""
 
@@ -165,8 +228,14 @@ class TestRecordEvalRun:
         assert captured["git_commit"] == "abc123def"
         # module-056 Review 修复：快照补运行时 L4 开关字段（rag_config 表无此键，
         # 测试环境 conftest 钉住 False → 如实记录 "False"）
+        # module-072（WP-C，plan 许可扩展）：快照补两开关字段（短路路由 off/on
+        # 四跑可区分；conftest 钉住 False → 如实记录 "False"）
         assert captured["config_snapshot"] == {
-            "top_k": "5", "intent_classifier_enabled": "False"}
+            "top_k": "5",
+            "intent_classifier_enabled": "False",
+            "query_rewrite_enabled": "False",
+            "contextual_rewrite_enabled": "False",
+        }
         assert captured["scores"]["accuracy"] == 0.9
 
     def test_save_failure_returns_zero(self, monkeypatch):

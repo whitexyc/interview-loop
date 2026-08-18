@@ -23,6 +23,8 @@ class RAGState(TypedDict):
     # === 输入 ===
     query: str
     history: list[dict]
+    tool_history: Optional[list]      # 工具轨迹信号（module-072 WP-B：agent 端点
+                                      # 持久化轨迹，可选；未设置时 classify 传 None）
 
     # === 意图 ===
     intent: str                    # knowledge | casual_chat | realtime

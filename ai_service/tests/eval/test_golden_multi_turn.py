@@ -170,3 +170,59 @@ class TestLoadDatasetValidation:
         monkeypatch.setattr(gmt, "MULTI_TURN_DATASET", bad * 12)
         with pytest.raises(ValueError):
             gmt.load_dataset()
+
+
+class TestRecordEvalRun:
+    """eval_runs 落库契约（打桩，不依赖数据库）——module-072 WP-C 快照两键"""
+
+    def test_eval_runs_contract_snapshot_two_switches(self, monkeypatch):
+        captured = {}
+
+        async def _fake_save(eval_type, git_commit, config_snapshot, scores, per_question):
+            captured.update({
+                "eval_type": eval_type,
+                "config_snapshot": config_snapshot,
+            })
+            return 42
+
+        async def _fake_config():
+            return {"top_k": "5"}
+
+        monkeypatch.setattr(gmt, "get_git_commit", lambda: "abc123def")
+        monkeypatch.setattr(gmt, "load_rag_config", _fake_config)
+        monkeypatch.setattr(gmt, "save_eval_run", _fake_save)
+
+        commit, saved_id = asyncio.run(gmt.record_eval_run(
+            scores={"count": 12}, per_question=[]))
+        assert commit == "abc123def"
+        assert saved_id == 42
+        assert captured["eval_type"] == "multi_turn"
+        # module-072（WP-C）：快照补两开关字段（短路路由 off/on 四跑可区分；
+        # 测试环境 conftest 钉住 contextual false、生产默认 query_rewrite false）
+        assert captured["config_snapshot"] == {
+            "top_k": "5",
+            "query_rewrite_enabled": "False",
+            "contextual_rewrite_enabled": "False",
+        }
+
+    def test_eval_runs_snapshot_reflects_runtime_switches(self, monkeypatch):
+        """开关运行时置位 → 快照如实记录（非恒 False）"""
+        from src.config import settings
+
+        captured = {}
+
+        async def _fake_save(eval_type, git_commit, config_snapshot, scores, per_question):
+            captured["config_snapshot"] = config_snapshot
+            return 42
+
+        async def _fake_config():
+            return {}
+
+        monkeypatch.setattr(gmt, "save_eval_run", _fake_save)
+        monkeypatch.setattr(gmt, "load_rag_config", _fake_config)
+        monkeypatch.setattr(settings, "query_rewrite_enabled", True)
+        monkeypatch.setattr(settings, "contextual_rewrite_enabled", True)
+
+        asyncio.run(gmt.record_eval_run(scores={}, per_question=[]))
+        assert captured["config_snapshot"]["query_rewrite_enabled"] == "True"
+        assert captured["config_snapshot"]["contextual_rewrite_enabled"] == "True"

@@ -24,7 +24,7 @@ import re
 import time
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from src.config import settings
 from src.database import async_session_factory
@@ -95,6 +95,66 @@ _L3_ABS_COSINE_THRESHOLD = 0.3   # 精排 top-1 绝对余弦低于该值 → 疑
 # 正则匹配"记住""记住这个""记住一下"前缀 + 内容（plan 3.2；用 (?:这个|一下)?
 # 分组替代规格中的字符类写法，语义一致且避免吞掉内容首字）
 _REMEMBER_RE = re.compile(r"记住(?:这个|一下)?\s*(.+?)\s*$")
+
+# ── WP-D 工具历史信号查询（module-072 WP-B）超时上限：不可得/超时 → None ──
+_TOOL_HISTORY_TIMEOUT = 2.0
+
+
+async def resolve_tool_history(identity: str) -> list[str] | None:
+    """查询最近一次 agent 端点请求的工具轨迹（module-072 WP-B 接线）
+
+    request_logs（module-058）按 identity + agent 端点取最近一次 trace_id →
+    tool_call_logs（module-066）按 trace_id 取工具名列表，作为 router
+    classify 的 tool_history 信号（module-063 WP-D 已实现消费方，但三处
+    classify 调用点恒传 None 不生效——本函数是其持久化轨迹来源）。查询
+    不可得/失败/超时（2s）→ None（fail-open，与现状"恒 None"行为逐字
+    一致）；空 identity 直接 None。SQL 全参数化（无拼接，无新注入面）。
+
+    Args:
+        identity: 请求身份标识（user_id 优先，否则 client_ip）
+
+    Returns:
+        工具名列表（按调用顺序）；无轨迹/失败/超时 → None
+    """
+    if not identity:
+        return None
+
+    async def _query() -> list[str] | None:
+        async with async_session_factory() as session:
+            row = (
+                await session.execute(
+                    text("""
+                        SELECT trace_id FROM request_logs
+                        WHERE identity = :identity
+                          AND endpoint IN ('agent', 'agent-lg')
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                    """),
+                    {"identity": identity},
+                )
+            ).first()
+            if row is None:
+                return None
+            rows = await session.execute(
+                text("""
+                    SELECT tool_name FROM tool_call_logs
+                    WHERE trace_id = :trace_id
+                    ORDER BY created_at ASC
+                """),
+                {"trace_id": row[0]},
+            )
+            names = [r[0] for r in rows]
+            return names or None
+
+    try:
+        return await asyncio.wait_for(_query(), timeout=_TOOL_HISTORY_TIMEOUT)
+    except asyncio.TimeoutError:
+        logger.warning("resolve_tool_history 查询超时 (%ds)，fail-open None: %s",
+                       _TOOL_HISTORY_TIMEOUT, identity[:50])
+        return None
+    except Exception as e:
+        logger.warning("resolve_tool_history 查询失败（fail-open None）: %s", e)
+        return None
 
 
 def _hyde_cache_key(query: str) -> str:
@@ -242,16 +302,24 @@ class RAGEngine:
             # 且非闲聊/实时规则词 → 短路 knowledge（可选优化，省一次 LLM
             # 路由调用）。
             _t0 = time.perf_counter()
+            # module-072（WP-B）：工具历史信号接线——三处 classify 调用点补传
+            # tool_history（query_rewrite 两分支；precise 短路分支不调 classify）。
+            # 查询不可得/失败/超时 → None（fail-open，与现状行为逐字一致）
+            tool_history = await resolve_tool_history(identity)
             current_query = request.query
             rewrite_round0: list[dict] | None = None
             rewrite_info: dict = {}
-            if settings.query_rewrite_enabled:
+            if settings.query_rewrite_enabled or settings.contextual_rewrite_enabled:
                 _rq_t0 = time.perf_counter()
                 current_query, rewrite_round0, rewrite_info = await query_rewrite.prepare(
                     request.query,
                     lambda q: asyncio.wait_for(
                         hybrid_retriever.retrieve(q, top_k=20), timeout=15,
                     ),
+                    # module-072（WP-A）：上下文改写开关开启时传对话历史
+                    #（prepare 取最近一条 user 消息作 prev，省略句补全）
+                    history=(request.history if settings.contextual_rewrite_enabled
+                             else None),
                 )
                 observability.timing("triage_rewrite", time.perf_counter() - _rq_t0)
                 if rewrite_info.get("mode") != "precise":
@@ -259,17 +327,22 @@ class RAGEngine:
                                 rewrite_info.get("mode"),
                                 rewrite_info.get("used_rewrite", "-"),
                                 request.query[:50])
-                if (rewrite_info.get("mode") == "precise"
+                # 短路只在 query_rewrite_enabled 下生效（module-063 WP-C 语义，
+                # 不随 contextual 开关扩散——两开关独立决策）
+                if (settings.query_rewrite_enabled
+                        and rewrite_info.get("mode") == "precise"
                         and not router_agent._rule_hits(request.query)):
                     # 分诊命中 FTS 术语（精确 query）→ 短路 knowledge
                     intent_result = {"intent": "knowledge", "confidence": 0.0,
                                      "reason": "分诊命中 FTS 术语，短路 knowledge"}
                 else:
                     intent_result = await router_agent.classify(
-                        current_query, history=request.history)
+                        current_query, history=request.history,
+                        tool_history=tool_history)
             else:
                 intent_result = await router_agent.classify(
-                    request.query, history=request.history)
+                    request.query, history=request.history,
+                    tool_history=tool_history)
             observability.timing("intent", time.perf_counter() - _t0)
             intent = intent_result.get("intent", "knowledge")
             intent_labels = {"knowledge": "知识库", "casual_chat": "闲聊", "realtime": "实时数据"}
@@ -694,7 +767,8 @@ class RAGEngine:
             logger.warning("HyDE 扩展失败，降级使用原始 query: %s", e)
             return query
 
-    async def _retrieve(self, query: str, top_k: int = 30, min_score: float = 0.6) -> list[dict]:
+    async def _retrieve(self, query: str, top_k: int = 30, min_score: float = 0.6,
+                        history: list | None = None) -> list[dict]:
         """多次检索 + 反思改写（最多 3 轮），供流式端点复用
 
         流程：
@@ -715,6 +789,8 @@ class RAGEngine:
             query: 初始查询
             top_k: 每次检索的候选数
             min_score: 低分过滤阈值
+            history: 对话历史（module-072 WP-A：上下文改写开启时透传给
+                prepare_query 取 prev；默认 None 向后兼容零回归）
         """
         from agent.reflector import reflector
 
@@ -728,7 +804,14 @@ class RAGEngine:
         # ── Redis 缓存检查 ──
         # key 纳入 top_k/min_score：不同参数生成不同 key，避免错误复用缓存
         # module-058（WP-C）：缓存命中/未命中计数（request_logs 可观测）
+        # module-072（WP-A）：上下文改写开启且带历史时，prev 参与改写结果——
+        # 同 query 不同 prev 会改写出不同检索句，key 必须含 prev 哈希防缓存
+        # 串话题（默认关闭时零变化）
         cache_key = _retrieve_cache_key(query, top_k, min_score)
+        if settings.contextual_rewrite_enabled and history:
+            prev = query_rewrite.extract_prev(history)
+            if prev:
+                cache_key = f"{cache_key}:ctx:{hashlib.sha256(prev.encode()).hexdigest()[:12]}"
         cached = await cache.get(cache_key)
         if cached is not None:
             observability.record_cache(hit=True)
@@ -751,8 +834,10 @@ class RAGEngine:
         # 已有向量+图并行与 HyDE 扩展，叠加成本翻倍且语义重叠）；改写通过
         # 保真后作为 HyDE 扩展的基础 query（改写与 HyDE 正交），失败一律
         # 回退原 query（零回归）
-        if settings.query_rewrite_enabled:
-            current_query, _rewrite_info = await query_rewrite.prepare_query(query)
+        if settings.query_rewrite_enabled or settings.contextual_rewrite_enabled:
+            current_query, _rewrite_info = await query_rewrite.prepare_query(
+                query, history=(history if settings.contextual_rewrite_enabled
+                                 else None))
             if _rewrite_info.get("mode") != "precise":
                 logger.info("Query 改写(流式): mode=%s, query=%s",
                             _rewrite_info.get("mode"), query[:50])

@@ -24,7 +24,7 @@ from src.identity import parse_jwt, resolve_identity
 from src import observability
 from src.verify_tasks import submit_verify_task, get_verify_task
 from mcp_server import mcp as mcp_server, mcp_http_lifespan
-from rag.engine import rag_engine
+from rag.engine import rag_engine, resolve_tool_history
 from rag.schemas import (
     SearchRequest, SearchResponse, ChatRequest, ChatResponse,
     MemorySaveRequest, MemoryRecallRequest, FeedbackRequest,
@@ -518,8 +518,11 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
             from agent.router import router_agent
             # module-063（WP-A，纪律 §八.2）：流式检索链也接 history——漏一个
             # 就是"chat 正常、stream 回归"（空 history 零回归）
+            # module-072（WP-B）：流式路径 classify 补传 tool_history（持久化
+            # 工具轨迹，查询不可得/失败 → None fail-open）
             intent_result = await router_agent.classify(
-                request.query, history=request.history)
+                request.query, history=request.history,
+                tool_history=await resolve_tool_history(identity))
             intent = intent_result.get("intent", "knowledge")
             observability.timing("intent", _t() - t0)
             intent_labels = {"knowledge": "知识库", "casual_chat": "闲聊", "realtime": "实时数据"}
@@ -542,7 +545,10 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
 
             # ====== Step 2: 检索 ======
             t0 = _t()
-            docs = await rag_engine._retrieve(request.query, top_k=20)
+            # module-072（WP-A）：流式路径透传对话历史给上下文改写
+            #（contextual_rewrite_enabled 关闭时 history 参数零影响）
+            docs = await rag_engine._retrieve(request.query, top_k=20,
+                                              history=request.history)
             retrieval_count = len(docs)
             observability.timing("retrieve", _t() - t0)
             # module-045 WP3: L3 标记接入流式路径（对齐非流式 engine.chat）——

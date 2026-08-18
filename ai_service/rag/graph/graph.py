@@ -86,8 +86,11 @@ async def classify_intent(state: RAGState) -> dict:
     t0 = _t()
     # module-063（WP-A）：LangGraph 编排路径同步接 history（state 含 history，
     # 空 history 零回归）
+    # module-072（WP-B）：classify_intent 补传 tool_history（RAGState 可选字段，
+    # 未设置 → None；LangGraph 休眠管线无生产端点调用，接线为一致性 + 单测对齐）
     result = await router_agent.classify(
-        state["query"], history=state.get("history") or [])
+        state["query"], history=state.get("history") or [],
+        tool_history=state.get("tool_history"))
     intent = result.get("intent", "knowledge")
     labels = {"knowledge": "知识库", "casual_chat": "闲聊", "realtime": "实时数据"}
 

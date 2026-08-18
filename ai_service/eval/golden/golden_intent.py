@@ -252,7 +252,17 @@ async def run_eval(classifier=None, dataset=None) -> tuple[dict, list[dict], lis
     for i, item in enumerate(items):
         query = item["query"]
         try:
-            predicted = await classify(query)
+            # module-072（WP-C）：短路路由测量——query_rewrite_enabled 开启时
+            # 引擎在 classify 前先走短路（分诊命中 FTS 术语且非规则词 →
+            # knowledge，engine.chat 同款确定性信号，零 LLM）。短路样本在
+            # per_question 打 reason 标记（与 engine.chat 字符串逐字一致），
+            # 供确定性后处理过滤算判对率（预期 100%）。
+            shortcut = False
+            if settings.query_rewrite_enabled:
+                from rag.retrieval.query_rewrite import triage
+                shortcut = (await triage(query) == "precise"
+                            and not router_agent._rule_hits(query))
+            predicted = "knowledge" if shortcut else await classify(query)
         except Exception as e:
             logger.error("[%d/%d] 分类失败: %s — %s", i + 1, len(items), query[:40], e)
             skipped.append({"query": query, "label": item["intent"], "reason": f"error: {e}"})
@@ -262,12 +272,18 @@ async def run_eval(classifier=None, dataset=None) -> tuple[dict, list[dict], lis
             "label": item["intent"],
             "predicted": predicted,
             "correct": predicted == item["intent"],
+            **({"reason": "分诊命中 FTS 术语，短路 knowledge"} if shortcut else {}),
         })
 
     conf = compute_confusion_matrix(
         [q["label"] for q in per_question],
         [q["predicted"] for q in per_question],
     )
+    # 短路样本统计（module-072 WP-C）：precise AND NOT rule_hits → knowledge
+    # 是纯确定性规则，判对率预期 100%（短路样本 = 非闲聊/实时特征的术语句）
+    shortcut_samples = [q for q in per_question
+                        if "分诊命中 FTS 术语" in q.get("reason", "")]
+    shortcut_fired = len(shortcut_samples)
     scores = {
         "dataset_size": len(items),
         "evaluated": len(per_question),
@@ -276,6 +292,11 @@ async def run_eval(classifier=None, dataset=None) -> tuple[dict, list[dict], lis
         "confusion_matrix": conf["matrix"],
         "per_class": conf["per_class"],
         "classes": conf["classes"],
+        "shortcut_fired": shortcut_fired,
+        "shortcut_correct": sum(1 for q in shortcut_samples if q["correct"]),
+        "shortcut_accuracy": round(
+            sum(1 for q in shortcut_samples if q["correct"]) / shortcut_fired, 4
+        ) if shortcut_fired else None,
     }
     return scores, per_question, skipped
 
@@ -298,6 +319,11 @@ async def record_eval_run(scores: dict, per_question: list[dict],
     # 使 eval_runs 可回溯本次评估的 L4 启用态——--compare-classifier 的
     # LLM 侧钉住 false 时此处如实记录 false
     config_snapshot["intent_classifier_enabled"] = str(settings.intent_classifier_enabled)
+    # module-072（WP-C）：补两开关运行时快照（rag_config 表无此键），使
+    # eval_runs 可回溯本次评估的 query_rewrite_enabled / contextual_rewrite_enabled
+    # 启用态（短路路由 off/on 四跑可区分）
+    config_snapshot["query_rewrite_enabled"] = str(settings.query_rewrite_enabled)
+    config_snapshot["contextual_rewrite_enabled"] = str(settings.contextual_rewrite_enabled)
     saved_id = await save_eval_run(
         eval_type=eval_type,
         git_commit=commit,
@@ -451,6 +477,11 @@ def print_report(scores: dict, per_question: list[dict], skipped: list[dict], sa
     print(f"Dataset: {scores['dataset_size']} queries | Evaluated: {scores['evaluated']} | Skipped: {scores['skipped']}")
     print("-" * 60)
     print(f"Accuracy: {scores['accuracy']:.4f}")
+    if scores.get("shortcut_fired"):
+        print(f"短路路由（module-072 WP-C，确定性零 LLM）: 触发 "
+              f"{scores['shortcut_fired']} 条，判对 "
+              f"{scores['shortcut_correct']}/{scores['shortcut_fired']} "
+              f"（判对率 {scores['shortcut_accuracy']:.4f}）")
     print("-" * 60)
     print("Confusion Matrix (row=label, col=predicted):")
     print(f"{'':<12}" + "".join(f"{c[:10]:>12}" for c in classes))

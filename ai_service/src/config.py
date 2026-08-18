@@ -247,10 +247,29 @@ class Settings(BaseSettings):
     # query 走 LLM 改写 + 保真预检（改写 vs 原 query 余弦 < 阈值 → 回退原话，
     # 省一次检索）+ 并行检索择优（改写检索 top-1 绝对余弦 > 原检索 → 用改写
     # 结果，否则回退原结果）。改写链路任何一环失败 → 回退原 query（零回归）。
-    # 默认关闭（与 intent_classifier_enabled 同款 opt-in 模式，保证零回归）；
-    # 开启方式：PW_QUERY_REWRITE_ENABLED=true
-    query_rewrite_enabled: bool = False
+    # 回退开关：PW_QUERY_REWRITE_ENABLED=false。
+    # **默认值决策（module-072 WP-C 四跑实测达标，2026-08-19）**：golden_intent
+    # Accuracy on 1.0000 ≥ off 1.0000 − 0.01 + 短路触发 50/100 判对率 100% +
+    # golden_multi_turn 意图保持 on 1.0 ≥ off 1.0 − 0.01 / 检索 +0.60 ≥ +0.60 − 0.01
+    # → 全达标改默认 true（短路路由零误杀省 LLM 调用；短路 = 分诊 precise 且非
+    # 规则词 → knowledge，纯确定性零 LLM）。测试环境 conftest autouse 钉住 false。
+    query_rewrite_enabled: bool = True
     rewrite_fidelity_threshold: float = 0.6  # 保真预检阈值：改写与原 query 余弦低于该值 → 回退原话
+
+    # 上下文改写（module-072，PW_CONTEXTUAL_REWRITE_ENABLED）：
+    # true 时 engine 给分诊式改写链传对话历史（history），当前句为省略句/
+    # 指代句（分诊 vague）时结合上一轮问题改写为自包含 query，修复多轮
+    # "为什么"检索落空（04 文档 #1）。复用 module-049 保真预检，锚点 =
+    # f"{prev} {query}" 拼接双锚（裸省略句作锚无信息量会系统性误杀）。
+    # 与 query_rewrite_enabled 独立生效（prepare 调用条件 OR，两开关独立
+    # 评测独立决策——本开关是检索侧增益，短路路由是路由侧成本收益）。
+    # 回退开关：PW_CONTEXTUAL_REWRITE_ENABLED=false。
+    # **默认值决策（module-072 WP-A 接入前后对比，2026-08-19）**：意图保持
+    # 12/12 = 接入前不降 + 检索提升 +0.60 ≥ 接入前 +0.4363 + vague 句改写
+    # 能力 0/1 → 1/1（"为什么"检索 0.00→0.60 实测修复）→ 达标改默认 true。
+    # self_contained 全量 0.0833 系 triage-precise 度量口径（11/12 含术语自
+    # 包含句不改写，plan 实现要点 4/5 已预言；意图/检索零回归），详见 changelog。
+    contextual_rewrite_enabled: bool = True
 
     # 答案验证裁判（module-051 / ADR-0010 P0-②）：
     # verify_answer 的 verdict 判定模型——"hhem"（默认）：LLM 拆句 + HHEM-2.1-Open

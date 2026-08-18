@@ -193,3 +193,19 @@ def default_memory_evolution2_disabled(monkeypatch):
     monkeypatch.setattr(settings, "memory_type_mode", "none")
     monkeypatch.setattr(settings, "memory_cold_decay_enabled", False)
     monkeypatch.setattr(settings, "memory_conflict_judge", "nli")
+
+
+@pytest.fixture(autouse=True)
+def default_rewrite_switches_disabled(monkeypatch):
+    """测试环境统一钉住两改写开关=关闭（module-072，对齐 056/058 模式）
+
+    module-072 WP-C 四跑达标后两开关生产默认均为 true（PW_QUERY_REWRITE_
+    ENABLED / PW_CONTEXTUAL_REWRITE_ENABLED），存量引擎测试以改写前行为为
+    准——钉住 false 保证存量测试不触发分诊改写/历史透传/真实 LLM 调用
+    （hermetic）；新测试（test_query_rewrite_history.py 等）体内显式
+    setattr True + mock 验证各开关行为。
+    """
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "query_rewrite_enabled", False)
+    monkeypatch.setattr(settings, "contextual_rewrite_enabled", False)
