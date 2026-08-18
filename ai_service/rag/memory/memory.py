@@ -257,6 +257,37 @@ def _date_str(value) -> str | None:
     return s[:10] if len(s) >= 10 else None
 
 
+def dual_verdict(nli_v: str | None, clf_v: str | None) -> str | None:
+    """双判共识（module-070）：nli + clf 双裁判 → 最终矛盾判定
+
+    决策表（本模块唯一行为真源，生产 _judge_conflict 与 eval dual_judge
+    均引用本纯函数，防语义漂移）：
+      - 双方都出 verdict：双 contradiction → "contradiction"（双确认才标
+        superseded，Precision 极保守——冤枉=误标 superseded=用户记忆消失）；
+        单 contradiction → "conflict_hint"（新旧并存，不标 superseded）；
+        双方非矛盾 → nli 标签（entailment/neutral，追加拼接旧行为）
+      - 一方 None（不可用/超时/异常）：返回另一方单判结果——clf 缺失 →
+        nli 单判 = 现状 judge="nli" 零回归；nli 不可用 → clf 单判 = 新增对称回退
+      - 双方 None → None（上层追加，旧行为）
+
+    Args:
+        nli_v: mDeBERTa 三分类标签或 None
+        clf_v: bge-m3+LR 二分类标签或 None
+
+    Returns:
+        "contradiction" / "conflict_hint" / "entailment" / "neutral" / None
+    """
+    if nli_v is None:
+        return clf_v
+    if clf_v is None:
+        return nli_v
+    if nli_v == "contradiction" and clf_v == "contradiction":
+        return "contradiction"
+    if nli_v == "contradiction" or clf_v == "contradiction":
+        return "conflict_hint"
+    return nli_v
+
+
 class MemoryService:
     """长期/短期记忆服务（跨会话记忆沉淀）
 
@@ -473,6 +504,8 @@ class MemoryService:
             可审计回溯，Zep 模式），返回 None 由 save 按**正常新增**入库新内容
             （不拼接共存——"讨厌咖啡"不再与"喜欢咖啡"拼接让 LLM 猜哪句是新）
           - entailment/neutral → 保持现行为（追加拼接 content）
+          - conflict_hint（module-070 双判不一致，单裁判判矛盾）→ 追加拼接，
+            不标 superseded（新旧并存，保守不冤枉）
           - NLI 不可用（None）/超时 → 保持现行为（追加，零回归）
 
         事务口径声明：superseded 标记与新增分两步（_merge_duplicate 标记提交
@@ -522,6 +555,11 @@ class MemoryService:
                             "记忆冲突消解: 旧记忆 SUPERSEDED(id=%d, title=%s)，"
                             "新内容按正常新增", parent.id, parent.title)
                         return None
+                    elif verdict == "conflict_hint":
+                        # module-070 双判不一致：单裁判判矛盾 → 新旧并存（追加
+                        # 拼接），不标 SUPERSEDED（冤枉代价高，保守不标）
+                        logger.info("记忆冲突提示（双判不一致）: 新旧并存，不标 SUPERSEDED (id=%d)",
+                                    parent.id)
 
                 if content not in parent.content:
                     parent.content = f"{parent.content}\n{content}"
@@ -544,6 +582,10 @@ class MemoryService:
           clf：bge-m3+LR 二分类（自建 100+ 案例训练，返回 "contradiction"/
                "non_conflict"；Precision≥0.8 达标后启用）；clf 不可用/异常 → 回退 NLI
           nli：module-061 mDeBERTa NLI 三分类（entailment/neutral/contradiction）
+          dual（module-070 双判共识）：clf 先行（本地嵌入+LR 便宜，load 失败可
+               早短路）→ nli 次行 → dual_verdict 共识（双 contradiction →
+               "contradiction"；单 contradiction → "conflict_hint" 新旧并存；
+               一方不可用 → 另一方单判对称回退；双不可用 → None）
         返回 "contradiction"（矛盾）或其它标签/None（非矛盾 → 上层保持追加拼接，
         零回归）。任何异常/None → 返回 None。导入放函数内避免模块顶层依赖
         （延迟加载哲学）。
@@ -553,9 +595,29 @@ class MemoryService:
             hypothesis: 新记忆内容
 
         Returns:
-            "contradiction"（矛盾）/"non_conflict"（clf）/"entailment"/"neutral"
-            （nli）；不可用 → None
+            "contradiction"（矛盾）/"conflict_hint"（双判不一致，新旧并存）/
+            "non_conflict"（clf）/"entailment"/"neutral"（nli）；不可用 → None
         """
+        if settings.memory_conflict_judge == "dual":
+            # module-070 双判共识：clf 先行（load 幂等，失败可早短路不白等 nli）
+            clf_v = None
+            try:
+                from rag.memory.memory_conflict_clf import memory_conflict_clf
+                if not await memory_conflict_clf.load():
+                    logger.warning("CLF 矛盾模型缺失，走 NLI 单判")
+                else:
+                    clf_v = await memory_conflict_clf.predict(premise, hypothesis)
+                    if clf_v is None:
+                        logger.warning("CLF 矛盾判定不可用（None），走 NLI 单判")
+            except Exception as e:
+                logger.warning("CLF 矛盾判定异常，走 NLI 单判: %s", e)
+            try:
+                from rag.memory.nli_judge import nli_judge
+                nli_v = await nli_judge.predict(premise, hypothesis)
+            except Exception as e:
+                logger.warning("NLI 冲突判定异常，降级旧行为: %s", e)
+                nli_v = None
+            return dual_verdict(nli_v, clf_v)
         if settings.memory_conflict_judge == "clf":
             try:
                 from rag.memory.memory_conflict_clf import memory_conflict_clf

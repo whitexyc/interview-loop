@@ -256,3 +256,13 @@
 - **预算按阶段（max_agent_tools 语义细分化）**：总预算默认 4→5 = 检索阶段 ≤3（`agent_retrieval_budget`）+ 生成阶段 ≤2（`agent_generation_budget`）兜底和——检索 3 轮覆盖 1-2 次检索 + 记忆/实体，生成 2 轮留一次 re_search 补检余量。截断点 = `min(总剩余, 阶段剩余)`，**仅 tool_phase_split=true 生效**（false 回退纯总预算存量行为逐字）；总预算仍为硬上限（PW_MAX_AGENT_TOOLS 兼容，旧值 4 时阶段预算让位）。`ctx.phase_count` 按**执行时阶段**计数（切 generation 前执行的全部算检索阶段）。langgraph 版新增 `phase_exhausted` 路由标记（阶段额度耗尽时走 fallback，防回 llm_call 后 allowed 恒空死循环）。
 - **空结果标记字符串耦合（已知边界）**："（无检索结果）"/"（无相关历史记忆）"硬编码于 react.py `_EMPTY_RESULT_MARKERS`，与 tool_registry.py 文案耦合——改文案判定失效；彻底解耦需工具层结构化信号（红线不碰 tool_registry），backlog。
 - **066 评测重跑（2026-08-17 补录）**：agent_eval_runs **id=3**（--sample 10 --pass_k 3，默认配置 max_agent_tools=5）：**pass^1=0.0（0/10）未提升如实记录**——结构性修复已生效（单测 14 项全绿 + 真实轨迹呈"检索 2 + 生成阶段 2"阶段截断形态：第 1 轮命中切 generation 后第 2 轮按生成阶段计数截断，对比 066 首跑"4 轮全检索"），但 **deepseek 行为性残余**：生成阶段 schema（GENERATION_4）下仍持续输出 search_*/extract_entities 调用（`_SYSTEM_PROMPT` 全量列出 10 工具名 + 执行层不校验 schema 暴露（at-002 现象））→ generate_answer 从未入轨迹 → 覆盖规则失败（工具选错×8/工具漏调×1/答案缺要点×1；at-303 realtime 1/1→0/1 系 LLM 答案方差）。残余问题入 backlog：执行层校验 schema 暴露 / 提示词与阶段 schema 对齐 / 生成阶段不调生成工具强制兜底。
+
+## 双判共识领域（2026-08-18 module-070 追加，只增不删）
+
+- **双判共识（用户 2026-08-18 决策）**：两个裁判的数字都不可信（nli 1.0000 Precision 是"窄而准"假象、clf 是人造分布数字）→ **不选单一裁判**，改 nli + clf 双确认 contradiction 才标 superseded（AND 共识，Precision 极保守——冤枉=误标 superseded=用户记忆从召回面消失，代价高）；单判 contradiction → `conflict_hint`（新旧并存，不标 superseded）。
+- **`dual_verdict(nli_v, clf_v)` 纯函数（共识唯一真源）**：双 contradiction → "contradiction"；单 contradiction → "conflict_hint"；双方非矛盾 → nli 标签；一方 None → 另一方单判（clf 缺失→nli 单判=现状零回归；nli 不可用→clf 单判=新增对称回退）；双 None → None（上层追加）。生产 `_judge_conflict` dual 分支与 eval `dual_judge` 均引用之（防语义漂移）。
+- **降级链**：clf 先行（本地嵌入+LR 便宜，load 失败早短路）→ nli 次行（20s 超时内建）→ `dual_verdict`；clf 模型缺失环境 dual 自动 = judge="nli" 现状行为（fail-open 零回归，新环境无需先训练 clf 也可安全切 dual）。
+- **默认值决策（70 条真实跑分，eval_runs id=46/47/48）**：dual Precision **0.9412**（fp=1 三方案最少）> nli 0.9167（30 条口径 1.0 假象证实，fp=2）> clf 0.8158（人造分布缩水，fp=7 最贵失败模式）；clf Recall 最高 0.775（擦线 P 0.8 但 fp 最多）；**`PW_MEMORY_CONFLICT_JUDGE` 默认 `dual`**（nli/clf 一键切换保留）。dual Recall 0.4 为 AND 共识数学性质（≤ min 单判），漏判 = 无害降级（拼接共存）。
+- **conflict_hint 评测口径**：`run_eval` VERDICTS 校验拒绝 "conflict_hint" → `dual_judge` 内映射 neutral（contradiction P/R 主指标等价，accuracy_3class 参考口径失真如实声明）；eval_runs 三方案用 scores["judge"] 字段区分（对齐 memory_type eval "model" 字段先例）。
+- **评测集 70 条（30→70）**：40 条新增全部基于用户真实信息派生（真实分布打底）；4 条**语义边界陷阱**（scenario=边界：计划 vs 事实 / 想法 vs 结果 / "不买"vs"不喝" / 场景限定并存，verdict=neutral 用户已确认不可改）；1 条措辞去重（"用户喜欢摄影"与训练集 premise 精确重叠破坏零重叠不变式 → "用户平时喜欢摄影"，verdict 不变）。
+- **`_merge_duplicate` 判定逻辑零改动**：仅 `verdict == "contradiction"` 触发 superseded；"conflict_hint" 自然落入追加分支（+info 日志"记忆冲突提示（双判不一致）"）。

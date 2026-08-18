@@ -733,6 +733,189 @@ class TestJudgeConflictDispatch:
         clf_predict.assert_not_awaited()
 
 
+class TestJudgeConflictDual:
+    """_judge_conflict 双判共识（module-070）：dual_verdict 决策表 + 对称回退"""
+
+    def test_judge_dual_both_contradiction(self):
+        async def run():
+            settings.memory_conflict_judge = "dual"
+            try:
+                with mock.patch("rag.memory.memory_conflict_clf.memory_conflict_clf.load",
+                                new=mock.AsyncMock(return_value=True)):
+                    with mock.patch("rag.memory.memory_conflict_clf.memory_conflict_clf.predict",
+                                    new=mock.AsyncMock(return_value="contradiction")) as clf_predict:
+                        with mock.patch("rag.memory.nli_judge.nli_judge.predict",
+                                        new=mock.AsyncMock(return_value="contradiction")) as nli_predict:
+                            result = await memory_service._judge_conflict("旧", "新")
+                            return result, clf_predict, nli_predict
+            finally:
+                settings.memory_conflict_judge = "nli"
+        result, clf_predict, nli_predict = asyncio.run(run())
+        assert result == "contradiction"          # 双确认才标 superseded
+        clf_predict.assert_awaited_once_with("旧", "新")
+        nli_predict.assert_awaited_once_with("旧", "新")
+
+    def test_judge_dual_nli_contradiction_clf_non_conflict(self):
+        async def run():
+            settings.memory_conflict_judge = "dual"
+            try:
+                with mock.patch("rag.memory.memory_conflict_clf.memory_conflict_clf.load",
+                                new=mock.AsyncMock(return_value=True)):
+                    with mock.patch("rag.memory.memory_conflict_clf.memory_conflict_clf.predict",
+                                    new=mock.AsyncMock(return_value="non_conflict")):
+                        with mock.patch("rag.memory.nli_judge.nli_judge.predict",
+                                        new=mock.AsyncMock(return_value="contradiction")):
+                            return await memory_service._judge_conflict("旧", "新")
+            finally:
+                settings.memory_conflict_judge = "nli"
+        assert asyncio.run(run()) == "conflict_hint"   # 单判矛盾 → 新旧并存
+
+    def test_judge_dual_clf_contradiction_nli_neutral(self):
+        async def run():
+            settings.memory_conflict_judge = "dual"
+            try:
+                with mock.patch("rag.memory.memory_conflict_clf.memory_conflict_clf.load",
+                                new=mock.AsyncMock(return_value=True)):
+                    with mock.patch("rag.memory.memory_conflict_clf.memory_conflict_clf.predict",
+                                    new=mock.AsyncMock(return_value="contradiction")):
+                        with mock.patch("rag.memory.nli_judge.nli_judge.predict",
+                                        new=mock.AsyncMock(return_value="neutral")):
+                            return await memory_service._judge_conflict("旧", "新")
+            finally:
+                settings.memory_conflict_judge = "nli"
+        assert asyncio.run(run()) == "conflict_hint"   # 单判矛盾（反方向）→ 并存
+
+    def test_judge_dual_both_non_conflict_returns_nli_label(self):
+        async def run():
+            settings.memory_conflict_judge = "dual"
+            try:
+                with mock.patch("rag.memory.memory_conflict_clf.memory_conflict_clf.load",
+                                new=mock.AsyncMock(return_value=True)):
+                    with mock.patch("rag.memory.memory_conflict_clf.memory_conflict_clf.predict",
+                                    new=mock.AsyncMock(return_value="non_conflict")):
+                        with mock.patch("rag.memory.nli_judge.nli_judge.predict",
+                                        new=mock.AsyncMock(return_value="entailment")):
+                            return await memory_service._judge_conflict("旧", "新")
+            finally:
+                settings.memory_conflict_judge = "nli"
+        assert asyncio.run(run()) == "entailment"      # 双方非矛盾 → nli 标签
+
+    def test_judge_dual_clf_model_missing_uses_nli(self):
+        async def run():
+            settings.memory_conflict_judge = "dual"
+            try:
+                with mock.patch("rag.memory.memory_conflict_clf.memory_conflict_clf.load",
+                                new=mock.AsyncMock(return_value=False)):
+                    with mock.patch("rag.memory.memory_conflict_clf.memory_conflict_clf.predict",
+                                    new=mock.AsyncMock()) as clf_predict:
+                        with mock.patch("rag.memory.nli_judge.nli_judge.predict",
+                                        new=mock.AsyncMock(return_value="contradiction")):
+                            result = await memory_service._judge_conflict("旧", "新")
+                            return result, clf_predict
+            finally:
+                settings.memory_conflict_judge = "nli"
+        result, clf_predict = asyncio.run(run())
+        assert result == "contradiction"              # clf 缺失 → nli 单判 = 现状零回归
+        clf_predict.assert_not_awaited()
+
+    def test_judge_dual_clf_predict_exception_uses_nli(self):
+        async def run():
+            settings.memory_conflict_judge = "dual"
+            try:
+                with mock.patch("rag.memory.memory_conflict_clf.memory_conflict_clf.load",
+                                new=mock.AsyncMock(return_value=True)):
+                    with mock.patch("rag.memory.memory_conflict_clf.memory_conflict_clf.predict",
+                                    new=mock.AsyncMock(side_effect=RuntimeError("clf down"))):
+                        with mock.patch("rag.memory.nli_judge.nli_judge.predict",
+                                        new=mock.AsyncMock(return_value="neutral")):
+                            return await memory_service._judge_conflict("旧", "新")
+            finally:
+                settings.memory_conflict_judge = "nli"
+        assert asyncio.run(run()) == "neutral"        # clf 异常 → nli 单判
+
+    def test_judge_dual_nli_none_uses_clf(self):
+        async def run():
+            settings.memory_conflict_judge = "dual"
+            try:
+                with mock.patch("rag.memory.memory_conflict_clf.memory_conflict_clf.load",
+                                new=mock.AsyncMock(return_value=True)):
+                    with mock.patch("rag.memory.memory_conflict_clf.memory_conflict_clf.predict",
+                                    new=mock.AsyncMock(return_value="contradiction")):
+                        with mock.patch("rag.memory.nli_judge.nli_judge.predict",
+                                        new=mock.AsyncMock(return_value=None)):
+                            return await memory_service._judge_conflict("旧", "新")
+            finally:
+                settings.memory_conflict_judge = "nli"
+        assert asyncio.run(run()) == "contradiction"  # nli 不可用 → clf 单判（新增对称回退）
+
+    def test_judge_dual_both_unavailable_returns_none(self):
+        async def run():
+            settings.memory_conflict_judge = "dual"
+            try:
+                with mock.patch("rag.memory.memory_conflict_clf.memory_conflict_clf.load",
+                                new=mock.AsyncMock(return_value=True)):
+                    with mock.patch("rag.memory.memory_conflict_clf.memory_conflict_clf.predict",
+                                    new=mock.AsyncMock(return_value=None)):
+                        with mock.patch("rag.memory.nli_judge.nli_judge.predict",
+                                        new=mock.AsyncMock(return_value=None)):
+                            return await memory_service._judge_conflict("旧", "新")
+            finally:
+                settings.memory_conflict_judge = "nli"
+        assert asyncio.run(run()) is None             # 双方不可用 → None（上层追加，零回归）
+
+    def test_dual_verdict_pure_function_table(self):
+        """dual_verdict 纯函数决策表全覆盖（含 None 组合）"""
+        from rag.memory.memory import dual_verdict
+        # 双方都出 verdict
+        assert dual_verdict("contradiction", "contradiction") == "contradiction"
+        assert dual_verdict("contradiction", "non_conflict") == "conflict_hint"
+        assert dual_verdict("entailment", "contradiction") == "conflict_hint"
+        assert dual_verdict("neutral", "contradiction") == "conflict_hint"
+        assert dual_verdict("entailment", "non_conflict") == "entailment"
+        assert dual_verdict("neutral", "non_conflict") == "neutral"
+        # 一方 None → 另一方单判（对称回退）
+        assert dual_verdict(None, "contradiction") == "contradiction"
+        assert dual_verdict(None, "non_conflict") == "non_conflict"
+        assert dual_verdict("contradiction", None) == "contradiction"
+        assert dual_verdict("neutral", None) == "neutral"
+        # 双方 None → None（旧行为）
+        assert dual_verdict(None, None) is None
+
+
+class TestMergeConflictHint:
+    """_merge_duplicate 收到 conflict_hint（module-070 双判不一致）→ 追加拼接不标 superseded"""
+
+    def test_conflict_hint_appends_and_keeps_superseded_false(self):
+        parent = mock.MagicMock(id=5, title="t", content="用户喜欢咖啡",
+                                mention_count=0, last_mentioned_at=None)
+        duplicate = mock.MagicMock(id=6, parent_id=parent.id)
+        session = mock.MagicMock()
+        session.get = mock.AsyncMock(return_value=parent)
+        session.commit = mock.AsyncMock()
+        out = {}
+
+        async def run():
+            with mock.patch("rag.memory.async_session_factory", _fake_factory(session)):
+                settings.memory_conflict_enabled = True
+                try:
+                    with mock.patch("rag.memory.memory.logger.info") as log_info:
+                        with mock.patch.object(memory_service, "_judge_conflict",
+                                               new=mock.AsyncMock(return_value="conflict_hint")):
+                            out["result"] = await memory_service._merge_duplicate(
+                                duplicate, "新内容")
+                            out["log"] = log_info
+                finally:
+                    settings.memory_conflict_enabled = False
+
+        asyncio.run(run())
+        assert out["result"]["status"] == "updated"        # 追加拼接（库内条数不涨）
+        assert "用户喜欢咖啡\n新内容" in parent.content     # 新旧并存
+        assert parent.superseded is not True                # 不标 SUPERSEDED（保守不冤枉）
+        # 日志分支：双判不一致提示
+        assert any("记忆冲突提示（双判不一致）" in str(c)
+                   for c in out["log"].call_args_list)
+
+
 class TestMemoryConflictClassifier:
     """MemoryConflictClassifier：predict / predict_proba / 特征形状"""
 
@@ -919,3 +1102,207 @@ class TestColdRefTime:
         out = _cold_ref_time(doc)
         assert out.tzinfo is timezone.utc  # 恒为 tz-aware，_apply_cold_decay 减法不再抛 TypeError
         assert out.replace(tzinfo=None) == naive  # 墙钟时间不变，仅补时区
+
+
+# ──────────────────────────────────────────────────────────────
+# module-070 Tester 复验：dual_verdict 决策表逐行 + dual 分支补漏
+# + eval 脚本 --judge dual + scores["judge"] 落库
+# ──────────────────────────────────────────────────────────────
+
+class TestDualVerdictDecisionTable:
+    """dual_verdict 纯函数 7 行决策表逐行枚举（Tester 复验，对齐 plan §2 决策表）
+
+    生产 _judge_conflict 与 eval dual_judge 均引用本函数（单一来源 AC-23）；
+    本测试把 7 行决策表逐行断言，含 clf 侧非矛盾变体（entailment/neutral）
+    与一方/双方不可用（None）的对称回退。
+    """
+
+    def test_row_by_row_decision_table(self):
+        from rag.memory.memory import dual_verdict
+        # R1 双确认才 superseded：双 contradiction → "contradiction"
+        assert dual_verdict("contradiction", "contradiction") == "contradiction"
+        # R2 nli 矛盾 + clf 非矛盾 → "conflict_hint"（新旧并存，不标 superseded）
+        assert dual_verdict("contradiction", "non_conflict") == "conflict_hint"
+        assert dual_verdict("contradiction", "entailment") == "conflict_hint"
+        assert dual_verdict("contradiction", "neutral") == "conflict_hint"
+        # R3 clf 矛盾 + nli 非矛盾 → "conflict_hint"（反方向）
+        assert dual_verdict("entailment", "contradiction") == "conflict_hint"
+        assert dual_verdict("neutral", "contradiction") == "conflict_hint"
+        # R4 双方非矛盾 → nli 标签（module-046 追加拼接行为不变）
+        assert dual_verdict("entailment", "non_conflict") == "entailment"
+        assert dual_verdict("neutral", "non_conflict") == "neutral"
+        assert dual_verdict("entailment", "entailment") == "entailment"
+        assert dual_verdict("neutral", "neutral") == "neutral"
+        # R5 nli 不可用（None/超时/异常）→ clf 单判（新增对称回退）
+        assert dual_verdict(None, "contradiction") == "contradiction"
+        assert dual_verdict(None, "non_conflict") == "non_conflict"
+        # R6 clf 不可用（模型缺失/None/异常）→ nli 单判（= 现状 judge="nli" 零回归）
+        assert dual_verdict("contradiction", None) == "contradiction"
+        assert dual_verdict("entailment", None) == "entailment"
+        assert dual_verdict("neutral", None) == "neutral"
+        # R7 双方不可用 → None（上层追加，旧行为零回归）
+        assert dual_verdict(None, None) is None
+
+
+class TestJudgeConflictDualTester:
+    """Tester 复验补充：_judge_conflict dual 分支降级路径补漏（nli 异常 / clf None）"""
+
+    def test_judge_dual_nli_exception_uses_clf(self):
+        async def run():
+            settings.memory_conflict_judge = "dual"
+            try:
+                with mock.patch("rag.memory.memory_conflict_clf.memory_conflict_clf.load",
+                                new=mock.AsyncMock(return_value=True)):
+                    with mock.patch("rag.memory.memory_conflict_clf.memory_conflict_clf.predict",
+                                    new=mock.AsyncMock(return_value="contradiction")) as clf_predict:
+                        with mock.patch("rag.memory.nli_judge.nli_judge.predict",
+                                        new=mock.AsyncMock(side_effect=RuntimeError("nli down"))):
+                            result = await memory_service._judge_conflict("旧", "新")
+                            return result, clf_predict
+            finally:
+                settings.memory_conflict_judge = "nli"
+        result, clf_predict = asyncio.run(run())
+        assert result == "contradiction"          # nli 异常 → clf 单判（对称回退）
+        clf_predict.assert_awaited_once_with("旧", "新")
+
+    def test_judge_dual_clf_predict_none_uses_nli(self):
+        async def run():
+            settings.memory_conflict_judge = "dual"
+            try:
+                with mock.patch("rag.memory.memory_conflict_clf.memory_conflict_clf.load",
+                                new=mock.AsyncMock(return_value=True)):
+                    with mock.patch("rag.memory.memory_conflict_clf.memory_conflict_clf.predict",
+                                    new=mock.AsyncMock(return_value=None)):
+                        with mock.patch("rag.memory.nli_judge.nli_judge.predict",
+                                        new=mock.AsyncMock(return_value="contradiction")):
+                            return await memory_service._judge_conflict("旧", "新")
+            finally:
+                settings.memory_conflict_judge = "nli"
+        assert asyncio.run(run()) == "contradiction"  # clf predict None → nli 单判（warning 分支）
+
+
+class TestEvalScriptDual:
+    """module-070 eval 脚本：dual_judge 复用生产 dual_verdict + --judge dual + scores['judge'] 落库"""
+
+    def test_dual_judge_both_contradiction(self):
+        from eval.datasets.memory_conflict_dataset import dual_judge
+        async def run():
+            with mock.patch("rag.memory.memory_conflict_clf.memory_conflict_clf.load",
+                            new=mock.AsyncMock(return_value=True)):
+                with mock.patch("rag.memory.memory_conflict_clf.memory_conflict_clf.predict",
+                                new=mock.AsyncMock(return_value="contradiction")) as clf_predict:
+                    with mock.patch("rag.memory.nli_judge.nli_judge.predict",
+                                    new=mock.AsyncMock(return_value="contradiction")) as nli_predict:
+                        result = await dual_judge("旧", "新")
+                        return result, clf_predict, nli_predict
+        result, clf_predict, nli_predict = asyncio.run(run())
+        assert result == "contradiction"
+        clf_predict.assert_awaited_once_with("旧", "新")
+        nli_predict.assert_awaited_once_with("旧", "新")
+
+    def test_dual_judge_single_contradiction_maps_to_neutral(self):
+        from eval.datasets.memory_conflict_dataset import dual_judge
+        async def run():
+            with mock.patch("rag.memory.memory_conflict_clf.memory_conflict_clf.load",
+                            new=mock.AsyncMock(return_value=True)):
+                with mock.patch("rag.memory.memory_conflict_clf.memory_conflict_clf.predict",
+                                new=mock.AsyncMock(return_value="contradiction")):
+                    with mock.patch("rag.memory.nli_judge.nli_judge.predict",
+                                    new=mock.AsyncMock(return_value="neutral")):
+                        return await dual_judge("旧", "新")
+        # conflict_hint → neutral（run_eval VERDICTS 校验 + contradiction P/R 主指标等价）
+        assert asyncio.run(run()) == "neutral"
+
+    def test_dual_judge_clf_load_false_uses_nli(self):
+        from eval.datasets.memory_conflict_dataset import dual_judge
+        async def run():
+            with mock.patch("rag.memory.memory_conflict_clf.memory_conflict_clf.load",
+                            new=mock.AsyncMock(return_value=False)):
+                with mock.patch("rag.memory.memory_conflict_clf.memory_conflict_clf.predict",
+                                new=mock.AsyncMock()) as clf_predict:
+                    with mock.patch("rag.memory.nli_judge.nli_judge.predict",
+                                    new=mock.AsyncMock(return_value="contradiction")):
+                        result = await dual_judge("旧", "新")
+                        return result, clf_predict
+        result, clf_predict = asyncio.run(run())
+        assert result == "contradiction"          # clf 模型缺失 → nli 单判（fail-open 零回归）
+        clf_predict.assert_not_awaited()
+
+    def test_dual_judge_both_unavailable_returns_none(self):
+        from eval.datasets.memory_conflict_dataset import dual_judge
+        async def run():
+            with mock.patch("rag.memory.memory_conflict_clf.memory_conflict_clf.load",
+                            new=mock.AsyncMock(return_value=True)):
+                with mock.patch("rag.memory.memory_conflict_clf.memory_conflict_clf.predict",
+                                new=mock.AsyncMock(return_value=None)):
+                    with mock.patch("rag.memory.nli_judge.nli_judge.predict",
+                                    new=mock.AsyncMock(return_value=None)):
+                        return await dual_judge("旧", "新")
+        # 双方不可用 → None（run_eval 侧按 skip/neutral 计数，存量语义 AC-18）
+        assert asyncio.run(run()) is None
+
+    def test_main_judge_dual_scores_judge_persisted(self):
+        import eval.datasets.memory_conflict_dataset as mod
+        captured = {}
+
+        async def fake_run_eval(judge=None, dataset=None, limit=None):
+            captured["judge"] = judge
+            return {"accuracy_3class": 0.5286, "precision": 0.9412, "recall": 0.4,
+                    "f1": 0.5614, "tp": 16, "fp": 1, "fn": 24,
+                    "dataset_size": 70, "evaluated": 70, "skipped": 0}, [], []
+
+        async def fake_record(scores, per_question):
+            captured["scores"] = dict(scores)
+            return "c" * 40, 48
+
+        with mock.patch.object(mod, "run_eval", new=fake_run_eval):
+            with mock.patch.object(mod, "record_eval_run", new=fake_record):
+                with mock.patch("sys.argv", ["memory_conflict_dataset", "--judge", "dual"]):
+                    asyncio.run(mod.main())
+        assert captured["judge"] is mod.dual_judge    # --judge dual → dual_judge 接线
+        assert captured["scores"]["judge"] == "dual"  # scores['judge'] 落库区分三方案（AC-13）
+
+    def test_main_judge_nli_clf_selection_and_invalid_rejected(self):
+        import eval.datasets.memory_conflict_dataset as mod
+        selected = {}
+
+        async def fake_run_eval(judge=None, dataset=None, limit=None):
+            selected["judge"] = judge
+            return {"accuracy_3class": 0.0, "precision": 0.0, "recall": 0.0,
+                    "f1": 0.0, "tp": 0, "fp": 0, "fn": 0,
+                    "dataset_size": 1, "evaluated": 1, "skipped": 0}, [], []
+
+        async def fake_record(scores, per_question):
+            return "c" * 40, 0
+
+        with mock.patch.object(mod, "run_eval", new=fake_run_eval):
+            with mock.patch.object(mod, "record_eval_run", new=fake_record):
+                with mock.patch("sys.argv", ["memory_conflict_dataset", "--judge", "nli"]):
+                    asyncio.run(mod.main())
+                assert selected["judge"] is mod.real_judge   # --judge nli 存量行为不变
+                with mock.patch("sys.argv", ["memory_conflict_dataset", "--judge", "clf"]):
+                    asyncio.run(mod.main())
+                assert selected["judge"] is mod.clf_judge    # --judge clf 存量行为不变
+        # 非法 judge → argparse SystemExit（不静默，AC-16 同口径）
+        exited = False
+        with mock.patch("sys.argv", ["memory_conflict_dataset", "--judge", "wat"]):
+            try:
+                asyncio.run(mod.main())
+            except SystemExit:
+                exited = True
+        assert exited
+
+
+class TestConfig070:
+    """module-070 配置：memory_conflict_judge 默认 dual（WP-A 数据决策）+ Literal 三值"""
+
+    def test_conflict_judge_default_dual(self):
+        # conftest autouse 钉住实例为 'nli'（hermetic）；生产默认读类字段——
+        # WP-A 70 条真实跑分 dual Precision 0.9412（fp=1）三方案最高（changelog §1.4）
+        from src.config import Settings
+        assert Settings.model_fields["memory_conflict_judge"].default == "dual"
+
+    def test_conflict_judge_literal_three_values(self):
+        from src.config import Settings
+        args = Settings.model_fields["memory_conflict_judge"].annotation.__args__
+        assert args == ("clf", "nli", "dual")   # 非法值 pydantic 启动拒绝（AC-16）

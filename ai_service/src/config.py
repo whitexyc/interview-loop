@@ -203,8 +203,15 @@ class Settings(BaseSettings):
     # 双达标取 Precision 高者 → **nli 启用**（PW_MEMORY_CONFLICT=true，judge=nli）；
     # clf Recall 更高（0.95 vs 0.5），产品如需更全召回可 PW_MEMORY_CONFLICT_JUDGE=clf
     # 一键切换（已在 config 预置）。矛盾判定器不可用/超时 → 返回 None → 旧行为（零回归）。
+    # module-070：双判共识——nli+clf 双确认 contradiction 才标 superseded（Precision
+    # 极保守，冤枉=误标 superseded=用户记忆消失），单判 contradiction → conflict_hint
+    # 新旧并存；任一裁判不可用对称回退单判（clf 缺失→nli 单判=现状零回归）。
+    # **默认值决策（module-070 WP-A 70 条真实跑分，eval_runs id=46/47/48）**：dual
+    # Precision 0.9412（fp=1）为三方案最高，符合用户"宁漏检也不错标"哲学；clf
+    # Recall 最高（0.775）但 fp=7（误标 7 条用户记忆，最贵失败模式）；nli 30 条
+    # 口径 1.0000 Precision 为"窄而准"假象（70 条跌至 0.9167）——详见 changelog。
     memory_conflict_enabled: bool = True
-    memory_conflict_judge: Literal["clf", "nli"] = "nli"
+    memory_conflict_judge: Literal["clf", "nli", "dual"] = "dual"
 
     # 意图分类（module-043 L4）：true 时 router 尝试加载 bge-m3+逻辑回归分类器
     #（模型缺失/加载失败自动回退 LLM 分类，零影响）。

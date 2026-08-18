@@ -116,6 +116,101 @@ MEMORY_CONFLICT_DATASET: list[dict] = [
      "hypothesis": "用户的手机是华为的", "verdict": "neutral"},
     {"scenario": "中性", "premise": "用户通过 B 站学习技术",
      "hypothesis": "用户喜欢跑步锻炼", "verdict": "neutral"},
+    # ================================================================
+    # 2026-08-18 扩充 30 → 70：40 条全部基于用户真实信息派生（真实分布
+    # 打底，非纯人造）；含 4 条"语义边界陷阱"（scenario=边界）——计划 vs
+    # 事实、想法 vs 结果、"不买"vs"不喝"、场景限定并存。
+    # ================================================================
+    # ---- 改口类（+10）：真实信息派生的偏好/习惯/状态互斥 ----
+    {"scenario": "改口", "premise": "用户大一经常跑步，体重从 130 减到了 110 斤",
+     "hypothesis": "用户现在久坐开发，体重又回到了 130 斤", "verdict": "contradiction"},
+    {"scenario": "改口", "premise": "用户大一经常早起，六七点就醒",
+     "hypothesis": "用户大三以后都八点后才起床", "verdict": "contradiction"},
+    {"scenario": "改口", "premise": "用户以前学 C 和 C++",
+     "hypothesis": "用户现在主要写 Java 和 AI/Agent 开发", "verdict": "contradiction"},
+    {"scenario": "改口", "premise": "用户大二想转网络安全专业但没转",
+     "hypothesis": "用户现在在读网络安全专业", "verdict": "contradiction"},
+    {"scenario": "改口", "premise": "用户在外省读大学",
+     "hypothesis": "用户在本省读大学", "verdict": "contradiction"},
+    {"scenario": "改口", "premise": "用户不喝奶茶",
+     "hypothesis": "用户现在会喝奶茶了", "verdict": "contradiction"},
+    {"scenario": "改口", "premise": "用户在学校作息规律，睡得比较早",
+     "hypothesis": "用户现在每天都很晚睡", "verdict": "contradiction"},
+    {"scenario": "改口", "premise": "用户偏好回答通俗易懂（大白话）",
+     "hypothesis": "用户要求回答专业术语密集", "verdict": "contradiction"},
+    {"scenario": "改口", "premise": "用户体重 110 斤",
+     "hypothesis": "用户体重 130 斤", "verdict": "contradiction"},
+    {"scenario": "改口", "premise": "用户现在是物联网工程专业",
+     "hypothesis": "用户转到了网络安全专业", "verdict": "contradiction"},
+    # ---- 迁移类（+4）：技术栈/方向/环境切换 ----
+    {"scenario": "迁移", "premise": "用户主要用 C/C++ 写代码",
+     "hypothesis": "用户换成了 Java 做后端", "verdict": "contradiction"},
+    {"scenario": "迁移", "premise": "用户的技能方向是嵌入式开发",
+     "hypothesis": "用户转型做 AI Agent 应用开发", "verdict": "contradiction"},
+    {"scenario": "迁移", "premise": "用户的开发方向是 Java 后端",
+     "hypothesis": "用户改做前端开发", "verdict": "contradiction"},
+    {"scenario": "迁移", "premise": "用户平时用 Windows 开发",
+     "hypothesis": "用户开发环境换成了 Linux", "verdict": "contradiction"},
+    # ---- 过时类（+3）：习惯/状态被新状态取代 ----
+    {"scenario": "过时", "premise": "用户大一在坚持跑步锻炼",
+     "hypothesis": "用户现在不跑步了，每天坐着开发", "verdict": "contradiction"},
+    {"scenario": "过时", "premise": "用户的早起习惯是六七点",
+     "hypothesis": "用户现在的作息是八点后起床", "verdict": "contradiction"},
+    {"scenario": "过时", "premise": "用户体重保持 110 斤",
+     "hypothesis": "用户现在体重 130 斤", "verdict": "contradiction"},
+    # ---- 升级冲突类（+3）：短期新事实 vs 长期旧记忆 ----
+    {"scenario": "升级冲突", "premise": "长期记忆：用户常用技术栈是 C/C++",
+     "hypothesis": "短期新事实：用户主要在写 Java", "verdict": "contradiction"},
+    {"scenario": "升级冲突", "premise": "长期记忆：用户打算做嵌入式方向",
+     "hypothesis": "短期新事实：用户决定走 Java AI/Agent 开发", "verdict": "contradiction"},
+    {"scenario": "升级冲突", "premise": "长期记忆：用户专业是物联网工程",
+     "hypothesis": "短期新事实：用户现在读网络安全", "verdict": "contradiction"},
+    # ---- 正例（+10）：新事实与旧记忆一致（防过度标矛盾）----
+    {"scenario": "正例", "premise": "用户平时不买奶茶",
+     "hypothesis": "用户一般不主动买奶茶", "verdict": "entailment"},
+    {"scenario": "正例", "premise": "用户走 Java 和 AI/Agent 开发方向",
+     "hypothesis": "用户主要做 Java 后端开发", "verdict": "entailment"},
+    {"scenario": "正例", "premise": "用户觉得就业形势不好",
+     "hypothesis": "用户认为目前工作不好找", "verdict": "entailment"},
+    {"scenario": "正例", "premise": "用户偏好大白话解释",
+     "hypothesis": "用户希望用通俗的语言讲解", "verdict": "entailment"},
+    {"scenario": "正例", "premise": "用户完成过半程马拉松",
+     "hypothesis": "用户跑过约 21 公里的比赛", "verdict": "entailment"},
+    {"scenario": "正例", "premise": "用户现在大三",
+     "hypothesis": "用户是本科生", "verdict": "entailment"},
+    {"scenario": "正例", "premise": "用户以前学 C 和 C++",
+     "hypothesis": "用户有 C 语言基础", "verdict": "entailment"},
+    {"scenario": "正例", "premise": "用户感觉嵌入式方向更好",
+     "hypothesis": "用户觉得原专业方向有优势", "verdict": "entailment"},
+    {"scenario": "正例", "premise": "用户放假回家作息不规律",
+     "hypothesis": "用户假期经常很晚睡", "verdict": "entailment"},
+    {"scenario": "正例", "premise": "用户大一经常跑步",
+     "hypothesis": "用户大一有运动习惯", "verdict": "entailment"},
+    # ---- 中性（+6）：新事实与旧记忆无关（防"不同主题也算矛盾"）----
+    {"scenario": "中性", "premise": "用户觉得就业形势不好",
+     "hypothesis": "用户喜欢喝奶茶", "verdict": "neutral"},
+    # 注意：hypothesis 措辞 "用户平时喜欢摄影"（非 "用户喜欢摄影"）——原措辞与
+    # 训练集（build_memory_conflict_train.py 142 条）premise 字符串精确重叠，会破坏
+    # 训练/评测零重叠不变式 + clf 评测泄漏（module-070 WP-A 措辞去重，verdict 不变）
+    {"scenario": "中性", "premise": "用户是物联网工程专业",
+     "hypothesis": "用户平时喜欢摄影", "verdict": "neutral"},
+    {"scenario": "中性", "premise": "用户每天坐着开发",
+     "hypothesis": "用户喜欢读历史书", "verdict": "neutral"},
+    {"scenario": "中性", "premise": "用户偏好大白话解释",
+     "hypothesis": "用户最近在追剧", "verdict": "neutral"},
+    {"scenario": "中性", "premise": "用户完成过半程马拉松",
+     "hypothesis": "用户现在体重 130 斤", "verdict": "neutral"},
+    {"scenario": "中性", "premise": "用户大三起床晚",
+     "hypothesis": "用户今天要去跑步", "verdict": "neutral"},
+    # ---- 边界陷阱（+4）：语义边界——看起来矛盾实则并存（防误标）----
+    {"scenario": "边界", "premise": "用户高考完打算出省读大学",
+     "hypothesis": "用户最终录取在本省", "verdict": "neutral"},
+    {"scenario": "边界", "premise": "用户大二想转网络安全专业",
+     "hypothesis": "用户后来没有转专业", "verdict": "neutral"},
+    {"scenario": "边界", "premise": "用户自己不买奶茶",
+     "hypothesis": "用户会喝别人送的奶茶", "verdict": "neutral"},
+    {"scenario": "边界", "premise": "用户在学校睡得比较早",
+     "hypothesis": "用户放假回家后经常很晚睡", "verdict": "neutral"},
 ]
 
 
@@ -229,6 +324,41 @@ async def clf_judge(premise: str, hypothesis: str) -> str:
     if verdict is None:
         raise RuntimeError("CLF 判定不可用（None）")
     return verdict if verdict == "contradiction" else "neutral"
+
+
+async def dual_judge(premise: str, hypothesis: str) -> str:
+    """module-070 双判共识判定（clf + nli → 生产 dual_verdict 纯函数单一来源）
+
+    "conflict_hint"（单判矛盾）映射 neutral——run_eval 的 VERDICTS 校验拒绝
+    "conflict_hint"（ValueError）；对 contradiction P/R 主指标等价（hint 不
+    贡献 tp/fp，fn 语义与 neutral 相同），仅 accuracy_3class 参考口径轻微失真
+    （changelog 如实声明）。双方不可用 → dual_verdict 返回 None → run_eval
+    ValueError 按 neutral/skip 计数（存量语义）。
+
+    Args:
+        premise: 旧记忆内容
+        hypothesis: 新事实内容
+
+    Returns:
+        VERDICTS 内标签（"conflict_hint" 已映射 neutral）
+    """
+    from rag.memory.memory import dual_verdict
+    from rag.memory.memory_conflict_clf import memory_conflict_clf
+    from rag.memory.nli_judge import nli_judge
+
+    clf_v = None
+    try:
+        if await memory_conflict_clf.load():
+            clf_v = await memory_conflict_clf.predict(premise, hypothesis)
+    except Exception as e:
+        logger.warning("dual CLF 判定不可用（单判回退）: %s", e)
+    nli_v = None
+    try:
+        nli_v = await nli_judge.predict(premise, hypothesis)
+    except Exception as e:
+        logger.warning("dual NLI 判定不可用（单判回退）: %s", e)
+    verdict = dual_verdict(nli_v, clf_v)
+    return "neutral" if verdict == "conflict_hint" else verdict
 
 
 # ──────────────────────────────────────────────────────────────
@@ -346,8 +476,8 @@ async def main() -> None:
         description="记忆冲突 NLI 评测：mDeBERTa/分类模型 contradiction P/R/F1 + 达标判定")
     parser.add_argument("--fixture", action="store_true",
                         help="fixture 模式：关键词启发式（确定性，不依赖模型），仅演示管线")
-    parser.add_argument("--judge", choices=["nli", "clf"], default="nli",
-                        help="判定器：nli（module-061 mDeBERTa，默认）/ clf（module-062 bge-m3+LR 分类模型）")
+    parser.add_argument("--judge", choices=["nli", "clf", "dual"], default="nli",
+                        help="判定器：nli（module-061 mDeBERTa，默认）/ clf（module-062 bge-m3+LR 分类模型）/ dual（module-070 双判共识）")
     parser.add_argument("--no-save", action="store_true", help="不记录 eval_runs 表")
     parser.add_argument("--limit", type=int, default=None, help="只评估前 N 条（冒烟）")
     args = parser.parse_args()
@@ -359,10 +489,16 @@ async def main() -> None:
         judge = _fixture
     elif args.judge == "clf":
         judge = clf_judge
+    elif args.judge == "dual":
+        judge = dual_judge
     else:
         judge = real_judge
 
     scores, per_question, skipped = await run_eval(judge=judge, limit=args.limit)
+
+    # 落库区分三方案（对齐 module-062 memory_type eval "model" 字段先例）——
+    # 否则 eval_runs 三行 eval_type='memory_conflict' 无法区分
+    scores["judge"] = args.judge
 
     saved_id = 0
     commit = ""
