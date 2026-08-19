@@ -95,10 +95,26 @@ class ReactContext:
         self.phase: str = "retrieval"    # module-058: 工具执行阶段状态机
         self.retrieval_rounds: int = 0   # module-068: 检索阶段未切换轮次计数（防空转兜底）
         self.phase_count: dict[str, int] = {"retrieval": 0, "generation": 0}  # module-068: 各阶段实际执行工具数
+        self.last_research_query: str = ""  # module-073: re_search 最近一次改写 query（同改写守卫，防 LLM 空转）
 
-    def add_note(self, note: str) -> None:
-        """记录一条工作笔记到 scratchpad（module-041）"""
-        self.scratchpad.append(note.strip())
+    def add_note(self, note: str) -> bool:
+        """记录一条工作笔记到 scratchpad（module-041/073）
+
+        module-073：完全一致去重（strip 后逐字比较，不做近似去重——scratchpad
+        重复来自 LLM 同参数机械重复调用，措辞变体是正常产出不应拦截），重复
+        已存在时不再追加。
+
+        Args:
+            note: 笔记内容（调用方已负责截断，此处仅 strip）
+
+        Returns:
+            True=新增成功；False=内容与既有笔记完全一致，未重复记录
+        """
+        note = note.strip()
+        if note in self.scratchpad:
+            return False
+        self.scratchpad.append(note)
+        return True
 
     def add_docs(self, docs: list[dict]) -> None:
         """按 doc id 去重累积检索文档（供 generate_answer / 兜底生成使用）"""

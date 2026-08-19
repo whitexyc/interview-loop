@@ -100,6 +100,20 @@ def tool_call_logs_disabled(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def default_tool_auto_retry_disabled(monkeypatch):
+    """测试环境统一钉住工具失败自动重试开关=关闭（module-073，对齐 056/058/066 模式）
+
+    生产默认已开启（PW_TOOL_AUTO_RETRY 默认 true，task-brief 指定），但存量
+    test_agent_tools.py 以"失败一次返回空"为基准断言——钉住 false 保证存量
+    测试 hermetic（不实际触发重试路径/不改变 func 执行次数），重试行为由新
+    测试（test_tool_retry_dedup.py）体内显式 setattr True 验证。
+    """
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "tool_auto_retry", False)
+
+
+@pytest.fixture(autouse=True)
 def request_logs_disabled(monkeypatch):
     """测试环境统一钉住 request_logs 落库开关=关闭（module-058 WP-C）
 

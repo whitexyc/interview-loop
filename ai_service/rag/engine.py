@@ -243,7 +243,9 @@ class RAGEngine:
         纯检索路径（不生成回答），供前端知识库搜索面板使用。
         搜索链路较短，只做召回+排序，不做 LLM 生成。
         """
-        logger.info("RAG search: query=%s, top_k=%d", request.query, request.top_k)
+        # 日志隐私（module-073）：正常路径 query 一律 [:50] 截断；异常路径完整
+        # 记录（排查需要完整信息）；tool_call_logs args 完整保留（审计用途）
+        logger.info("RAG search: query=%s, top_k=%d", request.query[:50], request.top_k)
 
         try:
             # 限制 top_k 范围，防止恶意请求打爆数据库
@@ -304,7 +306,7 @@ class RAGEngine:
             request: 聊天请求
             identity: 请求身份标识（user_id 优先，否则 client_ip；用于按身份隔离检索长期记忆）
         """
-        logger.info("RAG chat: query=%s, history=%d", request.query, len(request.history))
+        logger.info("RAG chat: query=%s, history=%d", request.query[:50], len(request.history))
 
         try:
             # ========== 1. 意图识别 ==========
@@ -510,7 +512,8 @@ class RAGEngine:
                                 message="ok", steps=steps)
 
         except Exception as e:
-            logger.error("RAG chat 失败: %s", e, exc_info=True)
+            # 日志隐私（module-073）：异常路径 query 完整记录（排查需要完整信息）
+            logger.error("RAG chat 失败: query=%s, error=%s", request.query, e, exc_info=True)
             return ChatResponse(
                 answer="抱歉，我暂时无法回答这个问题，请稍后重试。",
                 sources=[],
