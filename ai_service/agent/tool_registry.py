@@ -22,6 +22,7 @@ import json
 import logging
 from typing import Callable, Optional
 
+from src.config import settings
 from rag.engine import rag_engine
 from rag.retrieval.retriever import hybrid_retriever
 from rag.graph.graph_store import graph_store
@@ -29,6 +30,11 @@ from rag.graph.graph_extractor import graph_extractor
 from agent.reflector import reflector
 
 logger = logging.getLogger(__name__)
+
+# module-073：异常自动重试排除清单——generate_answer / verify_answer 不重试
+# （15s 超时是常态，重试无意义且翻倍墙钟）；其余工具（只读检索类 + note_to_self）
+# 异常自动重试 1 次。排除清单比白名单简单：未来新工具默认继承重试。
+_NO_RETRY_TOOLS = {"generate_answer", "verify_answer"}
 
 
 class AgentTool:
@@ -57,6 +63,16 @@ class AgentTool:
     async def run(self, args: dict, ctx) -> str:
         """执行工具；失败返回空结果，LLM 判断继续/放弃（module-028 降级哲学）
 
+        module-073：异常（非超时）自动重试 1 次同一 func（同参数同 ctx）——
+        只读检索类（search_*/extract_entities/recall_memory/re_search）异常多为
+        瞬时抖动（429/网络闪断），重试大概率成功；note_to_self 重试安全依赖
+        WP-A 去重拦双写；generate_answer/verify_answer 不重试（_NO_RETRY_TOOLS，
+        15s 超时是常态）。**超时不重试**：超时=慢不是抖动（LLM 生成/rerank 慢），
+        重试不修复根因只把单工具墙钟翻倍到 30s，且 15s 是预算围栏语义（module-042）。
+        TimeoutError 分支必须先于重试分支判断（存量超时测试精确文案兼容前提）。
+        重试发生在 run 内部 → 对 react_loop 完全不可见：不增加 tool_count /
+        phase_count / 消息历史（tool 结果消息每 call 一条）。
+
         Args:
             args: LLM 传入的工具参数（已由 args_schema 描述）
             ctx: ReAct 循环的会话上下文（见 react.ReactContext）
@@ -70,6 +86,16 @@ class AgentTool:
             logger.warning("工具 %s 超时 (15s)", self.name)
             return f"(工具 {self.name} 执行超时)"
         except Exception as e:
+            if settings.tool_auto_retry and self.name not in _NO_RETRY_TOOLS:
+                logger.warning("工具 %s 首次失败，自动重试: %s", self.name, e)
+                try:
+                    return await asyncio.wait_for(self.func(ctx, args), timeout=15)
+                except asyncio.TimeoutError:
+                    logger.warning("工具 %s 重试超时 (15s)", self.name)
+                    return f"(工具 {self.name} 执行超时)"
+                except Exception as e2:
+                    logger.warning("工具 %s 重试仍失败，返回空: %s", self.name, e2)
+                    return ""
             logger.warning("工具 %s 执行失败，返回空: %s", self.name, e)
             return ""
 
@@ -271,6 +297,14 @@ async def _re_search(ctx, args: dict) -> str:
     if result.get("sufficient"):
         return "（当前检索结果已充分，无需重检）"
     rewritten = result.get("rewritten_query", query)
+    # module-073：同改写 query 守卫（防 LLM 拿同一改写反复调 re_search 空转）——
+    # 完全一致比较；在 check_sufficiency 之后拦截（rewritten 只能由它产出 + 它
+    # 重新评估充分性，ctx.docs 可能已增长），拦截的是"重检索 + 文档格式化"大头。
+    # 不做输入 query 级预拦截（完全免 LLM）：文档变化后（如已调其他检索工具）
+    # 同 query 合法重评会被误拦。sufficient 分支提前返回不更新守卫字段。
+    if rewritten == ctx.last_research_query:
+        return "已按该改写重检过，无新结果"
+    ctx.last_research_query = rewritten
     docs = await hybrid_retriever.retrieve(rewritten, top_k=5, mode="hybrid")
     ctx.add_docs(docs)
     if not docs:
@@ -283,8 +317,9 @@ async def _note_to_self(ctx, args: dict) -> str:
     note = args.get("note", "")
     if not note or not note.strip():
         return "（未提供笔记内容）"
-    note = note.strip()[:500]  # 截断过长笔记
-    ctx.add_note(note)
+    note = note.strip()[:500]  # 截断过长笔记（module-073：比较点取截断后的值，两次相同超长 note 仍判重复）
+    if not ctx.add_note(note):  # module-073：完全一致去重，重复不追加
+        return "笔记已存在（未重复记录）"
     return f"已记录笔记 ({len(ctx.scratchpad)}): {note[:200]}"
 
 

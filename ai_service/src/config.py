@@ -124,6 +124,15 @@ class Settings(BaseSettings):
     agent_retrieval_budget: int = 3
     agent_generation_budget: int = 2
 
+    # 工具失败自动重试（module-073）：AgentTool.run 捕获异常后对同一 func
+    # 自动重试 1 次（只读检索类 + note_to_self；generate_answer/verify_answer
+    # 排除在 _NO_RETRY_TOOLS——15s 超时是常态，重试无意义）。超时（15s）永不
+    # 重试（超时=慢不是抖动，重试翻倍墙钟）。重试发生在 run 内部，不增加
+    # tool_count / phase_count（预算语义不变）。**默认 true（task-brief 指定，
+    # 少数默认开的新开关）**；PW_TOOL_AUTO_RETRY=false 回退存量"失败即空"。
+    # 测试环境由 conftest autouse fixture 钉住 false（hermetic）。
+    tool_auto_retry: bool = True
+
     # 请求可观测性（module-058 WP-C）：trace_id + 阶段计时 + token 用量 +
     # 缓存命中 → request_logs 落库（init_db 自愈幂等 DDL）。默认 true；
     # false 时零埋点零落库（中间件不初始化观测上下文、helper 直接返回）。

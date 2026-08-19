@@ -53,9 +53,25 @@ logger = logging.getLogger(__name__)
 # LLM 先根据用户问题生成一段假设性回答，然后用这个假设回答的语义向量
 # 代替原始问题去做检索。因为假设回答模仿了知识库文档的语言风格，
 # 所以能更精准地匹配到相关文档。
-_HYDE_PROMPT = """你是一个知识库助手。根据用户问题，写一段2-3句话的假设性回答。
-这段回答不是给用户看的，而是用来在知识库中检索相关文档。
-请模仿知识库文档的语言风格来写。
+# 2026-08-19 优化（docs/项目深挖/05-查询改写-HyDE.md §2.1 分析落地）：
+#   ① few-shot 样例（原版零样例，业界 role conditioning 医学 NDCG +4.9%）
+#   ② 领域指令（技术笔记陈述句风格，对齐知识库语料形态）
+#   ③ 术语保留指令（防改写丢专有名词——与 _REWRITE_PROMPT 同纪律）
+#   ④ 排除对话口吻/主观评价（防"假文档"退化成聊天回复、向量带偏）
+_HYDE_PROMPT = """你是一个技术知识库检索助手。根据用户问题，写一段2-3句话的假设性回答。
+这段回答不是给用户看的，而是用来在知识库中检索相关文档——请模仿知识库文档的语言风格
+（Java 后端技术笔记的陈述句式，如"xxx是xxx，核心机制是xxx"），写得像一篇真实的技术
+文档片段，而不是聊天回复。
+要求：
+1. 保留问题中的专有术语（如 G1、RRF、Kafka ISR、JWT）原样写入；
+2. 用陈述句描述机制/原理，不要用"我建议""你可以"等对话口吻；
+3. 不要写主观评价或结论性判断，只描述客观事实。
+
+示例：
+用户问题: Redis 缓存穿透是什么？如何解决？
+假设回答: 缓存穿透指查询不存在的数据导致请求直接打到数据库。解决方案包括布隆过滤器
+预先过滤不存在 key、缓存空值并设置短 TTL、以及接口层参数校验。布隆过滤器基于位数组与
+多个哈希函数，能高效判断 key 是否存在。
 
 用户问题: {query}
 
@@ -227,7 +243,9 @@ class RAGEngine:
         纯检索路径（不生成回答），供前端知识库搜索面板使用。
         搜索链路较短，只做召回+排序，不做 LLM 生成。
         """
-        logger.info("RAG search: query=%s, top_k=%d", request.query, request.top_k)
+        # 日志隐私（module-073）：正常路径 query 一律 [:50] 截断；异常路径完整
+        # 记录（排查需要完整信息）；tool_call_logs args 完整保留（审计用途）
+        logger.info("RAG search: query=%s, top_k=%d", request.query[:50], request.top_k)
 
         try:
             # 限制 top_k 范围，防止恶意请求打爆数据库
@@ -288,7 +306,7 @@ class RAGEngine:
             request: 聊天请求
             identity: 请求身份标识（user_id 优先，否则 client_ip；用于按身份隔离检索长期记忆）
         """
-        logger.info("RAG chat: query=%s, history=%d", request.query, len(request.history))
+        logger.info("RAG chat: query=%s, history=%d", request.query[:50], len(request.history))
 
         try:
             # ========== 1. 意图识别 ==========
@@ -358,7 +376,7 @@ class RAGEngine:
             # 闲聊路径
             if intent == "casual_chat":
                 client = LLMFactory.get_client()
-                system_prompt = "你是张三个人网站的 AI 助手，友好地回答用户的问题。"
+                system_prompt = "你是知识库问答系统的 AI 助手，友好地回答用户的问题。"
                 if memory_text:
                     system_prompt += f"\n\n{memory_text}"
                 answer = await client.chat([
@@ -494,7 +512,8 @@ class RAGEngine:
                                 message="ok", steps=steps)
 
         except Exception as e:
-            logger.error("RAG chat 失败: %s", e, exc_info=True)
+            # 日志隐私（module-073）：异常路径 query 完整记录（排查需要完整信息）
+            logger.error("RAG chat 失败: query=%s, error=%s", request.query, e, exc_info=True)
             return ChatResponse(
                 answer="抱歉，我暂时无法回答这个问题，请稍后重试。",
                 sources=[],
