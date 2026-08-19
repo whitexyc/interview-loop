@@ -113,7 +113,7 @@ async def direct_llm(state: RAGState) -> dict:
     logger.info("Graph: direct_llm (casual_chat)")
     client = LLMFactory.get_client()
     answer = await client.chat([
-        {"role": "system", "content": "你是张三个人网站的 AI 助手，友好地回答用户的问题。"},
+        {"role": "system", "content": "你是知识库问答系统的 AI 助手，友好地回答用户的问题。"},
         *state["history"],
         {"role": "user", "content": state["query"]},
     ])

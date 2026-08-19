@@ -41,7 +41,7 @@ from agent.tool_registry import ToolRegistry, registry
 logger = logging.getLogger(__name__)
 
 # ReAct 系统提示词：指导 LLM 自主决定工具调用顺序
-_SYSTEM_PROMPT = """你是张三个人网站的 Agentic RAG 问答助手。用户的问题需要检索知识库来回答，
+_SYSTEM_PROMPT = """你是知识库问答系统的 Agentic RAG 问答助手。用户的问题需要检索知识库来回答，
 你可以通过 function calling 调用工具，自主决定调用哪些工具、以什么顺序，直到信息足够回答问题。
 
 可用工具：
@@ -307,12 +307,37 @@ async def record_tool_call(name: str, args: dict, result_ok: bool,
         logger.warning("tool_call_logs 落库失败（fail-open，不影响工具执行）: %s", e)
 
 
+def _phase_allows(name: str, ctx: ReactContext) -> bool:
+    """执行层 schema 守门：工具名是否在当前阶段允许集合内（2026-08-20）
+
+    066 Tester 实测发现"执行层不校验 schema 暴露"：LLM 可强行调用 schema 外
+    工具（at-002 强行调 generate_answer 致 15s 超时）。语义闭环——系统提示词
+    列全 10 工具是"手册"、tools 参数是"门禁"、本函数是执行层"守门"：
+    schema 外调用拒绝执行并返回可读提示（喂回 LLM 判断），不再真执行。
+
+    Args:
+        name: 工具名
+        ctx: ReAct 会话上下文（取 phase）
+
+    Returns:
+        True 允许执行；False 当前阶段不可用（tool_phase_split=false → 全放行
+        零回归）
+    """
+    if not settings.tool_phase_split:
+        return True
+    allowed = {s.get("function", {}).get("name") for s in schemas_for_phase(registry, ctx)}
+    return name in allowed
+
+
 async def execute_tool_with_log(name: str, args: dict, tool,
                                 ctx: ReactContext) -> str:
     """执行单个工具并落库 tool_call_logs（module-066 / ADR-0017 决策 2）
 
     计时包住 tool.run，result_ok 语义：工具不存在/run 抛出异常才 false
     （AgentTool.run 内部捕获失败返回空串属正常路径，result_ok=true）。
+    执行层 schema 守门（2026-08-20）：工具存在但不在当前阶段允许集合 →
+    拒绝执行，返回"（工具 X 当前阶段不可用）"，result_ok=false（审计可见
+    越权尝试），喂回 LLM 判断——闭环 066 实测"执行层不校验 schema"漏洞。
 
     Args:
         name: 工具名
@@ -326,7 +351,11 @@ async def execute_tool_with_log(name: str, args: dict, tool,
     started = time.perf_counter()
     result_ok = tool is not None
     result = ""
-    if tool is not None:
+    if tool is not None and not _phase_allows(name, ctx):
+        result_ok = False
+        result = f"（工具 {name} 当前阶段不可用，请按可用工具列表选择）"
+        logger.warning("工具 %s 被阶段守门拒绝（phase=%s）", name, ctx.phase)
+    elif tool is not None:
         try:
             result = await tool.run(args, ctx)
         except Exception as e:

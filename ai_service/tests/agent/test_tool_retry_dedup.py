@@ -330,3 +330,93 @@ class TestToolAutoRetry:
         assert done["tool_count"] == 1               # 预算不因重试增加
         assert len([m for m in messages if m.get("role") == "tool"]) == 1
         assert rec.await_count == 1                  # tool_call_logs 只记 1 次
+
+# ══════════════════════════════════════════════════════════════════
+# 2026-08-20 追加：执行层 schema 守门 + 去个人化 + _CHECK_PROMPT 静态前置
+# ══════════════════════════════════════════════════════════════════
+
+class TestPhaseGate:
+    """执行层 schema 守门（066 实测"执行层不校验 schema 暴露"漏洞闭环）"""
+
+    @staticmethod
+    def _tool(name: str, f) -> ToolRegistry:
+        reg = ToolRegistry()
+        reg.register(name, f"工具 {name}", {"type": "object"}, f)
+        return reg
+
+    def test_phase_gate_rejects_generation_tool_in_retrieval(self, monkeypatch):
+        # 检索阶段调 generate_answer（schema 外）→ 拒绝 + 可读提示
+        from agent.react import execute_tool_with_log
+        monkeypatch.setattr(settings, "tool_phase_split", True)
+        called = {"n": 0}
+
+        async def fake_gen(ctx, args):
+            called["n"] += 1
+            return "不应执行"
+
+        reg = ToolRegistry()
+        reg.register("generate_answer", "生成答案", {"type": "object"}, fake_gen)
+        tool = reg.get("generate_answer")
+        ctx = ReactContext("问题")
+        result = asyncio.run(execute_tool_with_log("generate_answer", {}, tool, ctx))
+        assert called["n"] == 0                      # 未执行
+        assert "当前阶段不可用" in result            # 可读提示
+
+    def test_phase_gate_allows_retrieval_tool(self, monkeypatch):
+        # 检索阶段调 search_knowledge（schema 内）→ 正常执行
+        from agent.react import execute_tool_with_log
+        monkeypatch.setattr(settings, "tool_phase_split", True)
+        called = {"n": 0}
+
+        async def fake_search(ctx, args):
+            called["n"] += 1
+            return "检索结果"
+
+        reg = self._tool("search_knowledge", fake_search)
+        tool = reg.get("search_knowledge")
+        ctx = ReactContext("问题")
+        result = asyncio.run(execute_tool_with_log("search_knowledge", {}, tool, ctx))
+        assert called["n"] == 1
+        assert result == "检索结果"
+
+    def test_phase_gate_disabled_allows_all(self, monkeypatch):
+        # tool_phase_split=false → 全放行（零回归逃生口）
+        from agent.react import execute_tool_with_log
+        monkeypatch.setattr(settings, "tool_phase_split", False)
+        called = {"n": 0}
+
+        async def fake_gen(ctx, args):
+            called["n"] += 1
+            return "执行了"
+
+        reg = ToolRegistry()
+        reg.register("generate_answer", "生成答案", {"type": "object"}, fake_gen)
+        tool = reg.get("generate_answer")
+        ctx = ReactContext("问题")
+        result = asyncio.run(execute_tool_with_log("generate_answer", {}, tool, ctx))
+        assert called["n"] == 1
+        assert result == "执行了"
+
+
+class TestPromptHygiene:
+    """去个人化 + 提示词结构（缓存友好静态前置）"""
+
+    def test_no_personal_info_in_prompts(self):
+        # 生产 prompt 不含姓名/个人网站标识（2026-08-20 去个人化）
+        from agent.react import _SYSTEM_PROMPT
+        from agent.reflector import _CHECK_PROMPT, _GENERATE_PROMPT
+        from rag.engine import _HYDE_PROMPT
+        for p in (_SYSTEM_PROMPT, _CHECK_PROMPT, _GENERATE_PROMPT, _HYDE_PROMPT):
+            assert "张三" not in p
+            assert "个人网站" not in p
+
+    def test_check_prompt_static_before_dynamic(self):
+        # 缓存友好结构：静态段（角色/步骤/规则/示例）全在动态变量之前
+        from agent.reflector import _CHECK_PROMPT
+        q_pos = _CHECK_PROMPT.index("{query}")
+        d_pos = _CHECK_PROMPT.index("{docs_summary}")
+        assert q_pos < d_pos                          # query 在 docs 前
+        assert _CHECK_PROMPT.index("判断步骤") < q_pos   # 静态步骤在动态前
+        assert _CHECK_PROMPT.index("规则（严格遵守）") < q_pos
+        assert _CHECK_PROMPT.index("示例 1（充分）") < q_pos
+        assert _CHECK_PROMPT.index("只返回 JSON") < q_pos

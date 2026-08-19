@@ -66,19 +66,19 @@
       "part": "real_retrieval"
     },
     {
-      "question": "张三的主要技术方向是什么？",
+      "question": "候选人的主要技术方向是什么？",
       "documents": [{
         "title": "5-Kafka消息可靠性与高吞吐设计_2026-07-15 > 板块1：【今日弹药库】 > 选题理由",
         "content": "。这两个方向加起来，在消息队列类面试题中占比超过 **60%**。"
       }],
       "label": "unsupported",
-      "keywords": ["张三", "深度学习"],
+      "keywords": ["候选人", "深度学习"],
       "category": "resume",
       "note": "module-071 口径复核改判：检索片段与 claim（技术方向）完全无关，不支撑任何核心断言（原 neutral，按\"部分覆盖需至少一个核心断言被支持\"改判 unsupported）",
       "part": "real_retrieval"
     },
     {
-      "question": "张三的个人网站项目包含哪些技术栈？",
+      "question": "候选人的个人网站项目包含哪些技术栈？",
       "documents": [{
         "title": "18-JVM类加载机制与双亲委派模型_2026-07-29 > 板块6：【面试题与答案（每题附带追问解答+三层拆解）】 > 题目3",
         "content": "**第二层：面试开口说（说给面试官听）**\n\"这题我们是真做过——之前做的营销规则引擎就是一个小型插件系统。我直接讲设计思路和踩过的坑。\n核心架构三层：最顶层是 JDK 的 Bootstrap 不动；中间加一个 Shared ClassLoader 放公共接口和 API 定义；最底层一个插件一个 ClassLoader。加载顺序上，插件 ClassLoader 是'先自己、后爹'，和 Tomcat 一样——为什么要反过来？因为如果先问爹，Shared 里有个旧版本的库，插件自己带的新版本就没机会加载了。"

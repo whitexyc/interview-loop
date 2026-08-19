@@ -537,7 +537,7 @@ async def chat_stream(request: ChatRequest, fastapi_req: Request):
                 from llm.client import LLMFactory
                 client = LLMFactory.get_client()
                 async for token in client.generate_stream(
-                    f"你是个人网站的 AI 助手。\n用户: {request.query}"
+                    f"你是知识库问答系统的 AI 助手。\n用户: {request.query}"
                 ):
                     yield f"event: token\ndata: {json.dumps(token)}\n\n"
                 yield "event: done\ndata: {}\n\n"

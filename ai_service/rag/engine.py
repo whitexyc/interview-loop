@@ -376,7 +376,7 @@ class RAGEngine:
             # 闲聊路径
             if intent == "casual_chat":
                 client = LLMFactory.get_client()
-                system_prompt = "你是张三个人网站的 AI 助手，友好地回答用户的问题。"
+                system_prompt = "你是知识库问答系统的 AI 助手，友好地回答用户的问题。"
                 if memory_text:
                     system_prompt += f"\n\n{memory_text}"
                 answer = await client.chat([

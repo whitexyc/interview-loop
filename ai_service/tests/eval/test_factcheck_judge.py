@@ -532,8 +532,8 @@ class TestGoldenFactcheck:
                       golden_factcheck.load_factcheck_real_samples()
                       if s["label"] == "unsupported"}
         assert real_unsup == {
-            "张三的主要技术方向是什么？",
-            "张三的个人网站项目包含哪些技术栈？",
+            "候选人的主要技术方向是什么？",
+            "候选人的个人网站项目包含哪些技术栈？",
             "什么是微服务架构？与单体架构相比有哪些优缺点？",
             "类加载过程分为哪几个阶段？初始化阶段做了什么？",
             "雪花算法生成的 ID 由哪几部分组成？",
