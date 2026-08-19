@@ -36,9 +36,9 @@ Thumbs.db
 个人信息.md
 prompt.md
 
-# Project docs / specs / shared memory (not source code)
+# Project docs / shared memory (not source code)
+# specs/ 2026-08-20 起进 git 跟踪（模块文档是交付物，两端同步靠 git 而非手动复制）
 docs/
-specs/
 /memory/
 
 # Models (download separately, not source code)
