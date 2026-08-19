@@ -1,3 +1,0 @@
-# 本地已有 PostgreSQL(pgvector+AGE) 和 Redis，无需 Docker 启动
-# 如需容器版，取消下行注释并按模板补充
-services: {}

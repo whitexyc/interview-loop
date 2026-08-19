@@ -56,3 +56,9 @@ ai_service/eval/datasets/public/
 
 # Local Claude Code settings (per-machine, not shared)
 .claude/settings.local.json
+
+# 本地构建/部署/技术栈文件（2026-08-20 起不进 git，本地保留）
+/Makefile
+/docker-compose.yml
+/start.bat
+/tech-stack.md
