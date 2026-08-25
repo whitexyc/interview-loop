@@ -172,8 +172,11 @@
 | ai_service/rag/crawl/crawler.py | module-075 | 代码 | 抓取调度器（源配置 CRUD + APScheduler + URL 安全校验 + fetch 单页 + 审查节点 + 批量抓计入库） | 2026-08-25 | 2026-08-25 | ✅ |
 | ai_service/tests/crawl/__init__.py | module-075 | 测试 | 测试包初始化 | 2026-08-25 | 2026-08-25 | ✅ |
 | ai_service/tests/crawl/test_crawler.py | module-075 | 测试 | 抓取流水线 mock 单测 30 项 | 2026-08-25 | 2026-08-25 | ✅ |
-| specs/module-075-crawl-pipeline/changelog.md | module-075 | 文档 | 变更日志（变更文件/设计说明/验证命令输出/变更记录/修复轮 v2+修复轮 v3 审查修复） | 2026-08-25 | 2026-08-25 | ✅ |
-| specs/module-075-crawl-pipeline/review-report.md | module-075 | 文档 | 审查报告（✅ 重审轮 2 通过：3 阻塞全修复 + 5 失败环境性 + 0 新引入） | 2026-08-25 | 2026-08-25 | ✅ |
+| specs/module-077-antibot-proxy/plan.md | module-077 | 规划 | 反爬绕过+代理池开发计划（阶段2 第三片） | 2026-08-26 | 2026-08-26 | ✅ |
+| specs/module-077-antibot-proxy/acceptance-criteria.md | module-077 | 规划 | 反爬绕过+代理池验收标准 | 2026-08-26 | 2026-08-26 | ✅ |
+| ai_service/tests/crawl/test_antibot.py | module-077 | 测试 | 反爬 mock 单测 28 项（robots/UA/限速重试/代理轮换/配置） | 2026-08-26 | 2026-08-26 | ✅ |
+| specs/module-077-antibot-proxy/changelog.md | module-077 | 文档 | 变更日志（子任务 1-5） | 2026-08-26 | 2026-08-26 | ✅ |
+
 GIC
 
 ## 三、前端核心文件（frontend/，module-003+）
@@ -234,4 +237,5 @@ GIC
 | module-073 | specs/module-073-tool-retry-idempotency/ | ✅ **Reviewer PASS（2026-08-19，进 Tester）**——plan.md + acceptance-criteria.md + task-brief.md + changelog.md + review-report.md 已产出。独立验证（不采信 changelog）：全量 pytest 复跑 **1249 passed / 0 failed（207.65s）** + 定向单测 24/24 + 受影响存量套件 **133 passed**（test_agent_tools 62 项含 3 处 AgentTool.run 直接断言——恒抛重试仍失败返回 ""、超时精确文案不变——全过）+ 日志隐私 grep **8 处 query[:50]**（L248/309 新增 + 存量 6 处）+ "RAG chat 失败" 仅 L516 含完整 query+error+exc_info + 开关冒烟 tool_auto_retry=True + 红线 git diff 实证（langgraph_react.py / mcp_server.py / database.py / router.py 零改动 + tests/ 仅 conftest 新增 autouse fixture）+ CONTEXT.md 只增不删（备份 %TEMP%\CONTEXT.md.module073.bak 存在）+ 三记忆文件全在。4 项 LOW 非阻塞（异常日志完整 query 属用户决策/未来生成类工具需入 _NO_RETRY_TOOLS 提醒/超时测试 awaitable.close 仅 async func 适用/工作树 module-072 并行会话未跟踪测试文件协调者注意一并提交）。**Developer 产出（2026-08-19）**——工具防重复 + 失败自动重试 + 日志隐私修正。产出文件：ai_service/tests/agent/test_tool_retry_dedup.py（19 项：TestNoteDedup 6 完全一致去重/add_note 返回 bool/重复提示/截断后判重 + TestReSearchGuard 5 同改写守卫/不同改写正常/sufficient 不更新/空改写拦截/首调记录 + TestToolAutoRetry 8 重试成功/仍失败空串/超时不重试 wait_for 1 次/generate+verify 排除/开关关不重试/两声 warning/重试内超时/预算锁定 react_loop 集成）/ ai_service/tests/core/test_log_privacy.py（5 项：search+chat 截断 levelno==INFO 过滤/50 字符边界/异常完整 query+exc_info/空 query 不崩）。代码改动：ai_service/agent/react.py（add_note bool+去重 + last_research_query）/ ai_service/agent/tool_registry.py（AgentTool.run 重试嵌套 + _NO_RETRY_TOOLS + import settings + _note_to_self 重复提示 + _re_search 守卫）/ ai_service/src/config.py（tool_auto_retry 默认 true）/ ai_service/tests/conftest.py（autouse 钉 false）/ ai_service/rag/engine.py（3 处日志 + 原则注释）。全量 **1249/0** = 1225 基线 + 24 新增，存量测试零改动；langgraph_react.py / mcp_server.py / database.py 零改动（重试在 run 内部自动继承） | ✅ |
 | module-075 | specs/module-075-crawl-pipeline/ | ✅ Tester 验收通过（2026-08-25）：单测 30/30；全量 1276/5 环境性/3 跳过；真实冒烟 6/6 路径通过（fetch→review→ingest→DB doc_id=16671 + SSE 回归完整事件序列）；5 环境性失败 langchain-openai SDK proxies（非本模块）；发现 3 非阻塞（crawler .html 扩展名/document_dedup numpy bug/crawl_enabled 默认 False） |
 | module-076 | specs/module-076-recursive-crawl/ | 🔵 Planner 规划完成（2026-08-26）：递归爬取+深度控制+URL去重；plan.md + acceptance-criteria.md 已产出 |
+| module-077 | specs/module-077-antibot-proxy/ | 👀 Developer 完成待审查（2026-08-26）：反爬绕过+代理池（robots.txt+UA轮换+限速重试+代理轮换，63 passed）；plan.md + acceptance-criteria.md + changelog.md 已产出 |
 > 每个模块目录含 plan.md / acceptance-criteria.md / changelog.md / review-report.md / test-report.md。

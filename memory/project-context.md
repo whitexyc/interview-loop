@@ -4,10 +4,7 @@
 - 项目名称: personal-interview-website
 - 项目简介: 融合简历展示与 Agentic RAG 知识库问答的个人网站系统（双语言微服务架构：Java Spring Boot + Python FastAPI + React 前端）
 - 创建时间: 2026-07-29
-- 最后更新: 2026-08-25（**module-075 知识抓取流水线 Developer 修复轮 v2 完成**——check-gates.js 18 项全量清零 exit 0 + pytest 30/0 + 铁律4/9/12/3 逐项修复：docstring 补齐 + SQL 误报绕开 + changelog 格式 + lifespan/event_stream 方法长度重构；👀 待审查）
-- 最后更新: 2026-08-25（**module-075 知识抓取流水线 Reviewer 重审轮 2 ✅ 通过**——3 阻塞全修复属实：docs 参数化 L507 签名含 docs + SSE step 事件 _chat_stream_events L590 消费 _stream_retrieve_rerank_reflect + 事件序列等价性恢复；8 辅助函数均 ≤44 行有 docstring 无空 catch；5 失败测试归环境性（langchain-openai proxies 兼容）；crawler.py 未波及；1276 passed / 5 failed 环境性 / 3 skipped）
-- 最后更新: 2026-08-25（**module-075 知识抓取流水线 ✅ Tester 验收通过**——单测 30/30；全量 1276/5 环境性/3 跳过；真实冒烟 6/6 路径通过（doc_id=16671 落库）；SSE 事件序列完整；模块标记 ✅ 完成）
-- 最后更新: 2026-08-26（**module-076 递归爬取+深度控制+去重 Planner 规划完成**——plan.md + acceptance-criteria.md 产出，三记忆文件已更新）
+- 最后更新: 2026-08-26（**module-077 反爬绕过+代理池 Developer 实现完成**——robots.txt 遵循+UA 轮换+限速重试+代理轮换，生产代码 ~110 行 ≤200，63 passed，👀 待审查）
 ## 2. 技术栈
 > 详见 `tech-stack.md`，此处仅保留摘要。
 - 后端 (Java): Spring Boot 3.2 + MyBatis-Plus + PostgreSQL
@@ -90,7 +87,8 @@
 | module-073 | 工具防重复 + 失败自动重试 + 日志隐私修正：**WP-A 防重复**——`ReactContext.add_note` 改**返回 bool**（True=新增/False=重复）+ 完全一致去重（strip 逐字，**不做近似去重**——判定器确定性优先；mcp ctx `add_note=lambda note: None` 无碍：note_to_self 不在 MCP 白名单）+ `_note_to_self` 重复返回"笔记已存在（未重复记录）"（比较点取截断 500 后值）+ `ReactContext.last_research_query` 字段 + `_re_search` 同改写 query 守卫（check_sufficiency **之后** retrieve **之前**拦截"重检索+格式化"大头；sufficient 分支不更新守卫字段；空改写同输入二次拦截；**输入级预拦截不采纳**——文档变化后同 query 合法重评会被误拦，如实标注）。**WP-B 失败自动重试**——`AgentTool.run` catch 异常后同一 func 重试 1 次：`_NO_RETRY_TOOLS = {"generate_answer", "verify_answer"}` 排除清单（15s 超时常态重试无意义，未来新工具默认继承）+ **TimeoutError 分支先于重试分支判断**（存量超时测试精确文案兼容前提写死）+ **超时不重试**（超时=慢非抖动，重试翻倍墙钟 15→30s + module-042 预算围栏语义）+ 重试内超时单独处理；重试在 run 内部 → react_loop/langgraph/MCP（mcp_server.py:90 复用）自动继承**零改动**（langgraph_react.py/mcp_server.py/database.py 未触碰）+ **不增加 tool_count/phase_count**（预算语义不变，react_loop 集成单测锁定：工具首败后成功 → tool_count==1/1 个 tool_call 事件/消息历史 1 条 tool 结果/record_tool_call 只调 1 次）+ tool_call_logs 只记最终结果（duration_ms 含重试耗时，表结构一字不改 ADR-0017 红线）+ config `tool_auto_retry: bool = True`（PW_TOOL_AUTO_RETRY 回退，task-brief 指定默认 true）+ conftest autouse 钉 false（hermetic）。**WP-C 日志隐私**——engine.py:246/307 正常路径 query 改 `[:50]` 截断（存量 6 处外新增 2 处共 8 处）+ :513 异常路径改完整 `query=%s, error=%s, exc_info=True`（原来反而缺 query）+ 原则注释（正常截断/异常完整/tool_call_logs args 完整保留审计）；仅动指定 3 行（brief"其余 8 处"vs 实测 6 处以实测为准）。**WP-D**：新增 test_tool_retry_dedup.py 19 项 + test_log_privacy.py 5 项（caplog + levelno==INFO 过滤防假阴性 + mock resolve_tool_history 抛错触发 L513 + 50 字符边界 + 空 query 异常不崩）；全量 **1249/0** = 1225 基线 + 24 新增，**存量测试零改动**（test_agent_tools 62 项含 3 处 run 直接断言全过） | 0.73.0-module-073 | 2026-08-19 | ✅ Reviewer **PASS**（2026-08-19：全量 1249/0 独立复跑 207.65s + 定向 24/24 + 受影响存量套件 133/133 + 日志 grep 8 处/异常完整 1 处 + 红线 git diff 实证 + CONTEXT.md 备份存在；4 项 LOW 非阻塞；详见 specs/module-073-tool-retry-idempotency/review-report.md）待 Tester |
 | module-075 | 知识抓取流水线（定时调度 + 源配置 + 入库 + 审查闭环） | 0.75.0-module-075 | 2026-08-25 | ✅ 完成（Tester 验收通过：单测 30/30 + 全量 1276/5 环境性/3 跳过 + 真实冒烟 6/6 通过 doc_id=16671） |
 | module-076 | 递归爬取 + 深度控制 + URL 去重（ADR-0019 阶段2 第二片） | — | — | 🔵 规划中（Planner 已产出 plan.md + acceptance-criteria.md） |
-## 4. 架构决策记录（ADR）索引
+| module-077 | 反爬绕过 + 代理池（ADR-0019 阶段2 第三片） | 0.77.0-module-077 | 2026-08-26 | 👀 Developer 完成待审查（robots/UA/限速重试/代理轮换+28 单测，119 crawl passed） |
+
 | ADR 编号 | 决策标题 | 状态 | 日期 |
 |----------|----------|------|------|
 | adr-003 | Intent 正确性校验四层方案（L1 评测/L2 确定性信号确认/L3 后置反证/L4 bge-m3+逻辑回归分类器） | ✅ 已实施（L1-L3 module-043/047/055；**L4 已启用 module-056：人造 337 条重训 Accuracy 1.0 + golden_intent 真实对比 LLM vs 分类器双 1.0000 → PW_INTENT_CLASSIFIER_ENABLED 默认开，失败回退 LLM**） | 2026-08-08（2026-08-12 更新） |
@@ -104,14 +102,15 @@
 | adr-018 | MCP 集成（ToolRegistry 暴露为标准 MCP Server：6 只读工具 + stdio/Streamable HTTP 双传输 + PW_MCP_TOKEN fail-closed） | ✅ 已实施（module-067，2026-08-17）：决策 1 官方 FastMCP 动态遍历注册（ToolRegistry 单一事实源零改动）+ 决策 2 双传输（stdio 本地 + streamable_http_path="/" 挂载 /ai/mcp）+ 决策 3 token 认证（lifespan fail-closed 拒绝启动 + 中间件 hmac 常量时间比较 + 6 只读显式白名单 + 截断 2000）+ 决策 4 边界（不做 client/工具治理迁移/完整问答/SSE）；mcp==1.26.0 版本适配 5 点（构造参数/无 version/Mount 不转发 lifespan/DNS rebinding 421/streamable_http_path） | 2026-08-17 |
 
 ## 5. 当前迭代状态
-- 当前迭代版本: v0.76.0（module-076 递归爬取 Planner 规划完成）
+- 当前迭代版本: v0.77.0（module-077 反爬绕过+代理池 Planner 规划完成）
 - 完成: **module-075 知识抓取流水线**（ADR-0019 阶段2 第一片，✅ Tester 验收通过 2026-08-25）
 
 - 正在进行的模块: **module-071 幻觉检测 kappa 校准**（Reviewer 第二轮复审 PASS 2026-08-18，待 Tester 验收）
 - 正在进行的模块: **module-072 意图路由 Backlog 前三项**（Reviewer 二轮复审 ✅ PASS 2026-08-19，待 Tester 验收）
 - 正在进行的模块: **module-073 工具防重复 + 失败自动重试 + 日志隐私修正**（Reviewer PASS 2026-08-19，待 Tester 验收）
 - 下一个待开发模块: **module-076 递归爬取+深度控制+去重**（ADR-0019 阶段2 第二片，Planner 规划完成）
-- 下一个待开发模块: backlog 另含：阶段2 后续模块 077-080（反爬/审查增强/增量append/反向闭环）、存量 124 篇根父块 doc embedding 回填、OCR/VLM/MinerU 接入后图片价值过滤真实评分接线、L4 多轮拼接重训生效、记忆 P4 反馈闭环、WP-A 拼标题+防扎堆、L2 阈值再校准、矛盾检测 Recall 提升、飞轮重训管线、τ-bench 式 simulated user 演进（ADR-0017 诚实边界）、**命中判定字符串耦合解耦**（module-068 遗留）
+- 下一个待开发模块: **module-077 反爬绕过+代理池**（ADR-0019 阶段2 第三片，Planner 规划完成；Playwright 评估后排除）
+- 下一个待开发模块: backlog 另含：阶段2 后续模块 078-080（审查增强/增量append/反向闭环）、存量 124 篇根父块 doc embedding 回填、OCR/VLM/MinerU 接入后图片价值过滤真实评分接线、L4 多轮拼接重训生效、记忆 P4 反馈闭环、WP-A 拼标题+防扎堆、L2 阈值再校准、矛盾检测 Recall 提升、飞轮重训管线、τ-bench 式 simulated user 演进（ADR-0017 诚实边界）、**命中判定字符串耦合解耦**（module-068 遗留）、module-08x Playwright 无头浏览器渲染（module-077 评估排除，留后续按需接入）
 ## 7. 关键技术决策记录
 - 所有 API 返回格式统一为 {code, msg, data, timestamp, request_id}（详见 CLAUDE.md 第5节）
 - 使用 JWT 进行用户认证
