@@ -35,18 +35,30 @@
 - **原因**: 避免重复记录堆积；用户多次录入同一主题时合并上下文
 
 ## 验证命令
-| 验证项 | 命令 | 预期结果 |
-|--------|------|----------|
-| 编译检查 | `python -m py_compile rag/memory/weak_topics.py` | 无报错 |
-| 编译检查 | `python -m py_compile src/database.py` | 无报错 |
-| 编译检查 | `python -m py_compile rag/crawl/crawler.py` | 无报错 |
-| 编译检查 | `python -m py_compile main.py` | 无报错 |
-| 编译检查 | `python -m py_compile src/config.py` | 无报错 |
-| 编译检查 | `python -m py_compile rag/schemas.py` | 无报错 |
-| 待学笔记测试 | `pytest tests/memory/test_weak_topics.py -q` | 15 passed |
-| 抓取优先级测试 | `pytest tests/crawl/test_crawl_priority.py -q` | 7 passed |
-| 全量回归 | `pytest tests/ -q` | 1449 passed / 4 failed（基线）/ 3 skipped |
 
+```bash
+# 1. 编译检查
+cd ai_service
+python -m py_compile rag/memory/weak_topics.py
+python -m py_compile src/database.py
+python -m py_compile rag/crawl/crawler.py
+python -m py_compile main.py
+python -m py_compile src/config.py
+python -m py_compile rag/schemas.py
+# 输出：无报错 = 编译通过
+
+# 2. 待学笔记单测
+pytest tests/memory/test_weak_topics.py -q
+# 输出：15 passed
+
+# 3. 抓取优先级单测
+pytest tests/crawl/test_crawl_priority.py -q
+# 输出：7 passed
+
+# 4. 全量回归
+pytest tests/ -q
+# 输出：1449 passed / 4 failed（基线：module-028 proxies）/ 3 skipped
+```
 ## 变更记录
 | 版本 | 日期 | 变更内容 | 变更人 |
 |------|------|----------|--------|
