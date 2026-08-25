@@ -4,8 +4,7 @@
 - 项目名称: personal-interview-website
 - 项目简介: 融合简历展示与 Agentic RAG 知识库问答的个人网站系统（双语言微服务架构：Java Spring Boot + Python FastAPI + React 前端）
 - 创建时间: 2026-07-29
-- 最后更新: 2026-08-26（**module-080 Planner 规划完成**：反向闭环低分题→待学笔记→自动抓取优先级，plan.md + acceptance-criteria.md 已产出）
-## 2. 技术栈
+- 最后更新: 2026-08-26（**module-080 Tester 验收通过**：反向闭环，定向 22/22 + 全量 1449/4 基线 + DB 幂等验证 + 静态冒烟，需编排者重启 8001 补真实冒烟）
 > 详见 `tech-stack.md`，此处仅保留摘要。
 - 后端 (Java): Spring Boot 3.2 + MyBatis-Plus + PostgreSQL
 - 前端: React 18 + TypeScript + Vite + Ant Design
@@ -90,8 +89,7 @@
 | module-077 | 反爬绕过 + 代理池（ADR-0019 阶段2 第三片） | 0.77.0-module-077 | 2026-08-26 | ✅ **Reviewer 独立复审通过**（9 项 P3 建议无阻塞：ttl=0 语义反转/直连回退注释/retry_base 2.0 vs plan/per-source 变全局/robots 无 UA 头+魔法数字/构造复杂/死代码/3 AC 缺专测/jitter 描述；tests/crawl 119/0 + py_compile OK；详见 specs/module-077-antibot-proxy/review-report.md；待 Tester） |
 | module-078 | 审查节点增强（ADR-0019 阶段2 第四片：阈值配置化 + 策略三档 + 矛盾检测 + review_score 四层透传 + 结构化日志） | 0.78.0-module-078 | 2026-08-26 | ✅ **完成（Tester 验收通过 31/31**：28 新单测 + crawl 91/0 + 全量 1338/4（proxies 基线）+ 真实冒烟（结构化日志/review_status+review_score 落库/矛盾检测 fail-open）；Reviewer PASS 4 项 minor 非阻塞；详见 specs/module-078-review-enhancement/） |
 | module-079 | 增量 Append 不重建路径验证（ADR-0019 阶段3：dedup numpy bug 修复 + 增量入库验证脚本 + pytest 验收） | — | — | 👀 **Developer 实现完成**（2026-08-26：find_semantic_duplicate 加固 pgvector SQL top-K + ndarray bug 结构性根除 + config 1 项 + 验证脚本 + 16 项 pytest 全绿 + 全量 1396/4 基线） |
-| module-080 | 反向闭环（低分题→待学笔记→自动抓取优先级） | 0.80.0-module-080 | 2026-08-26 | ✅ **Developer 实现完成**（2026-08-26：weak_topics.py + database.py priority 列 + crawler.py 动态加权 + main.py 2 端点 + config 1 项 + schemas 1 项 + 测试 22 项全绿 + 全量 1449/4 基线） |
-
+| module-080 | 反向闭环（低分题→待学笔记→自动抓取优先级） | 0.80.0-module-080 | 2026-08-26 | ✅ **Tester 验收通过**（2026-08-26：定向 22/22 + 全量 1449/4 基线/3 skipped + py_compile 6/6 + DB 幂等验证 + 静态冒烟（8001 未加载 080 代码需编排者重启补真实冒烟）；Reviewer 0 阻塞 6 LOW；详见 specs/module-080-reverse-loop/test-report.md） |
 | ADR 编号 | 决策标题 | 状态 | 日期 |
 |----------|----------|------|------|
 | adr-003 | Intent 正确性校验四层方案（L1 评测/L2 确定性信号确认/L3 后置反证/L4 bge-m3+逻辑回归分类器） | ✅ 已实施（L1-L3 module-043/047/055；**L4 已启用 module-056：人造 337 条重训 Accuracy 1.0 + golden_intent 真实对比 LLM vs 分类器双 1.0000 → PW_INTENT_CLASSIFIER_ENABLED 默认开，失败回退 LLM**） | 2026-08-08（2026-08-12 更新） |
@@ -114,10 +112,9 @@
 - 正在进行的模块: **module-072 意图路由 Backlog 前三项**（Reviewer 二轮复审 ✅ PASS 2026-08-19，待 Tester 验收）
 - 正在进行的模块: **module-073 工具防重复 + 失败自动重试 + 日志隐私修正**（Reviewer PASS 2026-08-19，待 Tester 验收）
 - 正在进行的模块: **module-079 增量 append**（ADR-0019 阶段3，Developer 实现完成，待 Reviewer）
-- 正在进行的模块: **module-080 反向闭环**（ADR-0019 最后验收项，✅ Developer 实现完成，待 Reviewer）
-
-- 下一个待开发模块: backlog 另含：~~阶段2 后续模块 080（反向闭环）~~（✅ Developer 实现完成）存量 124 篇根父块 doc embedding 回填、OCR/VLM/MinerU 接入后图片价值过滤真实评分接线、L4 多轮拼接重训生效、记忆 P4 反馈闭环、WP-A 拼标题+防扎堆、L2 阈值再校准、矛盾检测 Recall 提升、飞轮重训管线、τ-bench 式 simulated user 演进（ADR-0017 诚实边界）、**命中判定字符串耦合解耦**（module-068 遗留）、~~**document_dedup.py:157 numpy 真值判定缺陷修复**~~（已纳入 module-079）、module-08x Playwright 无头浏览器渲染（module-077 评估排除，留后续按需接入）
-
+- 当前迭代版本: v0.80.0（module-080 反向闭环 ✅ Reviewer 审查通过 2026-08-26）
+- ✅ module-080 反向闭环 已完成（ADR-0019 最后验收项，Tester 验收通过 2026-08-26，需编排者重启 8001 补真实冒烟）
+- ✅ module-077 P3 修复轮 已完成（2026-08-26：Reviewer 9 项 P3 全部修复，crawl 160/0 + 全量 1452/4 基线/3 skipped）
 ## 7. 关键技术决策记录
 - 所有 API 返回格式统一为 {code, msg, data, timestamp, request_id}（详见 CLAUDE.md 第5节）
 - 使用 JWT 进行用户认证

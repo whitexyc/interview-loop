@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 _ALLOWED_SCHEMES = {"http", "https"}
 _FETCH_TIMEOUT_S = 30
 _ROBOTS_UA = "PersonalKB-Crawler"
+_ROBOTS_TIMEOUT_S = 5  # robots.txt 拉取超时（秒），铁律4：魔法数字提取为常量
 
 # --- UA 轮换池（module-077）：~10 个主流桌面+移动浏览器 UA ---
 _BUILTIN_UA_POOL = [
@@ -221,24 +222,30 @@ async def _check_robots_allowed(url: str) -> bool:
             return True
         now = time.monotonic()
         ttl = settings.crawl_robots_cache_ttl
-        # 命中缓存且未过期
-        if host in _robots_cache:
+        # P3-1: ttl <= 0 = 不缓存，每次重新拉取（对齐 config 声明"0=不缓存"）
+        if ttl > 0 and host in _robots_cache:
             expire_ts, rp = _robots_cache[host]
-            if ttl <= 0 or now < expire_ts:
+            if now < expire_ts:
                 return rp.can_fetch(_ROBOTS_UA, url)
         # 拉取 robots.txt
         scheme = parsed.scheme or "https"
         robots_url = f"{scheme}://{host}/robots.txt"
-        async with httpx.AsyncClient(timeout=5, follow_redirects=True) as client:
+        async with httpx.AsyncClient(
+            timeout=_ROBOTS_TIMEOUT_S,
+            follow_redirects=True,
+            headers={"User-Agent": _ROBOTS_UA},  # P3-5: 带 UA 头
+        ) as client:
             resp = await client.get(robots_url)
             resp.raise_for_status()
-            rp = type(_robots_cache.get(host, (0, None))[1] or _make_robot_parser())()
+            rp = _make_robot_parser()  # P3-6: 简化构造
             rp.parse(resp.text.splitlines())
         expire_ts = now + ttl if ttl > 0 else now
-        _robots_cache[host] = (expire_ts, rp)
+        if ttl > 0:  # ttl>0 时写缓存，ttl<=0 每次拉取不缓存
+            _robots_cache[host] = (expire_ts, rp)
         return rp.can_fetch(_ROBOTS_UA, url)
-    except Exception:
+    except Exception as e:
         # fail-open：robots.txt 不存在/超时/网络错误 → 允许抓取
+        logger.debug("robots.txt 拉取失败，fail-open: %s", e)
         return True
 
 
@@ -518,8 +525,8 @@ async def fetch_page(url: str) -> CrawlResult:
             if attempt < max_retries:
                 continue
             return CrawlResult(url=url, success=False, error=last_error)
+    # P3-7: 防御性兜底（理论上不可达——for 循环内所有路径均已 return）
     return CrawlResult(url=url, success=False, error=last_error or "重试用尽")
-
 # ─── 递归抓取引擎（module-076） ───
 
 
@@ -531,8 +538,9 @@ async def _crawl_page_and_store(url: str, summary: CrawlSummary) -> list[str]:
         summary.skipped += 1
         summary.details.append({"url": url, "status": "robots_blocked"})
         return []
-    # module-077: per-source 限速（使用 source_id=0 作为全局计数器）
-    await _rate_limit_delay(0)
+    # module-077: per-source 限速（按 URL 域名 hash 隔离限速状态，P3-4 修复）
+    source_key = hash(urlparse(url).hostname or "") & 0x7FFFFFFF  # 正整数 key
+    await _rate_limit_delay(source_key)
     result = await fetch_page(url)
     if not result.success:
         logger.warning("递归抓取失败: %s — %s", url[:80], result.error)
@@ -602,12 +610,30 @@ async def _recursive_crawl(url: str, depth: int, max_depth: int, whitelist: Opti
     for link in child_links:
         await _recursive_crawl(link, depth + 1, max_depth, whitelist, visited, limit, summary)
 
+async def _crawl_single_source(src: dict, visited: set[str], limit: int, summary: CrawlSummary) -> None:
+    """处理单个源的抓取（module-080 从 run_crawl 提取，保持行为不变）"""
+    url_pattern = src.get("url_pattern", "")
+    name = src.get("name", url_pattern)
+    if not url_pattern or not _is_safe_url(url_pattern):
+        summary.skipped += 1
+        return
+    if _is_blacklisted_url(url_pattern):
+        logger.info("种子命中黑名单，跳过: %s", url_pattern[:80])
+        summary.skipped += 1
+        return
+    raw_depth = src.get("max_depth")
+    source_depth = max(int(raw_depth) if raw_depth is not None else 1, 0)
+    max_depth = min(source_depth, settings.crawl_max_depth)
+    whitelist = [_normalize_url(url_pattern)]
+    logger.info("开始递归抓取: %s (%s, max_depth=%d)", name, url_pattern[:80], max_depth)
+    await _recursive_crawl(url_pattern, 0, max_depth, whitelist, visited, limit, summary)
+
+
 async def run_crawl(sources: list[dict], *, max_pages: int = 0) -> CrawlSummary:
     """执行一次抓取批次（受控递归：深度 + 去重 + 过滤 + 总页数上限）
 
     module-080：抓取前动态计算优先级（待学笔记关键词匹配源 url_pattern/name），
     高优先源先抓。
-
 
     Args:
         sources: source_configs 行列表 [{"url_pattern", "name", "enabled", "max_depth", "priority"}]
@@ -623,29 +649,12 @@ async def run_crawl(sources: list[dict], *, max_pages: int = 0) -> CrawlSummary:
     # module-080：动态优先级计算（待学笔记关键词匹配源）
     sources = await _prioritize_sources(sources)
 
-
     limit = max_pages or settings.crawl_max_pages_per_run
     summary = CrawlSummary()
     visited: set[str] = set()
 
     for src in sources:
-        url_pattern = src.get("url_pattern", "")
-        name = src.get("name", url_pattern)
-        if not url_pattern or not _is_safe_url(url_pattern):
-            summary.skipped += 1
-            continue
-        if _is_blacklisted_url(url_pattern):
-            logger.info("种子命中黑名单，跳过: %s", url_pattern[:80])
-            summary.skipped += 1
-            continue
-        raw_depth = src.get("max_depth")
-        source_depth = max(int(raw_depth) if raw_depth is not None else 1, 0)
-        max_depth = min(source_depth, settings.crawl_max_depth)
-        whitelist = [_normalize_url(url_pattern)]
-        logger.info("开始递归抓取: %s (%s, max_depth=%d)", name, url_pattern[:80], max_depth)
-        await _recursive_crawl(
-            url_pattern, 0, max_depth, whitelist, visited, limit, summary,
-        )
+        await _crawl_single_source(src, visited, limit, summary)
 
     logger.info(
         "抓取批次完成: crawled=%d, approved=%d, rejected=%d, errors=%d, skipped=%d",
@@ -653,7 +662,6 @@ async def run_crawl(sources: list[dict], *, max_pages: int = 0) -> CrawlSummary:
         summary.errors, summary.skipped,
     )
     return summary
-
 
 # ─── 待学笔记优先级加权（module-080） ───
 
