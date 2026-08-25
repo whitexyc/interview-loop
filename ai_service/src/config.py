@@ -325,6 +325,11 @@ class Settings(BaseSettings):
     doc_dedup_threshold: float = 0.95
     doc_dedup_boilerplate_enabled: bool = True
 
+    #   doc_dedup_candidate_top_k（PW_DOC_DEDUP_CANDIDATE_TOP_K）—— L2 语义去重
+    #       向量候选上限（pgvector top-K，ORDER BY embedding <=> :vec LIMIT :k）：
+    #       默认 50 远超语义重复量级；O(N) 全表余弦 → O(log N + K)（module-079）。
+    doc_dedup_candidate_top_k: int = 50
+
     # PDF 回退路径 Markdown 升级（module-069）：
     #   true（默认）—— PyMuPDF 回退路径用 pymupdf4llm.to_markdown() 输出
     #     Markdown（标题/列表/表格恢复），双栏页面先走中线重组再出 MD。
@@ -379,6 +384,25 @@ class Settings(BaseSettings):
     crawl_proxies: str = ""
     crawl_robots_cache_ttl: int = 3600
     crawl_user_agents: str = ""
+
+    # 反向闭环（module-080）：待学笔记优先级加权
+    # 待学笔记主题关键词匹配源 url_pattern/name 时，动态提升该源的内存态 priority
+    #（不写回 DB，每次 run_crawl 动态算）。默认 10，PW_WEAK_TOPIC_PRIORITY_BOOST 可覆盖。
+    weak_topic_priority_boost: int = 10
+
+    # 反向闭环（module-080）：低分题→待学笔记→优先级抓取。环境变量 PW_FEEDBACK_*可覆盖；
+    # reverse_enabled 总开关 / low_score_threshold=60 对齐 Java / scan_interval_minutes=1440
+    # 次日一次 / internal_token 调 weak-points（空=不带头，失败在 Java 侧 fail-closed）
+    feedback_reverse_enabled: bool = True
+    feedback_java_base_url: str = "http://localhost:8002"
+    feedback_low_score_threshold: int = 60
+    feedback_scan_interval_minutes: int = 1440
+    feedback_http_timeout_s: float = 10
+    feedback_learning_identity: str = "learning"
+    feedback_search_url_template: str = "https://www.bing.com/search?q={query}"
+    feedback_priority_crawl_depth: int = 1
+    feedback_priority_max_per_run: int = 5
+    feedback_internal_token: str = ""
 
     model_config = {"env_prefix": "PW_", "env_file": ".env"}
 

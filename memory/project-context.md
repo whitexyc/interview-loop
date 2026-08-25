@@ -4,7 +4,7 @@
 - 项目名称: personal-interview-website
 - 项目简介: 融合简历展示与 Agentic RAG 知识库问答的个人网站系统（双语言微服务架构：Java Spring Boot + Python FastAPI + React 前端）
 - 创建时间: 2026-07-29
-- 最后更新: 2026-08-26（**module-077 反爬绕过+代理池 Developer 实现完成**——robots.txt 遵循+UA 轮换+限速重试+代理轮换，生产代码 ~110 行 ≤200，63 passed，👀 待审查）
+- 最后更新: 2026-08-26（**module-080 Planner 规划完成**：反向闭环低分题→待学笔记→自动抓取优先级，plan.md + acceptance-criteria.md 已产出）
 ## 2. 技术栈
 > 详见 `tech-stack.md`，此处仅保留摘要。
 - 后端 (Java): Spring Boot 3.2 + MyBatis-Plus + PostgreSQL
@@ -87,7 +87,10 @@
 | module-073 | 工具防重复 + 失败自动重试 + 日志隐私修正：**WP-A 防重复**——`ReactContext.add_note` 改**返回 bool**（True=新增/False=重复）+ 完全一致去重（strip 逐字，**不做近似去重**——判定器确定性优先；mcp ctx `add_note=lambda note: None` 无碍：note_to_self 不在 MCP 白名单）+ `_note_to_self` 重复返回"笔记已存在（未重复记录）"（比较点取截断 500 后值）+ `ReactContext.last_research_query` 字段 + `_re_search` 同改写 query 守卫（check_sufficiency **之后** retrieve **之前**拦截"重检索+格式化"大头；sufficient 分支不更新守卫字段；空改写同输入二次拦截；**输入级预拦截不采纳**——文档变化后同 query 合法重评会被误拦，如实标注）。**WP-B 失败自动重试**——`AgentTool.run` catch 异常后同一 func 重试 1 次：`_NO_RETRY_TOOLS = {"generate_answer", "verify_answer"}` 排除清单（15s 超时常态重试无意义，未来新工具默认继承）+ **TimeoutError 分支先于重试分支判断**（存量超时测试精确文案兼容前提写死）+ **超时不重试**（超时=慢非抖动，重试翻倍墙钟 15→30s + module-042 预算围栏语义）+ 重试内超时单独处理；重试在 run 内部 → react_loop/langgraph/MCP（mcp_server.py:90 复用）自动继承**零改动**（langgraph_react.py/mcp_server.py/database.py 未触碰）+ **不增加 tool_count/phase_count**（预算语义不变，react_loop 集成单测锁定：工具首败后成功 → tool_count==1/1 个 tool_call 事件/消息历史 1 条 tool 结果/record_tool_call 只调 1 次）+ tool_call_logs 只记最终结果（duration_ms 含重试耗时，表结构一字不改 ADR-0017 红线）+ config `tool_auto_retry: bool = True`（PW_TOOL_AUTO_RETRY 回退，task-brief 指定默认 true）+ conftest autouse 钉 false（hermetic）。**WP-C 日志隐私**——engine.py:246/307 正常路径 query 改 `[:50]` 截断（存量 6 处外新增 2 处共 8 处）+ :513 异常路径改完整 `query=%s, error=%s, exc_info=True`（原来反而缺 query）+ 原则注释（正常截断/异常完整/tool_call_logs args 完整保留审计）；仅动指定 3 行（brief"其余 8 处"vs 实测 6 处以实测为准）。**WP-D**：新增 test_tool_retry_dedup.py 19 项 + test_log_privacy.py 5 项（caplog + levelno==INFO 过滤防假阴性 + mock resolve_tool_history 抛错触发 L513 + 50 字符边界 + 空 query 异常不崩）；全量 **1249/0** = 1225 基线 + 24 新增，**存量测试零改动**（test_agent_tools 62 项含 3 处 run 直接断言全过） | 0.73.0-module-073 | 2026-08-19 | ✅ Reviewer **PASS**（2026-08-19：全量 1249/0 独立复跑 207.65s + 定向 24/24 + 受影响存量套件 133/133 + 日志 grep 8 处/异常完整 1 处 + 红线 git diff 实证 + CONTEXT.md 备份存在；4 项 LOW 非阻塞；详见 specs/module-073-tool-retry-idempotency/review-report.md）待 Tester |
 | module-075 | 知识抓取流水线（定时调度 + 源配置 + 入库 + 审查闭环） | 0.75.0-module-075 | 2026-08-25 | ✅ 完成（Tester 验收通过：单测 30/30 + 全量 1276/5 环境性/3 跳过 + 真实冒烟 6/6 通过 doc_id=16671） |
 | module-076 | 递归爬取 + 深度控制 + URL 去重（ADR-0019 阶段2 第二片） | — | — | 🔵 规划中（Planner 已产出 plan.md + acceptance-criteria.md） |
-| module-077 | 反爬绕过 + 代理池（ADR-0019 阶段2 第三片） | 0.77.0-module-077 | 2026-08-26 | 👀 Developer 完成待审查（robots/UA/限速重试/代理轮换+28 单测，119 crawl passed） |
+| module-077 | 反爬绕过 + 代理池（ADR-0019 阶段2 第三片） | 0.77.0-module-077 | 2026-08-26 | ✅ **Reviewer 独立复审通过**（9 项 P3 建议无阻塞：ttl=0 语义反转/直连回退注释/retry_base 2.0 vs plan/per-source 变全局/robots 无 UA 头+魔法数字/构造复杂/死代码/3 AC 缺专测/jitter 描述；tests/crawl 119/0 + py_compile OK；详见 specs/module-077-antibot-proxy/review-report.md；待 Tester） |
+| module-078 | 审查节点增强（ADR-0019 阶段2 第四片：阈值配置化 + 策略三档 + 矛盾检测 + review_score 四层透传 + 结构化日志） | 0.78.0-module-078 | 2026-08-26 | ✅ **完成（Tester 验收通过 31/31**：28 新单测 + crawl 91/0 + 全量 1338/4（proxies 基线）+ 真实冒烟（结构化日志/review_status+review_score 落库/矛盾检测 fail-open）；Reviewer PASS 4 项 minor 非阻塞；详见 specs/module-078-review-enhancement/） |
+| module-079 | 增量 Append 不重建路径验证（ADR-0019 阶段3：dedup numpy bug 修复 + 增量入库验证脚本 + pytest 验收） | — | — | 👀 **Developer 实现完成**（2026-08-26：find_semantic_duplicate 加固 pgvector SQL top-K + ndarray bug 结构性根除 + config 1 项 + 验证脚本 + 16 项 pytest 全绿 + 全量 1396/4 基线） |
+| module-080 | 反向闭环（低分题→待学笔记→自动抓取优先级） | 0.80.0-module-080 | 2026-08-26 | ✅ **Developer 实现完成**（2026-08-26：weak_topics.py + database.py priority 列 + crawler.py 动态加权 + main.py 2 端点 + config 1 项 + schemas 1 项 + 测试 22 项全绿 + 全量 1449/4 基线） |
 
 | ADR 编号 | 决策标题 | 状态 | 日期 |
 |----------|----------|------|------|
@@ -102,15 +105,19 @@
 | adr-018 | MCP 集成（ToolRegistry 暴露为标准 MCP Server：6 只读工具 + stdio/Streamable HTTP 双传输 + PW_MCP_TOKEN fail-closed） | ✅ 已实施（module-067，2026-08-17）：决策 1 官方 FastMCP 动态遍历注册（ToolRegistry 单一事实源零改动）+ 决策 2 双传输（stdio 本地 + streamable_http_path="/" 挂载 /ai/mcp）+ 决策 3 token 认证（lifespan fail-closed 拒绝启动 + 中间件 hmac 常量时间比较 + 6 只读显式白名单 + 截断 2000）+ 决策 4 边界（不做 client/工具治理迁移/完整问答/SSE）；mcp==1.26.0 版本适配 5 点（构造参数/无 version/Mount 不转发 lifespan/DNS rebinding 421/streamable_http_path） | 2026-08-17 |
 
 ## 5. 当前迭代状态
-- 当前迭代版本: v0.77.0（module-077 反爬绕过+代理池 Planner 规划完成）
+- 当前迭代版本: v0.80.0（module-080 反向闭环 ✅ Developer 实现完成 2026-08-26）
+
 - 完成: **module-075 知识抓取流水线**（ADR-0019 阶段2 第一片，✅ Tester 验收通过 2026-08-25）
+- 完成: **module-078 审查节点增强**（ADR-0019 阶段2 第四片，✅ Tester 验收通过 2026-08-26，31/31）
 
 - 正在进行的模块: **module-071 幻觉检测 kappa 校准**（Reviewer 第二轮复审 PASS 2026-08-18，待 Tester 验收）
 - 正在进行的模块: **module-072 意图路由 Backlog 前三项**（Reviewer 二轮复审 ✅ PASS 2026-08-19，待 Tester 验收）
 - 正在进行的模块: **module-073 工具防重复 + 失败自动重试 + 日志隐私修正**（Reviewer PASS 2026-08-19，待 Tester 验收）
-- 下一个待开发模块: **module-076 递归爬取+深度控制+去重**（ADR-0019 阶段2 第二片，Planner 规划完成）
-- 下一个待开发模块: **module-077 反爬绕过+代理池**（ADR-0019 阶段2 第三片，Planner 规划完成；Playwright 评估后排除）
-- 下一个待开发模块: backlog 另含：阶段2 后续模块 078-080（审查增强/增量append/反向闭环）、存量 124 篇根父块 doc embedding 回填、OCR/VLM/MinerU 接入后图片价值过滤真实评分接线、L4 多轮拼接重训生效、记忆 P4 反馈闭环、WP-A 拼标题+防扎堆、L2 阈值再校准、矛盾检测 Recall 提升、飞轮重训管线、τ-bench 式 simulated user 演进（ADR-0017 诚实边界）、**命中判定字符串耦合解耦**（module-068 遗留）、module-08x Playwright 无头浏览器渲染（module-077 评估排除，留后续按需接入）
+- 正在进行的模块: **module-079 增量 append**（ADR-0019 阶段3，Developer 实现完成，待 Reviewer）
+- 正在进行的模块: **module-080 反向闭环**（ADR-0019 最后验收项，✅ Developer 实现完成，待 Reviewer）
+
+- 下一个待开发模块: backlog 另含：~~阶段2 后续模块 080（反向闭环）~~（✅ Developer 实现完成）存量 124 篇根父块 doc embedding 回填、OCR/VLM/MinerU 接入后图片价值过滤真实评分接线、L4 多轮拼接重训生效、记忆 P4 反馈闭环、WP-A 拼标题+防扎堆、L2 阈值再校准、矛盾检测 Recall 提升、飞轮重训管线、τ-bench 式 simulated user 演进（ADR-0017 诚实边界）、**命中判定字符串耦合解耦**（module-068 遗留）、~~**document_dedup.py:157 numpy 真值判定缺陷修复**~~（已纳入 module-079）、module-08x Playwright 无头浏览器渲染（module-077 评估排除，留后续按需接入）
+
 ## 7. 关键技术决策记录
 - 所有 API 返回格式统一为 {code, msg, data, timestamp, request_id}（详见 CLAUDE.md 第5节）
 - 使用 JWT 进行用户认证
