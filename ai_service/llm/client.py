@@ -35,7 +35,6 @@ import logging
 from abc import ABC, abstractmethod
 from typing import AsyncGenerator, Optional
 
-from langchain_anthropic import ChatAnthropic
 from langchain_openai import ChatOpenAI
 
 from src.config import settings
@@ -303,6 +302,9 @@ class ClaudeClient(LLMClient):
     def __init__(self, temperature: float = 0.7):
         if not settings.claude_api_key:
             raise LLMException("claude", "CLAUDE_API_KEY 未配置")
+        # 懒加载：仅 claude provider 分支使用；langchain-anthropic 0.x 与 langchain-core 0.2 无兼容版本，
+        # 模块级 import 会让 deepseek 等 OpenAI 兼容链路白白背负启动硬依赖（2026-08-25 环境恢复时修）。
+        from langchain_anthropic import ChatAnthropic
         self._llm = ChatAnthropic(
             model=settings.claude_model,
             api_key=settings.claude_api_key,
