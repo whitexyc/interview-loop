@@ -260,4 +260,5 @@ fJt
 | module-077 | specs/module-077-antibot-proxy/ | ✅ **Reviewer 独立复审通过**（2026-08-26）：9 项 P3 无阻塞；tests/crawl 119/0 + py_compile OK；review-report.md 已产出；待 Tester |
 | module-079 | specs/module-079-incremental-append/ | 👀 **Developer 实现完成**（2026-08-26）：find_semantic_duplicate 加固 pgvector SQL top-K + ndarray bug 结构性根除 + config 1 项 + 验证脚本 + 16 项 pytest 全绿 + 全量 1396/4 基线；待 Reviewer |
 | module-080 | specs/module-080-reverse-loop/ | ✅ **Tester 验收通过**（2026-08-26）：定向 22/22 + 全量 1449/4 基线 + py_compile 6/6 + DB 幂等验证 + 静态冒烟（8001 未加载 080 代码需编排者重启补真实冒烟）；Reviewer 0 阻塞 6 LOW；test-report.md 已产出 |
+| module-081 | specs/module-081-sag-sql-retrieval/ | ✅ **四阶段闭环验收通过**（2026-08-27）：SAG 检索模式（实体/事件抽取 + SQL join 连边 + RAG/SAG 开关），Plan/Develop/Review/Test 五件套齐；真实冒烟 SQL 通道命中；详见 spec 目录 |
 > 每个模块目录含 plan.md / acceptance-criteria.md / changelog.md / review-report.md / test-report.md。|
