@@ -4,8 +4,8 @@
 - 项目名称: personal-interview-website
 - 项目简介: 融合简历展示与 Agentic RAG 知识库问答的个人网站系统（双语言微服务架构：Java Spring Boot + Python FastAPI + React 前端）
 - 创建时间: 2026-07-29
-- 最后更新: 2026-08-26（**module-081 Planner 规划完成**：SAG 检索模式，plan.md + acceptance-criteria.md 已产出）
-> 详见 `tech-stack.md`，此处仅保留摘要。
+- 最后更新: 2026-08-28（**module-082 SAG 补强轮 Reviewer 审查通过**：search 端点 SAG 感知 + 非 LLM 兜底 + hybrid_sag boost ×1.2；18 新增测试全绿 + 全量 1485/4 基线 + ~108 行生产代码；Reviewer 0 阻塞 3 LOW）
+- 最后更新: 2026-08-28（**module-082 SAG 补强轮 Tester 验收通过**：search 端点三模式真实冒烟通过 + 兜底验证通过 + AC 33/33 + 全量 1485/4 基线零新增失败 + 3 LOW 非阻塞）
 - 后端 (Java): Spring Boot 3.2 + MyBatis-Plus + PostgreSQL
 - 前端: React 18 + TypeScript + Vite + Ant Design
 - AI 层 (Python): FastAPI + LangChain + pgvector
@@ -91,7 +91,8 @@
 | module-079 | 增量 Append 不重建路径验证（ADR-0019 阶段3：dedup numpy bug 修复 + 增量入库验证脚本 + pytest 验收） | — | — | 👀 **Developer 实现完成**（2026-08-26：find_semantic_duplicate 加固 pgvector SQL top-K + ndarray bug 结构性根除 + config 1 项 + 验证脚本 + 16 项 pytest 全绿 + 全量 1396/4 基线） |
 | module-080 | 反向闭环（低分题→待学笔记→自动抓取优先级） | 0.80.0-module-080 | 2026-08-26 | ✅ **Tester 验收通过**（2026-08-26：定向 22/22 + 全量 1449/4 基线/3 skipped + py_compile 6/6 + DB 幂等验证 + 静态冒烟（8001 未加载 080 代码需编排者重启补真实冒烟）；Reviewer 0 阻塞 6 LOW；详见 specs/module-080-reverse-loop/test-report.md） |
 | module-081 | SAG 检索模式（SQL-Retrieval Augmented Generation，Zleap arXiv 2606.15971） | 0.81.0-module-081 | 2026-08-26 | ✅ **Tester（编排者接管）验收通过**（2026-08-27：SAG 15/15 + module-080 31/31 + crawl 160/0 + 全量 1467/4 基线/3 skip/1 陈旧 error 零新增失败 + 真实冒烟 8001 SAG 模式 200 + SQL join 通道真实命中；Reviewer 0 阻塞 4 LOW；详见 specs/module-081-sag-sql-retrieval/test-report.md） |
-| ADR 编号 | 决策标题 | 状态 | 日期 |
+| module-082 | SAG 补强轮（search 端点感知 retrieval_mode + SAG 非 LLM 兜底 + hybrid_sag 排序） | 0.82.0-module-082 | 2026-08-28 | ✅ **Tester 验收通过**（2026-08-28：定向 33/33 + retrieval 59/59 + 全量 1485/4 基线零新增失败 + 真实冒烟三模式 search 端点（hybrid_sag 6 结果 SAG 置首 / sag 1 结果纯 SAG / hybrid 5 结果零变化）+ 兜底验证通过（LLM 不可用时 SAG 仍返回结果）+ py_compile 2/2 OK + AC 33/33；详见 specs/module-082-sag-hardening/test-report.md） |
+- 当前迭代版本: v0.82.0（module-082 SAG 补强轮 ✅ Tester 验收通过 2026-08-28）
 |----------|----------|------|------|
 | adr-003 | Intent 正确性校验四层方案（L1 评测/L2 确定性信号确认/L3 后置反证/L4 bge-m3+逻辑回归分类器） | ✅ 已实施（L1-L3 module-043/047/055；**L4 已启用 module-056：人造 337 条重训 Accuracy 1.0 + golden_intent 真实对比 LLM vs 分类器双 1.0000 → PW_INTENT_CLASSIFIER_ENABLED 默认开，失败回退 LLM**） | 2026-08-08（2026-08-12 更新） |
 | adr-009 | Query 改写优化方案（分诊式改写 + 保真校验 + 评测闭环） | ✅ 已实施（module-049：静态 FTS 分诊 + 保真预检 + 并行检索择优 + golden_query_rewrite 评测闭环） | 2026-08-10 |
@@ -104,7 +105,7 @@
 | adr-018 | MCP 集成（ToolRegistry 暴露为标准 MCP Server：6 只读工具 + stdio/Streamable HTTP 双传输 + PW_MCP_TOKEN fail-closed） | ✅ 已实施（module-067，2026-08-17）：决策 1 官方 FastMCP 动态遍历注册（ToolRegistry 单一事实源零改动）+ 决策 2 双传输（stdio 本地 + streamable_http_path="/" 挂载 /ai/mcp）+ 决策 3 token 认证（lifespan fail-closed 拒绝启动 + 中间件 hmac 常量时间比较 + 6 只读显式白名单 + 截断 2000）+ 决策 4 边界（不做 client/工具治理迁移/完整问答/SSE）；mcp==1.26.0 版本适配 5 点（构造参数/无 version/Mount 不转发 lifespan/DNS rebinding 421/streamable_http_path） | 2026-08-17 |
 
 ## 5. 当前迭代状态
-- 当前迭代版本: v0.81.0（module-081 SAG 检索模式 🔵 Planner 规划完成 2026-08-26）
+- 当前迭代版本: v0.82.0（module-082 SAG 补强轮 ✅ Tester 验收通过 2026-08-28）
 
 - 完成: **module-075 知识抓取流水线**（ADR-0019 阶段2 第一片，✅ Tester 验收通过 2026-08-25）
 - 完成: **module-078 审查节点增强**（ADR-0019 阶段2 第四片，✅ Tester 验收通过 2026-08-26，31/31）
