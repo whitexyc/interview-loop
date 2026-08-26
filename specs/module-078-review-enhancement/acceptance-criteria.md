@@ -66,8 +66,8 @@
 | AST 行数 | REVIEW 阶段口径核对 | 本模块新增生产代码 ≤ 200 行 |
 
 ## 4. 验收结论
-- 审查人: Reviewer (module-078)
-- 测试人: Tester (module-078)
-- 验收时间: 待定
-- 结论: [ ] 通过 / [ ] 不通过
-- 备注: （待 REVIEW/TEST 阶段填写；不通过时注明阻塞项与行号证据）
+- 审查人: Reviewer (module-078) —— ✅ 通过（2026-08-26，4 项 minor 非阻塞）
+- 测试人: Tester (module-078) —— ✅ 通过（2026-08-26，31/31）
+- 验收时间: 2026-08-26
+- 结论: [x] 通过 / [ ] 不通过
+- 备注: 全量回归 1338 passed / 3 skipped / 4 failed（4 个均为 module-028 langchain-openai `proxies` 环境性基线遗留，非本模块）；真实冒烟通过（结构化日志 / review_status+review_score 落库 / 矛盾检测 fail-open）；详见 test-report.md。遗留：O-T1 document_dedup.py:157 numpy 真值判定既有缺陷（入 backlog）、Reviewer 4 项 minor、HHEM 权重补齐后复验真实评分

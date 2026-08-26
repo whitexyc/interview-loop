@@ -61,3 +61,6 @@ ai_service/eval/datasets/public/
 /docker-compose.yml
 /start.bat
 /tech-stack.md
+
+# CodeGraph index (本地索引库，随时用 `codegraph init` 重建，不进 git)
+.codegraph/

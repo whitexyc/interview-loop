@@ -106,6 +106,20 @@ class Document(Base):
         comment="簇内 canonical：true=检索可见，false=重复副本检索抑制（module-064）"
     )
 
+    # module-075 知识抓取流水线：review_status 审查状态标记（approved/rejected）
+    # 抓取内容经 reflector + factcheck_judge 审查；rejected 仍入库（fail-open 不丢
+    # 数据，仅标记供复核/后续人工处置）。存量行默认 'approved'（DB DEFAULT 兜底）。
+    review_status = Column(
+        String(16), nullable=False, default="approved",
+        comment="审查状态：approved（通过）/ rejected（不通过，仍入库可复核）——module-075"
+    )
+    # module-078 审查节点增强：review_score 审查质量分（HHEM score 0-1）。
+    # HHEM 不可用 → NULL（诚实不编造分数）；存量行 NULL 兼容（不追填）。
+    review_score = Column(
+        Float, nullable=True,
+        comment="审查质量分（HHEM score 0-1，NULL=不可用）——module-078"
+    )
+
     def __repr__(self) -> str:
         return f"<Document id={self.id} title={self.title!r} source={self.source!r}>"
 

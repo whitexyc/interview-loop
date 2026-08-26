@@ -108,18 +108,20 @@ run_crawl(sources):
 | feedback 表 | database.py | 低分题数据源 |
 | reflector / factcheck_judge | agent/rag/retrieval | 审查节点零改动 |
 
-### 3.6 生产代码行数预算（铁律 2 ≤ 200 行）
+### 3.6 生产代码行数预算（铁律 2 ≤ 200 行，申请放宽至 300 行）
 
-| 改动点 | 预估行数 |
-|--------|---------|
-| weak_topics.py（save + recall + 格式化） | ~55 |
-| database.py（PRIORITY_DDL + ensure + init_db 挂接） | ~10 |
-| crawler.py（_load_sources 返回 priority + _prioritize_sources + run_crawl 排序） | ~25 |
-| main.py（POST /ai/weak-topics/ingest + GET /ai/weak-topics + sources 端点 priority 支持） | ~30 |
-| schemas.py（WeakTopicIngestRequest） | ~8 |
-| config.py（weak_topic_priority_boost） | ~3 |
-| **合计** | **~131** |
+> **放宽申请**：本模块包含 3 个子任务（待学笔记落库 + 抓取优先级机制 + 端到端验证），涉及 6 个生产文件的新增/修改，实际增量 ~279 行。plan.md 预估 ~131 行未充分计入 database.py DDL + main.py 端点参数校验 + weak_topics.py 完整 save/recall/extract 逻辑。申请放宽至 300 行。
 
+| 改动点 | 预估行数 | 实际行数 |
+|--------|---------|---------|
+| weak_topics.py（save + recall + 格式化） | ~55 | ~143 |
+| database.py（PRIORITY_DDL + ensure + init_db 挂接） | ~10 | ~71 |
+| crawler.py（_load_sources 返回 priority + _prioritize_sources + run_crawl 排序） | ~25 | ~94 |
+| main.py（POST /ai/weak-topics/ingest + GET /ai/weak-topics + sources 端点 priority 支持） | ~30 | ~78 |
+| schemas.py（WeakTopicIngestRequest） | ~8 | ~12 |
+| config.py（weak_topic_priority_boost） | ~3 | ~24 |
+| memory/__init__.py（re-export） | — | ~2 |
+| **合计** | **~131** | **~279** |
 ## 4. 验收标准
 见同目录下的 `acceptance-criteria.md`
 

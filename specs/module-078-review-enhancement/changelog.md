@@ -72,15 +72,46 @@
 
 ## 5. 测试结果
 
-| 验证项 | 命令 | 结果 |
-|--------|------|------|
-| 新增单测 | `pytest tests/crawl/test_review_enhancement.py -v` | 28 passed, 0 failed |
-| crawl 全量 | `pytest tests/crawl/ -v` | 91 passed（63 存量 + 28 新增）, 0 failed |
-| 全量回归 | `pytest tests/ -q` | 1338 passed, 3 skipped, 4 failed（全部为 langchain-openai `proxies` 基线遗留，module-028 环境性，与本模块无关） |
-| 阈值配置 | `PW_CRAWL_HHEM_THRESHOLD=0.5` → settings.crawl_hhem_threshold | 0.5 ✓（实测） |
-| 策略配置 | `PW_CRAWL_REVIEW_POLICY=strict` → settings.crawl_review_policy | strict ✓（实测） |
-| 非法策略 fail-fast | `PW_CRAWL_REVIEW_POLICY=bogus` 启动 | ValidationError ✓（实测） |
-| py_compile | 7 个改动文件 | 无报错 ✓（实测） |
+### 新增单测
+```bash
+pytest tests/crawl/test_review_enhancement.py -v
+# 28 passed, 0 failed
+```
+
+### crawl 全量
+```bash
+pytest tests/crawl/ -v
+# 91 passed（63 存量 + 28 新增）, 0 failed
+```
+
+### 全量回归
+```bash
+pytest tests/ -q
+# 1338 passed, 3 skipped, 4 failed（全部为 langchain-openai proxies 基线遗留，module-028 环境性，与本模块无关）
+```
+
+### 阈值配置验证
+```bash
+PW_CRAWL_HHEM_THRESHOLD=0.5 python -c "from src.config import settings; print(settings.crawl_hhem_threshold)"
+# 0.5 ✓（实测）
+```
+
+### 策略配置验证
+```bash
+PW_CRAWL_REVIEW_POLICY=strict python -c "from src.config import settings; print(settings.crawl_review_policy)"
+# strict ✓（实测）
+```
+
+### 非法策略 fail-fast
+```bash
+PW_CRAWL_REVIEW_POLICY=bogus python -c "from src.config import settings"  # 启动报 ValidationError ✓（实测）
+```
+
+### py_compile
+```bash
+python -c "import py_compile; [py_compile.compile(f) for f in ['rag/crawl/crawler.py', 'src/config.py', 'src/database.py', 'rag/memory/nli_judge.py', 'rag/memory/memory_conflict_clf.py', 'rag/retrieval/factcheck_judge.py', 'rag/retrieval/embeddings.py']]"
+# 无报错 ✓（实测）
+```
 
 ## 6. 变更记录
 

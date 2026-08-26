@@ -195,7 +195,8 @@
 | ai_service/tests/memory/test_weak_topics.py | module-080 | 测试 | 待学笔记单元测试 15 项（source 构造 / 保存 / 去重 / 读取 / 关键词提取） | 2026-08-26 | 2026-08-26 | ✅ |
 | ai_service/tests/crawl/test_crawl_priority.py | module-080 | 测试 | 抓取优先级单元测试 7 项（动态加权 / 排序 / 降级 / run_crawl 集成） | 2026-08-26 | 2026-08-26 | ✅ |
 | specs/module-080-reverse-loop/changelog.md | module-080 | 文档 | 变更日志（待学笔记 + 抓取优先级 + 端点 + 测试） | 2026-08-26 | 2026-08-26 | ✅ |
-
+| specs/module-080-reverse-loop/review-report.md | module-080 | 审查 | Reviewer 审查报告（22 验收全过 + 0 阻塞 6 建议改进 + 端到端闭环 6 节打通 + 五轴 22/25） | 2026-08-26 | 2026-08-26 | ✅ |
+| specs/module-080-reverse-loop/test-report.md | module-080 | 测试 | Tester 验收报告（定向 22/22 + 全量 1449/4 基线 + DB 幂等验证 + 静态冒烟 8001 未加载需重启） | 2026-08-26 | 2026-08-26 | ✅ |
 fJt
 
 ## 三、前端核心文件（frontend/，module-003+）
@@ -258,5 +259,5 @@ fJt
 | module-076 | specs/module-076-recursive-crawl/ | 🔵 Planner 规划完成（2026-08-26）：递归爬取+深度控制+URL去重；plan.md + acceptance-criteria.md 已产出 |
 | module-077 | specs/module-077-antibot-proxy/ | ✅ **Reviewer 独立复审通过**（2026-08-26）：9 项 P3 无阻塞；tests/crawl 119/0 + py_compile OK；review-report.md 已产出；待 Tester |
 | module-079 | specs/module-079-incremental-append/ | 👀 **Developer 实现完成**（2026-08-26）：find_semantic_duplicate 加固 pgvector SQL top-K + ndarray bug 结构性根除 + config 1 项 + 验证脚本 + 16 项 pytest 全绿 + 全量 1396/4 基线；待 Reviewer |
-| module-080 | specs/module-080-reverse-loop/ | 🔵 **Planner 规划完成**（2026-08-26）：反向闭环低分题→待学笔记→自动抓取优先级；plan.md + acceptance-criteria.md 已产出
+| module-080 | specs/module-080-reverse-loop/ | ✅ **Tester 验收通过**（2026-08-26）：定向 22/22 + 全量 1449/4 基线 + py_compile 6/6 + DB 幂等验证 + 静态冒烟（8001 未加载 080 代码需编排者重启补真实冒烟）；Reviewer 0 阻塞 6 LOW；test-report.md 已产出 |
 > 每个模块目录含 plan.md / acceptance-criteria.md / changelog.md / review-report.md / test-report.md。|
