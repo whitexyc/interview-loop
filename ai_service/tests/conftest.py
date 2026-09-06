@@ -128,6 +128,20 @@ def request_logs_disabled(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def default_trace_spans_disabled(monkeypatch):
+    """测试环境统一钉住链路式观测开关=关闭（module-088，对齐 056/058/066 模式）
+
+    生产默认已开启（PW_TRACE_SPANS_ENABLED 默认 true），但单测需 hermetic：不依赖
+    真实 DB 落库、不污染 request_spans 表（中间件 088 块整块跳过、所有
+    record_span/begin_request 首行短路，058 行为逐字不变——存量测试零漂移）。
+    新测试（test_tracing.py）体内显式开启验证（配合假 session 打桩）。
+    """
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "trace_spans_enabled", False)
+
+
+@pytest.fixture(autouse=True)
 def default_verify_async_disabled(monkeypatch):
     """测试环境统一钉住 verify 异步开关=关闭（module-060，对齐 056/058 模式）
 

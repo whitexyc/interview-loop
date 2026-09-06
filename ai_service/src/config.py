@@ -146,6 +146,13 @@ class Settings(BaseSettings):
     # autouse fixture 钉住 false（测试不污染落库）。
     tool_call_logs_enabled: bool = True
 
+    # 链路式观测（module-088）：request_spans span 树落库（X-Trace-Id 入站
+    # 传播/根 span/决策级日志）。默认 true（与 request_logs/tool_call_logs
+    # 同生命周期）；false 零埋点零落库（中间件不建根 span、所有 record_span
+    # 首行短路，058 行为逐字不变）。测试环境由 conftest autouse fixture 钉住
+    # false（存量测试零漂移）。
+    trace_spans_enabled: bool = True
+
     # 工具默认超时（module-083 WP-C）：AgentTool.timeout 缺省值来源——现有
     # 10 工具不传 → 全 15.0（零行为变化）；测量调优不在本模块（tool_call_logs
     # 已记 duration_ms，module-085 看板拉 P95 后按数据调整各工具值）。

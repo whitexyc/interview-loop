@@ -22,6 +22,7 @@ from src.ratelimit import check_rate_limit, get_client_ip
 from src.cache import cache
 from src.identity import parse_jwt, resolve_identity
 from src import observability
+from src import tracing  # module-088 链路式观测（span 树写侧/读侧）
 from src.dashboard import get_dashboard_metrics  # module-085 可观测看板读侧聚合
 from src.verify_tasks import submit_verify_task, get_verify_task
 from mcp_server import mcp as mcp_server, mcp_http_lifespan
@@ -241,6 +242,19 @@ async def rate_limit_middleware(request: Request, call_next):
             content={"message": f"请求过于频繁，请 {retry_after} 秒后重试", "retry_after": retry_after},
             headers={"Retry-After": str(retry_after)},
         )
+
+    # module-088：链路式观测——上游 X-Trace-Id 优先（跨进程传播），缺失/非法
+    # 回退自生成（058 行为）；建根 span（kind=request）。块位置在限流短路之后
+    #（429 请求零 span 不进链路）且在 call_next 之前（contextvar 随 task 快照
+    # 传给 downstream，058 已实证）；init_request 幂等覆盖 058 块——
+    # request_logs 与 request_spans 的 trace_id 恒同值。
+    if settings.trace_spans_enabled:
+        trace_id = tracing.sanitize_incoming_trace(
+            request.headers.get("X-Trace-Id", "")) or observability.make_trace_id()
+        observability.init_request(trace_id)
+        request.state.trace_id = trace_id
+        tracing.begin_request(trace_id=trace_id, endpoint=request.url.path,
+                              identity=resolve_identity(request))
 
     return await call_next(request)
 
@@ -553,16 +567,18 @@ async def _stream_generate_verify(request, fastapi_req, identity, intent, _t, do
     if settings.verify_async_enabled:
         task_id = await submit_verify_task(clean_answer, docs, identity=identity, query=request.query, trace_id=getattr(fastapi_req.state, "trace_id", ""))
         observability.timing("verify_submit", _t() - vf_t0)
-        yield _build_done_event(sources, verified=False, **({"verify_task_id": task_id} if task_id else {}))
+        # module-088：done 事件带 trace_id（跨进程链路入口；_build_done_event
+        # 签名不改，extra 吸收，3 处调用点同改）
+        yield _build_done_event(sources, verified=False, **({"verify_task_id": task_id} if task_id else {}), trace_id=getattr(fastapi_req.state, "trace_id", ""))
     else:
         verified = await reflector.verify_answer(clean_answer, docs)
         observability.timing("verify", _t() - vf_t0)
         if verified.get("claims"):
             v_data = {k: verified[k] for k in ("claims", "overall_confidence", "total_claims", "supported", "inferred", "unsupported")}
             yield f"event: verified\ndata: {json.dumps(v_data, ensure_ascii=False)}\n\n"
-            yield _build_done_event(sources, verified=True, overall_confidence=verified["overall_confidence"])
+            yield _build_done_event(sources, verified=True, overall_confidence=verified["overall_confidence"], trace_id=getattr(fastapi_req.state, "trace_id", ""))
         else:
-            yield _build_done_event(sources, verified=False)
+            yield _build_done_event(sources, verified=False, trace_id=getattr(fastapi_req.state, "trace_id", ""))
 async def _stream_no_docs_fallback(query, intent, identity):
     """无文档时生成兜底回答并返回 SSE 事件序列"""
     from llm.client import LLMFactory
@@ -605,6 +621,14 @@ async def _chat_stream_events(request, fastapi_req, identity):
         intent_result = await router_agent.classify(request.query, history=request.history, tool_history=await resolve_tool_history(identity))
         intent = intent_result.get("intent", "knowledge")
         observability.timing("intent", _t() - t0)
+        # module-088：意图路由 span（决策级——intent + router reason 原文，与
+        # engine.chat 侧同构成对，plan §1 决策 2 / AC-20 双路径）。f-string
+        # 引用的 intent 已在上行赋值（急切求值不吃开关短路保护，偏离 5 教训）
+        tracing.record_span(
+            "intent_routing", "decision",
+            decision=(f"intent={intent} "
+                      f"reason={intent_result.get('reason', '')[:200]}"),
+            duration_ms=int((_t() - t0) * 1000))
         labels = {"knowledge": "知识库", "casual_chat": "闲聊", "realtime": "实时数据"}
         yield _build_step_event("intent", {"label": labels.get(intent, intent), "confidence": intent_result.get("confidence", 0)}, int((_t() - t0) * 1000))
         if intent == "casual_chat":
@@ -774,7 +798,8 @@ async def chat_agent(request: ChatRequest, fastapi_req: Request):
             # module-036：Agent 对话完成后异步持久化会话轮次（fire-and-forget，
             # 不阻塞 SSE；内部 guard 空 answer 不写，与 chat_stream 一致）
             rag_engine._schedule_session_persist(identity, request.query, answer)
-            yield f"event: done\ndata: {json.dumps({'answer': answer, 'sources': sources, 'tool_count': tool_count, 'budget': budget}, ensure_ascii=False)}\n\n"
+            # module-088：agent done 事件带 trace_id（点请求看链路的数据入口）
+            yield f"event: done\ndata: {json.dumps({'answer': answer, 'sources': sources, 'tool_count': tool_count, 'budget': budget, 'trace_id': getattr(fastapi_req.state, 'trace_id', '')}, ensure_ascii=False)}\n\n"
         except Exception as e:
             failed = True
             logger.error("Agent 问答失败: %s", e, exc_info=True)
@@ -851,7 +876,8 @@ async def chat_agent_langgraph(request: ChatRequest, fastapi_req: Request):
             # module-036：Agent 对话完成后异步持久化会话轮次（fire-and-forget，
             # 不阻塞 SSE；内部 guard 空 answer 不写，与 chat_stream 一致）
             rag_engine._schedule_session_persist(identity, request.query, answer)
-            yield f"event: done\ndata: {json.dumps({'answer': answer, 'sources': sources, 'tool_count': tool_count, 'budget': budget}, ensure_ascii=False)}\n\n"
+            # module-088：agent-lg done 事件带 trace_id（与 agent 端点对齐）
+            yield f"event: done\ndata: {json.dumps({'answer': answer, 'sources': sources, 'tool_count': tool_count, 'budget': budget, 'trace_id': getattr(fastapi_req.state, 'trace_id', '')}, ensure_ascii=False)}\n\n"
         except Exception as e:
             failed = True
             logger.error("LangGraph Agent 问答失败: %s", e, exc_info=True)
@@ -1301,6 +1327,31 @@ async def get_observability_dashboard(hours: int = 24):
         logger.warning("看板查询失败（fail-open）: %s", e)
         return {"code": 1, "msg": "看板查询失败（fail-open）"}
     return {"code": 0, "msg": "success", "data": data}
+
+
+# ─── 链路式观测 trace（module-088：一次请求一条 trace = N spans，只读） ───
+
+
+@app.get("/ai/observability/trace/{trace_id}")
+async def get_observability_trace(trace_id: str):
+    """单请求链路 span 树（module-088；只读 fail-open）
+
+    Args:
+        trace_id: 请求追踪 ID（SSE done 事件 / request_logs.trace_id 同值）
+
+    Returns:
+        {code, msg, data}：data={trace_id, span_count, tree}（树形 JSON，
+        plan §7 契约）；trace 不存在 / 查询异常 → code 1 友好降级不 500
+        （读侧哲学对齐 085 看板端点）
+    """
+    try:
+        tree = await tracing.get_trace_tree(trace_id)
+    except Exception as e:  # fail-open：读侧降级为提示，不 500
+        logger.warning("trace 查询失败（fail-open）: %s", e)
+        return {"code": 1, "msg": "trace 查询失败（fail-open）"}
+    if tree is None:
+        return {"code": 1, "msg": "trace 不存在"}
+    return {"code": 0, "msg": "success", "data": tree}
 
 
 if __name__ == "__main__":

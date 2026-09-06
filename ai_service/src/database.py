@@ -146,6 +146,49 @@ async def ensure_approval_requests_table() -> None:
         await session.commit()
 
 
+# request_spans 表 DDL（module-088 链路式观测）：与 feedback/request_logs 同款
+# 模式——独立建表 + 启动 init_db 自愈建表（CREATE TABLE IF NOT EXISTS，幂等）。
+# 一次请求一条 trace = N spans：根 span（kind=request，parent_span_id=''）即
+# trace 锚；决策级日志（为什么选这个工具/分支）落 decision 列（截断 500）。
+# 无 ORM 模型（raw INSERT，对齐 tool_call_logs 先例，写入侧在 src/tracing.py）。
+REQUEST_SPANS_DDL = """
+CREATE TABLE IF NOT EXISTS request_spans (
+    id              BIGSERIAL    PRIMARY KEY,
+    trace_id        VARCHAR(64)  NOT NULL,
+    span_id         VARCHAR(32)  NOT NULL,
+    parent_span_id  VARCHAR(32)  NOT NULL DEFAULT '',
+    name            VARCHAR(128) NOT NULL,
+    kind            VARCHAR(32)  NOT NULL DEFAULT 'decision',
+    identity        VARCHAR(256) NOT NULL DEFAULT '',
+    decision        TEXT         NOT NULL DEFAULT '',
+    status          VARCHAR(16)  NOT NULL DEFAULT 'ok',
+    duration_ms     INTEGER      NOT NULL DEFAULT 0,
+    started_at      TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_request_spans_trace ON request_spans (trace_id);
+COMMENT ON TABLE request_spans IS '请求链路 span（module-088：一次请求一条 trace = N spans，根 span kind=request）';
+COMMENT ON COLUMN request_spans.trace_id IS '请求追踪 ID（关联 request_logs；上游 X-Trace-Id 优先）';
+COMMENT ON COLUMN request_spans.span_id IS 'span ID（uuid4 hex 截 16）';
+COMMENT ON COLUMN request_spans.parent_span_id IS '父 span ID（根 span 为空串）';
+COMMENT ON COLUMN request_spans.name IS 'span 名（端点路径/工具名/决策点名/检索）';
+COMMENT ON COLUMN request_spans.kind IS 'span 类型：request/tool/decision/retrieval';
+COMMENT ON COLUMN request_spans.identity IS '请求身份（仅根 span 填，user_id 优先 client_ip 兜底，对齐 048 口径）';
+COMMENT ON COLUMN request_spans.decision IS '决策原因（为什么选这个工具/分支；截断 500）';
+COMMENT ON COLUMN request_spans.status IS 'span 状态：ok/error/blocked（守门拒绝）';
+COMMENT ON COLUMN request_spans.duration_ms IS '耗时毫秒（决策点可为 0）';
+COMMENT ON COLUMN request_spans.started_at IS 'span 开始时间（Python 侧 utcnow，请求内排序）';
+"""
+
+
+async def ensure_request_spans_table() -> None:
+    """幂等创建 request_spans 表（与 feedback/request_logs 同款拆分执行模式）"""
+    statements = [s.strip() for s in REQUEST_SPANS_DDL.split(";") if s.strip()]
+    async with async_session_factory() as session:
+        for stmt in statements:
+            await session.execute(text(stmt))
+        await session.commit()
+
+
 # verify_results 表 DDL（module-060 verify 异步化）：与 feedback/request_logs
 # 同款模式——独立建表 + 启动 init_db 自愈建表（CREATE TABLE IF NOT EXISTS，幂等）。
 # claims 用 JSONB 存逐句验证结果（claim/verdict/evidence），overall_confidence/
@@ -307,6 +350,8 @@ async def init_db():
     logger.info("documents 表 embedding HNSW 索引已就绪（backlog P2 修复）")
     await ensure_sag_tables()
     logger.info("SAG 三表已就绪（module-081 sag_entities/sag_events/sag_relations）")
+    await ensure_request_spans_table()
+    logger.info("request_spans 表已就绪（module-088 链路式观测）")
 
 # documents.embedding HNSW 索引（backlog P2 修复，2026-08-26）：
 # 检索/去重均走 ORDER BY embedding <=> :vec LIMIT k，无索引时是 14k+ 行顺序扫描。

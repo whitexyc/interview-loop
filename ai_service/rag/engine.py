@@ -31,6 +31,7 @@ from src.database import async_session_factory
 from llm.client import LLMFactory
 from src.cache import cache
 from src import observability
+from src import tracing  # module-088 链路式观测埋点（意图路由/检索 span）
 from rag.schemas import SearchRequest, SearchResponse, ChatRequest, ChatResponse, ChatSteps
 from rag.models import Document
 from rag.retrieval.embeddings import embedding_service
@@ -393,6 +394,13 @@ class RAGEngine:
                     tool_history=tool_history)
             observability.timing("intent", time.perf_counter() - _t0)
             intent = intent_result.get("intent", "knowledge")
+            # module-088：意图路由 span（决策级——intent + router reason 原文
+            # 截 200，即"为什么路由到该分支"；reason 来源见 router.py）
+            tracing.record_span(
+                "intent_routing", "decision",
+                decision=(f"intent={intent} "
+                          f"reason={intent_result.get('reason', '')[:200]}"),
+                duration_ms=int((time.perf_counter() - _t0) * 1000))
             intent_labels = {"knowledge": "知识库", "casual_chat": "闲聊", "realtime": "实时数据"}
 
             # 实时数据路径：直接返回，不召回记忆（review #5，避免无谓的 5s 召回延迟）
@@ -477,6 +485,14 @@ class RAGEngine:
                         break
 
             observability.timing("retrieve", time.perf_counter() - _loop_t0)
+            # module-088：检索 span（决策级——分支模式/融合模式/收齐文档数；
+            # 与流式 _retrieve 返回前同构）
+            tracing.record_span(
+                "retrieval", "retrieval",
+                decision=(f"mode={settings.retrieval_mode} "
+                          f"fusion={settings.retrieval_fusion_mode} "
+                          f"docs={len(all_docs)}"),
+                duration_ms=int((time.perf_counter() - _loop_t0) * 1000))
             docs = all_docs
 
             # 父块映射：子块命中 → 父块返回（完整 section 语义）
@@ -843,6 +859,8 @@ class RAGEngine:
         """
         from agent.reflector import reflector
 
+        _t0 = time.perf_counter()  # module-088：检索 span 计时起点（供返回前记录）
+
         # ── 空 query 防护（module-022 遗留，module-027 收敛） ──
         # 在缓存检查之前提前返回：空 query 不生成缓存 key、不调 HyDE/
         # 检索/反思（空串的 sha256 key 无意义且纯浪费资源）。
@@ -1065,6 +1083,15 @@ class RAGEngine:
         if docs:
             await cache.set(cache_key, docs, ttl=300)
             logger.info("检索结果已缓存: key=%s, docs=%d", cache_key, len(docs))
+
+        # module-088：检索 span（流式 _retrieve 路径，与非流式 chat 循环后同构；
+        # 空 query/缓存命中短路分支不记——v1 边界如实声明）
+        tracing.record_span(
+            "retrieval", "retrieval",
+            decision=(f"mode={settings.retrieval_mode} "
+                      f"fusion={settings.retrieval_fusion_mode} "
+                      f"docs={len(docs)}"),
+            duration_ms=int((time.perf_counter() - _t0) * 1000))
 
         return docs
 

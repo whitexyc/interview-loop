@@ -31,6 +31,7 @@ from typing import Optional, TypedDict
 from langgraph.graph import END, StateGraph
 
 from src.config import settings
+from src import tracing  # module-088 链路式观测埋点（advance_phase reason 透传）
 from llm.client import LLMFactory
 from agent.react import (
     ReactContext, _assistant_message, _build_messages,
@@ -180,8 +181,11 @@ async def execute_tools(state: ReActGraphState) -> dict:
         messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                          "content": result})
     # 本轮触发阶段推进（生成工具 / 检索命中 / 防空转兜底）→ 下一轮切
-    # generation（单向前进，与手写 react_loop 共用）
-    advance_phase(ctx, executed_names, executed_results)
+    # generation（单向前进，与手写 react_loop 共用）；切换原因非空记决策级
+    # span（module-088，与 react_loop 同构）
+    reason = advance_phase(ctx, executed_names, executed_results)
+    if reason:
+        tracing.record_span("advance_phase", "decision", decision=reason)
 
     return {"messages": messages, "tool_count": tool_count, "events": events}
 
