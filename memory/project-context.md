@@ -2,6 +2,10 @@
 
 ## 1. 项目概述
 
+- 最后更新: 2026-09-06（**module-090 失败隔离+checkpoint Tester 验收通过（四阶段闭环，版本 v0.90.0，阶段 D 全收官）**：全量 1754/0/3=1730+24 零新增失败 + AC-1~23 全签 + T1-T6 真实 PG 对账 28 断言全过（T2 跨进程 load 逐值恢复不从头 / T3 父子双向隔离 / T5 开关关 load 不设闸 / T6 还原 0 行）+ LOW-1 补测（非法 JSON 形状）+ B1①rowcount/B1②行形态真实闭环；对账脚本 v1 丢 begin_task 返回值 bug 2 轮如实归档（非被测代码）；详见 specs/module-090-failure-isolation-checkpoint/test-report.md）
+- 最后更新: 2026-09-06（**module-090 失败隔离+checkpoint Reviewer 审查通过 PASS**：8 项核查全过 + 6 偏离逐项裁定成立 + AST 独立复算 86→121=+35≤200 + 复跑 24/52/257 全绿 + 红线全空；0 阻塞/1 LOW+2 备忘；详见 specs/module-090-failure-isolation-checkpoint/review-report.md，待 Tester）
+- 最后更新: 2026-09-06（**module-090 失败隔离+checkpoint Developer 实现完成 👀待审查**：tasks.py 三原语 +35 AST≤200 + 24 测试全绿 + 存量/api 全绿 + 红线零 diff + conftest 零改动；偏离 6 项 changelog §五；全量 1754 归 Tester）
+- 最后更新: 2026-09-06（**module-090 失败隔离+checkpoint 规划完成（Planner，阶段 D 收官片）**：087 预留 checkpoint JSONB 列接管——save_checkpoint（json.dumps 后绑定，覆盖语义 last-save-wins）/ load_checkpoint（async 读侧无闸，缺失→{}）/ resume_task（同 task_id 复用置回 running，白名单 failed+悬挂 running、completed 不可复活）；失败隔离核实=087 单行作用域 SQL 天然成立零代码补强，契约测试锁定；零 config 零新表零 ALTER，conftest 零 diff；~26 AST ≤200；AC-1~23 + Tester T1-T6 真实对账（断点恢复跨 asyncio.run 重启模拟）；plan.md + AC 已产出，待 Developer）
 - 最后更新: 2026-09-06（**module-086 注入防护实测 Tester 验收通过（四阶段闭环，版本 v0.86.0）**：命令表全项独立复跑——定向 40/40 + 受影响存量 730/3 + 603 + py_compile 7/7 + 全量 **1730/0/3**（=1690+40 零新增失败）+ AC-1/16/23/29/30 逐字逐值复验 + 红线 13 文件 git diff 全空（database.py 0 删除、conftest +16/0 纯追加）；**T1-T6 真实 PG 对账全过**（T1 真实爬虫 strip 载体剥离+canary 14e40840 映射落库+间距 279-304 合规+strict 17464 行 rejected+AC-20 纯注释页 errors=1 降级；T2 真实 canary 泄漏 warning+span 四要素+阴性 deadbeef 零增量；T3 eval_runs id=61 六指标逐值一致+per_question 26 行+strict FP=1 归因；T4 双关零漂移；T5 上传零漂移；T6 全量清理还原逐表回基线 16365/0/0+清理后复跑 1730/0/3）；AC 33/33 签署；Reviewer 2 LOW 属实非阻塞遗留、4 备忘全核实；.env 零改动（开关走进程环境变量）；详见 specs/module-086-injection-defense/test-report.md）
 - 最后更新: 2026-09-06（**module-086 注入防护 Reviewer 审查通过（PASS）**：8 项重点核查全过、6 项偏离逐项裁定成立（围栏掩码只影响扫描范围/sanitize 移出审查 try 块修正回退真缺陷）、AST 独立复算 195≤200、红线 13 项全空、40+730/3+603 复跑全绿；0 阻塞 2 LOW+4 备忘非阻塞；详见 specs/module-086-injection-defense/review-report.md，待 Tester）
 - 最后更新: 2026-09-06（**module-086 注入防护 Developer 实现完成**：sanitize 三态挂爬虫链（审查前清洗+围栏掩码）+ canary 金丝雀（crawl_canaries 新表幂等 DDL）+ 输出泄漏检测接 chat 双路径 + eval 拦截率落库；代码句 **195 ≤200**（sanitize 91/eval 脚本 68/其余 +36）；定向 40/40 + crawl/api/core 730/3 + agent/memory 603 + py_compile + eval strip 1.0/FP0、strict 1.0/FP1 归因；红线零 diff；详见 specs/module-086-injection-defense/changelog.md，待 Reviewer）
@@ -115,7 +119,8 @@
 | module-087 | 任务抽象（task 表 + 一次请求=1 task + "子只读父写"所有权） | 0.87.0-module-087 | 2026-09-06 | ✅ **Reviewer 二轮复审 PASS（2026-09…→memory/archive/project-context-2026-09-06-auto.md
 | module-089 | 预算账本（任务级 token 预算 + 超预算熔断） | 0.89.0-module-089 | 2026-09-06 | ✅ **四阶段闭环验收通过**（2026-09-06：Tester 全量 1690/0/3 零新增失败 + T1-T6 真实 PG 对账全过；明细见 file-index module-089 行与 specs/module-089-budget-ledger/）…→memory/archive/project-context-2026-09-06-auto.md
 | module-086 | 注入防护实测（投毒用例集 22+4 → 入口 sanitize 三态 + canary 金丝雀 → 量化拦截率） | 0.86.0-module-086 | 2026-09-06 | ✅ **四阶段闭环验收通过**（2026-09-06：Tester 全量 1730/0/3（1690+40）零新增失败 + T1-T6 真实 PG 对账全过 + AC 33/33；明细见 file-index module-086 行与 specs/module-086-injection-defense/） |
-- 当前迭代版本: v0.86.0（module-086 注入防护实测 ✅ 四阶段闭环验收通过 2026-09-06）
+| module-090 | 失败隔离 + checkpoint（不连坐 + 断点恢复） | 0.90.0-module-090 | 2026-09-06 | ✅ **四阶段闭环验收通过**（2026-09-06：Tester 全量 1754/0/3（1730+24）零新增失败 + T1-T6 真实 PG 对账 28 断言全过 + AC-1~23 全签 + LOW-1 补测/B1/B2 闭环；明细见 file-index module-090 行与 specs/module-090-failure-isolation-checkpoint/） |
+- 当前迭代版本: v0.90.0（module-090 失败隔离+checkpoint ✅ 四阶段闭环验收通过 2026-09-06，阶段 D 全收官）
 |----------|----------|------|------|
 | adr-003 | Intent 正确性校验四层方案（L1 评测/L2 确定性信号确认/L3 后置反证/L4 bge-m3+逻辑回归分类器） | ✅ 已实施（L1-L3 module-043/047/055；**L4 已启用 module-056：人造 337 条重训 Accuracy 1.0 + golden_intent 真实对比 LLM vs 分类器双 1.0000 → PW_INTENT_CLASSIFIER_ENABLED 默认开，失败回退 LLM**） | 2026-08-08（2026-08-12 更新） |
 | adr-009 | Query 改写优化方案（分诊式改写 + 保真校验 + 评测闭环） | ✅ 已实施（module-049：静态 FTS 分诊 + 保真预检 + 并行检索择优 + golden_query_rewrite 评测闭环） | 2026-08-10 |
@@ -128,7 +133,8 @@
 | adr-018 | MCP 集成（ToolRegistry 暴露为标准 MCP Server：6 只读工具 + stdio/Streamable HTTP 双传输 + PW_MCP_TOKEN fail-closed） | ✅ 已实施（module-067，2026-08-17）…详情→archive/adr-rows-2026-09-06.md 与 docs/adr/|
 
 ## 5. 当前迭代状态
-- 当前迭代版本: v0.86.0（module-086 注入防护实测 ✅ 四阶段闭环验收通过 2026-09-06）
+- 当前迭代版本: v0.90.0（module-090 失败隔离+checkpoint ✅ 四阶段闭环验收通过 2026-09-06，阶段 D 全收官）
+- ✅ 完成: **module-090 失败隔离 + checkpoint**（2026-09-06 四阶段闭环验收通过，版本 v0.90.0 阶段 D 全收官：Tester 全量 1754/0/3（1730+24）零新增失败 + T1-T6 真实 PG 对账 28 断言全过（T2 跨进程断点恢复逐值不从头 / T3 父子双向隔离 / T4 幂等边界 / T5 开关关 load 不设闸 / T6 基线还原 0 行）+ AC-1~23 全签 + Reviewer LOW-1 补测（非法 JSON 第 4 形状）+ B1①rowcount→bool/B1②真实行形态闭环；归档给 T5：本机 asyncpg JSONB 裸读=str（str 兜底为真实主路径）+ begin_task 返回值是 task_id 唯一来源；明细见 file-index module-090 行）
 - ✅ 完成: **module-086 注入防护实测**（2026-09-06 四阶段闭环验收通过：Tester 命令表全项复跑 + 全量 1730/0/3（1690+40）零新增失败 + T1-T6 真实 PG 对账全过（strip 载体剥离/canary 14e40840 映射/strict 17464 rejected/AC-20 errors=1/泄漏 span 四要素/eval id=61 逐值对账 strict FP=1 设计内归因/双关零漂移/上传零漂移）+ 探针全清还原基线 16365/0/0 + AC 33/33；Reviewer 2 LOW 属实非阻塞遗留（sanitize.py:33 未用导入 + find_canaries docstring）随下轮顺带；明细见 file-index module-086 行）
 - ✅ 完成: **module-089 预算账本**（2026-09-06 四阶段闭环验收通过：Tester 定向 20/20 + 受影响存量 415/415 + 全量 1690/0/3 零新增失败 + T1-T6 真实 PG 对账全过（T2 双拦截点真实熔断实证）；明细见 file-index module-089 行）
 - ✅ 完成: **module-088 链路式观测**（2026-09-06 Reviewer 二轮 post-fix PASS（0 阻塞/0 重大/遗留 LOW-2+B1+B2 备忘非阻塞，specs/module-088-trace-…→memory/archive/project-context-2026-09-06-auto.md

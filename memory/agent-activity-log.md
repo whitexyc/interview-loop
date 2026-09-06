@@ -248,3 +248,30 @@
 | module-086 | Tester | [TEST] T2过：真实canary走真实检测，阴性deadbeef零增量，span四要素齐(kind=security/status=blocked/decision含doc_id)；T3过：eval_runs id=61六指标与控制台逐值一致+per_question26行+strict FP=1归因注记 |
 | module-086 | Tester | [TEST] 验收通过：AC 33/33；全量 1730/0/3（1690+40）；T1-T6 真实对账全过；2 LOW 属实非阻塞；探针全清还原基线；test-report.md 已产出 |
 | module-086 | Tester | [HANDOFF] 四阶段闭环收口 v0.86.0：注入防护实测完成；2 LOW（sanitize.py:33 未用导入/find_canaries docstring）留下轮顺带；移交编排者收口提交 |
+| module-090 | Planner | [PLAN] 规划完成：checkpoint JSONB（087 预留）接管——save/load/resume 三原语挂 tasks.py ~26 AST；恢复=同 task_id 复用（failed/悬挂 running 可复活、completed 不可）；隔离天然成立零补强契约锁定；零 config 零新表；AC-1~23+T1-T6 真实对账 |
+| module-090 | Planner | [HANDOFF] 移交 Developer——plan.md + acceptance-criteria.md 已产出（specs/module-090-failure-isolation-checkpoint/）。重点：①JSONB 须 json.dumps 后绑定 ②resume async 返 bool ③T2 须跨 asyncio.run 重启模拟禁 mock ④基线 1730/0/3 |
+
+### 2026-09-06（module-090 失败隔离 + checkpoint 开发）
+| 模块 | 角色 | 摘要 |
+|------|------|------|
+| module-090 | Developer | [CODE] 失败隔离+checkpoint 完成：tasks.py 三原语 +35 AST（save json.dumps 绑定覆盖语义 / load 读侧无闸双兼容异常上抛 / resume 白名单 failed+悬挂 running）+ test_checkpoint.py 24 项 + docstring 2 行替换（AC-22） |
+| module-090 | Developer | [CODE] 自测过：定向 24/24 + 存量 52 + api 257 + py_compile + AST 121≤200（基线 86）+ 红线 18 路径零 diff + conftest 零 diff；脚手架修复 2 轮均非生产代码 |
+| module-090 | Developer | [HANDOFF] 移交 Reviewer——specs/module-090-failure-isolation-checkpoint/changelog.md。重点：JSONB 绑定/SQL 逐字/覆盖语义/resume 白名单+checkpoint 保留/隔离契约/AST+35；偏离 6 项 §五；全量 1754 归 Tester |
+
+### 2026-09-06（module-090 失败隔离 + checkpoint 审查）
+| 模块 | 角色 | 摘要 |
+|------|------|------|
+| module-090 | Reviewer | [REVIEW] 审查完成 **PASS（0 阻塞/1 LOW+2 备忘非阻塞）**：8 项核查全过、6 偏离逐项裁定成立、AST 独立复算 86→121=+35≤200、红线 18 路径全空、复跑 24+52+257 全绿、py_compile 过 |
+| module-090 | Reviewer | [HANDOFF] **审查通过，移交 Tester**——报告 specs/module-090-failure-isolation-checkpoint/review-report.md。重点：全量预期 1754=1730+24/0/3；T1 JSONB 真实往返；T2 跨 asyncio.run 顺带核真实 rowcount；T3 父子双向隔离 |
+
+### 2026-09-06（module-090 失败隔离 + checkpoint 测试）
+| 模块 | 角色 | 摘要 |
+|------|------|------|
+| module-090 | Tester | [TEST] 定向 24/24+存量 52+api 257+py_compile+AST 121=+35≤200 复算+红线 18 路径零 diff+conftest 零 diff 全过；LOW-1 已补测（test_non_dict_defense 第 4 形状 "{oops" 非法 JSON） |
+| module-090 | Tester | [REGRESSION] 全量 1754/0/3=1730+24 精确自洽零新增失败；3 skip=086 基线 PDF 缺失同源甄别放行；存量测试零改动 git 实证 |
+| module-090 | Tester | [TEST] T1过：checkpoint 真实落库逐值（中文/嵌套/datetime→str），asyncpg 裸读=str 形态——str 兜底证实为真实主路径（B1②侧证） |
+| module-090 | Tester | [TEST] T2过（核心）：跨进程 resume→True+running+finished_at=NULL，load 逐值恢复不从头，续跑 completed 末次保存存活；B1① rowcount→bool 真实正确 |
+| module-090 | Tester | [TEST] T3过（核心）：子失败父行 10 列快照零变化+父收口子保持 failed 双向隔离；T4过：save×2/resume×2 幂等+completed 拒绝行零改动 |
+| module-090 | Tester | [TEST] T5过：PW_TASKS_ENABLED=false 进程级下 save/resume no-op+load 不设闸读 T2 遗留行；T6过：探针按 task_id 精确清理基线还原 0 行+脚本用后即删 |
+| module-090 | Tester | [TEST] 验收通过：AC-1~23 全签；T1-T6 28 断言全过；B1/B2 闭环；对账脚本 v1 丢 begin_task 返回值 bug 2 轮如实归档（非被测代码非环境） |
+| module-090 | Tester | [HANDOFF] 四阶段闭环收口 v0.90.0（阶段 D 全收官）：归档给 T5——asyncpg JSONB 裸读=str+begin_task 返回值是 task_id 唯一来源；移交编排者收口提交 |

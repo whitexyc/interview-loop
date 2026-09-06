@@ -11,12 +11,14 @@ request_spans 读侧 join（裁定 1：三表既有 DDL 零改动零迁移）。
 （父 task=write 子 task=read）+ _memory_write_var 原语 + MemoryService.save
 入口闸（rag/memory/memory.py）；v1 无生产调用方置 read（默认 write = 现状
 行为逐字），调用方在 T5 子 Agent 编排。
-不实现熔断账本（module-089）/ checkpoint 逻辑（module-090）/ 子 Agent 编排
-（T5）——budget_token_limit / checkpoint 仅结构预留（只存不执法）。
+不实现子 Agent 编排（T5）——budget_token_limit 仅结构预留（089 执法面在
+agent/react.py 熔断）；checkpoint 逻辑 module-090 接管：save_checkpoint /
+load_checkpoint / resume_task 三原语（本文件，v1 无生产调用方，调用方 T5）。
 开关 tasks_enabled（PW_TASKS_ENABLED）首行短路：false 零建零收口。
 """
 import asyncio
 import contextvars
+import json
 import logging
 import uuid
 from datetime import datetime
@@ -79,6 +81,29 @@ _SQL_OVERVIEW = """
 _SQL_BUDGET = """
     UPDATE tasks SET budget_token_limit = :budget_token_limit
     WHERE task_id = :task_id
+"""
+
+# checkpoint 保存（module-090：JSONB 列必须传 JSON 字符串——087 真缺陷教训，
+# 绝不直绑 dict；无 status 条件 = 覆盖语义重放安全（对齐 _SQL_BUDGET），
+# finish_task 不触碰 checkpoint 列 → 末次保存必存活）
+_SQL_SAVE_CHECKPOINT = """
+    UPDATE tasks SET checkpoint = :checkpoint
+    WHERE task_id = :task_id
+"""
+
+# checkpoint 读取（module-090 读侧；行不存在由调用方兜 {}；asyncpg 对 JSONB
+# 默认解码为 dict——load 侧双兼容 dict/str）
+_SQL_LOAD_CHECKPOINT = """
+    SELECT checkpoint FROM tasks
+    WHERE task_id = :task_id
+"""
+
+# 恢复（module-090：同 task_id 复用置回 running + finished_at 复位 NULL；
+# 白名单 failed/悬挂 running——completed 终态不可复活；checkpoint/trace_id/
+# intent/tokens_used 零触碰；幂等：重复调用状态不变）
+_SQL_RESUME = """
+    UPDATE tasks SET status = 'running', finished_at = NULL
+    WHERE task_id = :task_id AND status IN ('failed', 'running')
 """
 
 # fire-and-forget 任务引用池（防 GC：asyncio 规范要求保存任务引用，否则任务
@@ -265,6 +290,92 @@ def set_task_budget(limit: int) -> None:
     if settings.tasks_enabled and _task_id_var.get():
         _spawn(_SQL_BUDGET, {"budget_token_limit": int(limit),
                              "task_id": _task_id_var.get()})
+
+
+def save_checkpoint(task_id: str, payload: dict) -> None:
+    """保存任务检查点（module-090，fire-and-forget 覆盖语义 last-save-wins）
+
+    payload dict → json.dumps(ensure_ascii=False, default=str) JSON 字符串后
+    绑定（JSONB 列经 text() 直绑 dict 必炸 DataError 且被 fail-open 吞——087
+    真缺陷教训）；UPDATE 无 status 条件（覆盖语义重放安全，对齐 _SQL_BUDGET；
+    finish_task 不触碰 checkpoint 列 → 末次保存必存活）。序列化失败 warning
+    no-op 不炸调用方（fail-open：检查点保存永不 crash 任务主链路）。
+
+    Args:
+        task_id: 任务 ID（begin_task 返回值；空串 no-op）
+        payload: 检查点数据（须 dict；非 dict no-op——对齐非法值先例）
+
+    Returns:
+        None（落库经 _spawn 异步旁路，失败仅 warning）
+    """
+    if not task_id or not settings.tasks_enabled \
+            or not isinstance(payload, dict):
+        return
+    try:
+        checkpoint = json.dumps(payload, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        logger.warning("checkpoint 序列化失败（fail-open 不炸调用方）: %s",
+                       task_id)
+        return
+    _spawn(_SQL_SAVE_CHECKPOINT,
+           {"task_id": task_id, "checkpoint": checkpoint})
+
+
+async def load_checkpoint(task_id: str) -> dict:
+    """读取任务检查点（module-090 读侧原语，无开关闸——对齐 087 读端点先例）
+
+    Args:
+        task_id: 任务 ID（空串 → {} 零 DB 访问）
+
+    Returns:
+        检查点 dict（行不存在 → {}；asyncpg JSONB 默认解码 dict 直返 / str
+        形态 json.loads 兜底 / 非 dict 脏数据防御 → {}）
+
+    Raises:
+        Exception: DB 异常原样上抛（对齐 get_task_overview，调用方定降级）
+    """
+    if not task_id:
+        return {}
+    from src.database import async_session_factory
+
+    async with async_session_factory() as session:
+        result = await session.execute(text(_SQL_LOAD_CHECKPOINT),
+                                       {"task_id": task_id})
+    value = (result.mappings().first() or {}).get("checkpoint")
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            return {}
+    return value if isinstance(value, dict) else {}
+
+
+async def resume_task(task_id: str) -> bool:
+    """恢复任务（module-090：同 task_id 复用置回 running，断点续跑入口）
+
+    白名单语义：failed（失败收口）与悬挂 running（进程死亡遗留行）可恢复；
+    completed 终态不可复活（返回 False）。checkpoint/trace_id/intent/
+    tokens_used 零触碰（checkpoint 保留为"续跑不从头"数据前提）；幂等：
+    悬挂 running 重复恢复状态不变。v1 无生产调用方（T5 长任务编排）。
+
+    Args:
+        task_id: 任务 ID（空串 / 开关关 → False 零 DB 访问）
+
+    Returns:
+        True=已置回 running 可续跑；False=行不存在 / completed 终态 / 开关关
+
+    Raises:
+        Exception: DB 异常原样上抛（对齐 get_task_overview 读侧先例）
+    """
+    if not task_id or not settings.tasks_enabled:
+        return False
+    from src.database import async_session_factory
+
+    async with async_session_factory() as session:
+        result = await session.execute(text(_SQL_RESUME),
+                                       {"task_id": task_id})
+        await session.commit()
+    return bool(result.rowcount)
 
 
 async def get_task_overview(task_id: str) -> dict | None:
