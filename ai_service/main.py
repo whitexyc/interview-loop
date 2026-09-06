@@ -22,8 +22,11 @@ from src.ratelimit import check_rate_limit, get_client_ip
 from src.cache import cache
 from src.identity import parse_jwt, resolve_identity
 from src import observability
+from src.dashboard import get_dashboard_metrics  # module-085 可观测看板读侧聚合
 from src.verify_tasks import submit_verify_task, get_verify_task
 from mcp_server import mcp as mcp_server, mcp_http_lifespan
+from agent import mcp_client
+from agent.tool_registry import registry
 from rag.engine import rag_engine, resolve_tool_history
 from rag.schemas import (
     SearchRequest, SearchResponse, ChatRequest, ChatResponse,
@@ -72,6 +75,18 @@ class ChainUpdateRequest(BaseModel):
         chain: 供应商顺序列表（如 ["zhipu", "deepseek", "qwen"]）
     """
     chain: list[str]
+
+
+class ApprovalDecisionRequest(BaseModel):
+    """工具审批决定请求体（module-083 WP-D）
+
+    Attributes:
+        id: approval_requests 表主键
+        action: "approve" 放行 / "reject" 拒绝
+    """
+
+    id: int
+    action: str
 
 
 async def load_fallback_chain_from_redis() -> None:
@@ -155,12 +170,16 @@ async def lifespan(app: FastAPI):
     # module-080：反向闭环定时扫描（低分题→待学笔记→优先级抓取）
     from rag.crawl.feedback_scanner import setup_feedback_scheduler
     setup_feedback_scheduler(True)
+    # module-084：外部 MCP client 连接/发现/注册（fail-open，内部捕获不阻塞启动）
+    await mcp_client.external.init_ext(registry)
     mcp_http_ctx = mcp_http_lifespan()
     await mcp_http_ctx.__aenter__()
     try:
         yield
     finally:
         await mcp_http_ctx.__aexit__(None, None, None)
+        # module-084：关闭外部 MCP 会话与子进程（幂等，先退 MCP 任务组再关）
+        await mcp_client.external.close()
         shutdown_scheduler()
         setup_feedback_scheduler(False)
     logger.info("AI 服务关闭")
@@ -721,10 +740,15 @@ async def chat_agent(request: ChatRequest, fastapi_req: Request):
             effective_history = await rag_engine._resolve_session_history(identity, request.history)
             ctx = ReactContext(request.query, identity, effective_history)
             budget = settings.max_agent_tools
+            # module-084：Agent 级显式授权白名单（外部 MCP 工具治理）——
+            # 外部未启用返回 None（存量全量放行零变化）；启用后未授权外部
+            # 工具在执行层拒绝（execute_tool_with_log 白名单闸）
+            allowed_tools = mcp_client.external.agent_allowed_tools()
             answer = ""
             tool_count = 0
             async for evt in react_loop(ctx, _build_messages(ctx), budget,
-                                        max_answer_len=MAX_ANSWER_LEN):
+                                        max_answer_len=MAX_ANSWER_LEN,
+                                        allowed_tools=allowed_tools):
                 t = evt["type"]
                 if t == "tool_call":
                     yield f"event: tool_call\ndata: {json.dumps({'name': evt['name'], 'args': evt['args'], 'tool_count': evt['tool_count']}, ensure_ascii=False)}\n\n"
@@ -795,10 +819,13 @@ async def chat_agent_langgraph(request: ChatRequest, fastapi_req: Request):
             effective_history = await rag_engine._resolve_session_history(identity, request.history)
             ctx = ReactContext(request.query, identity, effective_history)
             budget = settings.max_agent_tools
+            # module-084：与 agent 端点同接白名单（防 agent-lg 成为绕过口）
+            allowed_tools = mcp_client.external.agent_allowed_tools()
             answer = ""
             tool_count = 0
             async for evt in langgraph_react_loop(ctx, _build_messages(ctx), budget,
-                                                  max_answer_len=MAX_ANSWER_LEN):
+                                                  max_answer_len=MAX_ANSWER_LEN,
+                                                  allowed_tools=allowed_tools):
                 t = evt["type"]
                 if t == "tool_call":
                     yield f"event: tool_call\ndata: {json.dumps({'name': evt['name'], 'args': evt['args'], 'tool_count': evt['tool_count']}, ensure_ascii=False)}\n\n"
@@ -1197,7 +1224,83 @@ async def trigger_crawl():
         },
     }
 
+# ─── 工具审批端点（module-083 WP-D 高风险审批，机制预留） ───
+# 现有 10 内置工具 approval 全 "auto"（执行前不查本表）；approval="required"
+# 工具（module-084 外部 MCP 工具预留）每次调用会插 pending 申请，由人/工作流
+# 在以下端点审批。鉴权与现有 /ai 端点同等待遇（强鉴权留 module-084）。
 
+
+@app.get("/ai/tools/approvals")
+async def list_tool_approvals(status: str = "pending"):
+    """列出高风险工具审批申请（默认 pending；?status=approved/rejected 过滤生效）"""
+    from sqlalchemy import text
+    async with async_session_factory() as session:
+        rows = (await session.execute(
+            text("SELECT id, tool_name, args, status, requester, requested_at, "
+                 "decided_at FROM approval_requests WHERE status=:s ORDER BY id"),
+            {"s": status},
+        )).fetchall()
+    approvals = [
+        {
+            "id": r[0], "tool_name": r[1], "args": r[2], "status": r[3],
+            "requester": r[4],
+            "requested_at": r[5].isoformat() if r[5] else None,
+            "decided_at": r[6].isoformat() if r[6] else None,
+        }
+        for r in rows
+    ]
+    return {"code": 0, "msg": "success", "data": {"approvals": approvals}}
+
+
+@app.post("/ai/tools/approvals")
+async def decide_tool_approval(req: ApprovalDecisionRequest):
+    """审批工具调用申请：action=approve 放行 / reject 拒绝（module-083 WP-D）
+
+    非法 action / id 不存在 / 已处理（非 pending）→ code 1 提示不崩；
+    approve/reject 成功后置 decided_at=now（SQL CURRENT_TIMESTAMP）。
+    """
+    if req.action not in ("approve", "reject"):
+        return {"code": 1, "msg": "非法 action（仅支持 approve/reject）"}
+    from sqlalchemy import text
+    async with async_session_factory() as session:
+        row = (await session.execute(
+            text("SELECT id, status FROM approval_requests WHERE id=:i"),
+            {"i": req.id},
+        )).first()
+        if row is None:
+            return {"code": 1, "msg": f"审批申请不存在（id={req.id}）"}
+        if row[1] != "pending":
+            return {"code": 1, "msg": f"审批申请已处理（当前状态 {row[1]}）"}
+        new_status = "approved" if req.action == "approve" else "rejected"
+        await session.execute(
+            text("UPDATE approval_requests SET status=:s, decided_at=CURRENT_TIMESTAMP WHERE id=:i"),
+            {"s": new_status, "i": req.id},
+        )
+        await session.commit()
+    logger.info("工具审批决定: id=%d action=%s → status=%s",
+                req.id, req.action, new_status)
+    return {"code": 0, "msg": "success", "data": {"id": req.id, "status": new_status}}
+
+
+# ─── 可观测看板（module-085：request_logs/tool_call_logs 只读聚合） ───
+
+
+@app.get("/ai/observability/dashboard")
+async def get_observability_dashboard(hours: int = 24):
+    """可观测看板 4 指标聚合（成功率/延迟 P50+P95/token 成本/工具调用，module-085）
+
+    hours=0 表示全部数据；1-8760 合法（一年上限防滥用）；非法 code 1 不触达
+    聚合。读侧 fail-open：聚合异常 → code 1 友好降级不 500（对齐 module-072
+    读侧哲学，区别于 module-083 审批写侧 fail-closed）。
+    """
+    if hours < 0 or hours > 8760:
+        return {"code": 1, "msg": "hours 参数非法（0=全部，1-8760 小时）"}
+    try:
+        data = await get_dashboard_metrics(hours)
+    except Exception as e:  # fail-open：读侧看板降级为提示，不 500
+        logger.warning("看板查询失败（fail-open）: %s", e)
+        return {"code": 1, "msg": "看板查询失败（fail-open）"}
+    return {"code": 0, "msg": "success", "data": data}
 
 
 if __name__ == "__main__":

@@ -146,6 +146,22 @@ class Settings(BaseSettings):
     # autouse fixture 钉住 false（测试不污染落库）。
     tool_call_logs_enabled: bool = True
 
+    # 工具默认超时（module-083 WP-C）：AgentTool.timeout 缺省值来源——现有
+    # 10 工具不传 → 全 15.0（零行为变化）；测量调优不在本模块（tool_call_logs
+    # 已记 duration_ms，module-085 看板拉 P95 后按数据调整各工具值）。
+    # 环境变量：PW_TOOL_DEFAULT_TIMEOUT。
+    tool_default_timeout: float = 15.0
+
+    # 工具幂等（module-083 WP-B）：同参只读检索二次调用拦截（执行成功后才记
+    # 指纹，指纹集合每请求独立、跨请求不共享）；false 回退"同参每次执行"存量
+    # 行为（逃生口）。
+    tool_idempotency_enabled: bool = True
+
+    # 高风险工具审批（module-083 WP-D）：approval="required" 工具执行前需
+    # 人工审批（approval_requests 表 + /ai/tools/approvals 端点）；现有 10
+    # 工具全 "auto" 短路零 DB 开销。false 回退"required 也直接执行"（逃生口）。
+    tool_approval_enabled: bool = True
+
     # 长期记忆（module-033/035）：提取 / 去重 / 动态K 阈值（参考 llm-push/19-Agent记忆管理）
     memory_importance_threshold: float = 0.6    # 提取事实 importance < 0.6 丢弃
     # module-035 校准：真实 bge-m3 同义改写 cosine≈0.88，0.95 太严导致漏去重 → 下调 0.85
@@ -413,8 +429,18 @@ class Settings(BaseSettings):
     #   hybrid_sag —— 三通道 RRF + SAG 补充（取并集去重，SAG 命中优先置前）
     # PW_RETRIEVAL_MODE 环境变量回退覆盖。
     retrieval_mode: Literal["hybrid", "sag", "hybrid_sag"] = "hybrid"
+    # 外部 MCP 客户端接入（module-084）：服务作为 MCP client 连接外部 server，
+    # 发现工具注册进 ToolRegistry（受 module-083 治理约束：全部外部工具
+    # approval="required" + 显式授权白名单）。**默认全关 = 存量零变化**：
+    # enabled=false 时 init_ext 零开销直接返回、allowed_tools 保持 None。
+    # 测试环境由 conftest autouse fixture 钉住全关（hermetic）。
+    # 环境变量：PW_MCP_EXTERNAL_ENABLED / PW_MCP_EXTERNAL_COMMAND（JSON 数组）/
+    # PW_MCP_EXTERNAL_TOOLS（JSON 数组，显式授权白名单）/ PW_MCP_EXTERNAL_TIMEOUT。
+    mcp_external_enabled: bool = False
+    mcp_external_command: list[str] = []
+    mcp_external_tools: list[str] = []
+    mcp_external_timeout: float = 10.0
 
     model_config = {"env_prefix": "PW_", "env_file": ".env"}
-
 
 settings = Settings()

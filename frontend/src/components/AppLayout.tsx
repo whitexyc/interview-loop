@@ -10,6 +10,7 @@ const navItems = [
   { key: '/', label: '个人简历' },
   { key: '/chat', label: '知识库问答' },
   { key: '/knowledge', label: '知识库' },
+  { key: '/dashboard', label: '观测看板' },
 ];
 
 interface AppLayoutProps {

@@ -7,6 +7,7 @@ import ResumePage from './pages/ResumePage';
 import ChatPage from './pages/ChatPage';
 import EditResumePage from './pages/EditResumePage';
 import KnowledgePage from './pages/KnowledgePage';
+import DashboardPage from './pages/DashboardPage';
 import LoginPage from './pages/LoginPage';
 
 const customTheme = {
@@ -68,6 +69,14 @@ export default function App() {
               element={
                 <AppLayout>
                   <KnowledgePage />
+                </AppLayout>
+              }
+            />
+            <Route
+              path="/dashboard"
+              element={
+                <AppLayout>
+                  <DashboardPage />
                 </AppLayout>
               }
             />

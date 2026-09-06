@@ -268,3 +268,24 @@ def default_retrieval_mode_hybrid(monkeypatch):
     from src.config import settings
 
     monkeypatch.setattr(settings, "retrieval_mode", "hybrid")
+
+
+@pytest.fixture(autouse=True)
+def default_mcp_external_disabled(monkeypatch):
+    """测试环境统一钉住外部 MCP 接入=关闭（module-084，对齐 056/058/081 模式）
+
+    生产默认全关（零回归），但显式钉住是"存量测试全绿"的双重保证——防
+    .env 意外带 PW_MCP_EXTERNAL_* 时 lifespan/端点漂移。同时重置 external
+    单例残留状态（registered/_registry），保证测试间相互独立；新测试
+    （test_mcp_client.py）体内显式 setattr 开启 + 真实子进程用例 finally
+    close 清理。
+    """
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "mcp_external_enabled", False)
+    monkeypatch.setattr(settings, "mcp_external_command", [])
+    monkeypatch.setattr(settings, "mcp_external_tools", [])
+
+    from agent.mcp_client import external
+    external.registered = set()
+    external._registry = None

@@ -57,6 +57,8 @@ class ReActGraphState(TypedDict):
         max_answer_len: 答案最大长度（0=不限制），超出截断并附加标记
         phase_exhausted: 阶段额度耗尽标记（module-068：工具数仍 < 总预算但
             当前阶段预算已满 → 路由走 fallback，防回 llm_call 死循环）
+        allowed_tools: Agent 权限白名单（module-084 透传；None = 全量放行，
+            未启用外部 MCP 时存量行为逐字不变）
     """
     ctx: ReactContext
     messages: list
@@ -68,6 +70,7 @@ class ReActGraphState(TypedDict):
     answer: str
     max_answer_len: int
     phase_exhausted: bool
+    allowed_tools: Optional[set[str]]
 
 
 # ==================== Node 函数 ====================
@@ -166,7 +169,10 @@ async def execute_tools(state: ReActGraphState) -> dict:
         # module-066（ADR-0017）：执行工具并落库 tool_call_logs（与手写
         # react_loop 共用 execute_tool_with_log；工具失败时 run 内部返回
         # 空结果，LLM 判断继续/放弃）
-        result = await execute_tool_with_log(name, args, tool, ctx)
+        # module-084：allowed_tools 透传（state 传入；None = 全量放行）——
+        # 消除 agent-lg 端点对白名单层的绕过口（审批闸在 run 内仍通用）
+        result = await execute_tool_with_log(name, args, tool, ctx,
+                                             allowed_tools=state.get("allowed_tools"))
         executed_results.append(result)
         events.append({"type": "tool_result", "name": name, "args": args,
                        "result": result, "tool_count": tool_count})
@@ -308,6 +314,7 @@ async def langgraph_react_loop(
     budget: int,
     tools: Optional[ToolRegistry] = None,
     max_answer_len: int = 0,
+    allowed_tools: Optional[set[str]] = None,
 ):
     """LangGraph 版 ReAct 循环（异步生成器，事件与 react_loop 对齐）
 
@@ -320,6 +327,8 @@ async def langgraph_react_loop(
         budget: 工具总调用次数上限（≥0）
         tools: 工具注册表，默认全局 registry
         max_answer_len: 答案最大长度（0=不限制），超出截断并附加标记
+        allowed_tools: Agent 权限白名单（module-084）；None = 全量放行
+            （向后兼容，未启用外部 MCP 时存量行为逐字不变）
 
     Yields 事件（与 react_loop 一致）:
       {"type": "tool_call",   "name": str, "args": dict, "tool_count": int}
@@ -355,6 +364,7 @@ async def langgraph_react_loop(
         "answer": "",
         "max_answer_len": max_answer_len,
         "phase_exhausted": False,
+        "allowed_tools": allowed_tools,
     }
     # recursion_limit 覆盖默认 25：预算大时循环步数 = 2*budget + 兜底/收尾
     final_state = await react_graph.ainvoke(

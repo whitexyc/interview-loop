@@ -10,7 +10,7 @@ langchain-openai==0.1.7
 # langchain-anthropic 不在此清单：0.1.x 要求 core<0.2、0.2.x 要求 core>=0.3.15，与 langchain==0.2.1（core 0.2.x）无兼容版本；
 # ClaudeClient 为懒加载（llm/client.py），仅 claude provider 需要——如需启用请整体升级 langchain 族到 0.3.x 后单独安装
 langchain-community==0.2.1
-openai==1.33.0
+openai==1.109.1  # 修正基线：1.33.0 用旧 httpx proxies= API 与 httpx>=0.27 不兼容（HTTP_PROXY 存在时 Client.__init__ proxies 报错）；1.109.1 兼容新 httpx proxy= API（2026-09-01 实测 proxies 基线 4 失败清零）
 httpx>=0.27.1  # 修正漂移：mcp==1.26.0 要求 >=0.27.1
 python-dotenv==1.0.1
 pydantic>=2.10,<3  # 修正漂移：mcp==1.26.0 要求 pydantic>=2.10，原钉 2.7.1 无法解析
@@ -42,6 +42,9 @@ openpyxl>=3.1.0
 # stdio + Streamable HTTP）。锁对齐已装环境 mcp 1.26.0（环境与 requirements
 # 漂移同 module-028 langchain-openai 观察；uv run mcp dev 依赖它解析）
 mcp==1.26.0
+# 工具参数 schema 校验（module-083 WP-A）：jsonschema 纯 Python 轻量、环境
+# 已装 4.26.0，锁版本对齐已装环境防漂移（同 mcp==1.26.0 先例）
+jsonschema==4.26.0
 # PDF 回退路径 Markdown 升级（module-069）：PyMuPDF 官方 MD 生成器，将 PDF
 # 回退路径输出从裸文本升级为 Markdown（标题/列表/表格恢复）。
 # AGPL-3.0 许可（与 PyMuPDF 同许可）。个人学习项目无影响；商业化时换
@@ -51,3 +54,6 @@ pymupdf4llm
 # 支持 AsyncIOScheduler + IntervalTrigger，轻量级无重依赖。
 apscheduler==3.10.4
 
+
+# HHEM-2.1-Open ONNX 推理（2026-09-01）：FamiliarTools/HHEM-2.1-Open-onnx 导出，本地幻觉检测裁判，# 免 PyTorch/trust_remote_code；onnxruntime CPU 推理约 0.5s/批
+onnxruntime==1.29.0
