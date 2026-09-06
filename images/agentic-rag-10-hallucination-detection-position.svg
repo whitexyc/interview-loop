@@ -1,0 +1,30 @@
+<svg viewBox="0 0 680 330" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<text x="40" y="24" font-size="14" font-weight="500" fill="#2C2C2A">幻觉检测在"答案生成后"——不在检索内部</text>
+<rect x="40" y="50" width="120" height="56" rx="8" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+<text x="100" y="70" font-size="13" font-weight="500" fill="#042C53" text-anchor="middle" dominant-baseline="central">① 检索</text>
+<text x="100" y="88" font-size="11" fill="#0C447C" text-anchor="middle" dominant-baseline="central">找相关文档</text>
+<rect x="190" y="50" width="120" height="56" rx="8" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+<text x="250" y="70" font-size="13" font-weight="500" fill="#042C53" text-anchor="middle" dominant-baseline="central">② Rerank</text>
+<text x="250" y="88" font-size="11" fill="#0C447C" text-anchor="middle" dominant-baseline="central">精排 Top-5</text>
+<rect x="340" y="50" width="120" height="56" rx="8" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+<text x="400" y="70" font-size="13" font-weight="500" fill="#042C53" text-anchor="middle" dominant-baseline="central">③ 反思</text>
+<text x="400" y="88" font-size="11" fill="#0C447C" text-anchor="middle" dominant-baseline="central">文档够不够</text>
+<rect x="490" y="50" width="150" height="56" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.5"/>
+<text x="565" y="70" font-size="13" font-weight="500" fill="#26215C" text-anchor="middle" dominant-baseline="central">④ 生成答案</text>
+<text x="565" y="88" font-size="11" fill="#3C3489" text-anchor="middle" dominant-baseline="central">LLM 写回答</text>
+<path d="M160 78 L186 78" fill="none" stroke="#185FA5" stroke-width="1.5" marker-end="url(#a)"/>
+<path d="M310 78 L336 78" fill="none" stroke="#185FA5" stroke-width="1.5" marker-end="url(#a)"/>
+<path d="M460 78 L486 78" fill="none" stroke="#534AB7" stroke-width="1.5" marker-end="url(#a)"/>
+<rect x="490" y="150" width="150" height="64" rx="10" fill="#FCEBEB" stroke="#A32D2D" stroke-width="1.5"/>
+<text x="565" y="172" font-size="13" font-weight="500" fill="#501313" text-anchor="middle" dominant-baseline="central">⑤ 幻觉检测</text>
+<text x="565" y="192" font-size="11" fill="#791F1F" text-anchor="middle" dominant-baseline="central">逐句查依据（生成后）</text>
+<path d="M565 106 L565 146" fill="none" stroke="#A32D2D" stroke-width="1.5" marker-end="url(#a)"/>
+<rect x="40" y="150" width="420" height="64" rx="10" fill="#F1EFE8" stroke="#888780" stroke-width="0.5"/>
+<text x="52" y="172" font-size="12" font-weight="500" fill="#444441" dominant-baseline="central">检索内部管什么（①②③）</text>
+<text x="52" y="192" font-size="11" fill="#5F5E5A" dominant-baseline="central">管"召回对不对、文档够不够"——不管答案编没编，没有幻觉检测</text>
+<rect x="40" y="240" width="600" height="70" rx="10" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.5"/>
+<text x="52" y="260" font-size="12" font-weight="500" fill="#26215C" dominant-baseline="central">三个"检查"各管什么（面试别混）</text>
+<text x="52" y="282" font-size="11" fill="#3C3489" dominant-baseline="central">反思 = 文档够不够回答（检索质量）；幻觉检测 = 答案每句话有没有依据（生成质量）</text>
+<text x="52" y="298" font-size="11" fill="#3C3489" dominant-baseline="central">检索相关性 = 文档和问题像不像——三者位置不同、对象不同</text>
+</svg>

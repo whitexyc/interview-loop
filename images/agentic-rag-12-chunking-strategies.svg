@@ -1,0 +1,52 @@
+<svg viewBox="0 0 680 344" xmlns="http://www.w3.org/2000/svg">
+<text x="40" y="24" font-size="14" font-weight="500" fill="#2C2C2A">RAG 切分策略全景 — 三大流派</text>
+<text x="40" y="44" font-size="12" fill="#5F5E5A">项目当前 = 递归字符 + 标题层级 + 父子分块（teal 高亮）</text>
+<rect x="40" y="64" width="186" height="30" rx="6" fill="#FAC775" stroke="#854F0B" stroke-width="0.5"/>
+<text x="52" y="79" font-size="13" font-weight="500" fill="#412402" dominant-baseline="central">固定粒度</text>
+<text x="214" y="79" font-size="11" fill="#633806" text-anchor="end" dominant-baseline="central">简单粗暴</text>
+<rect x="247" y="64" width="186" height="30" rx="6" fill="#B5D4F4" stroke="#185FA5" stroke-width="0.5"/>
+<text x="259" y="79" font-size="13" font-weight="500" fill="#042C53" dominant-baseline="central">语义感知</text>
+<text x="421" y="79" font-size="11" fill="#0C447C" text-anchor="end" dominant-baseline="central">重完整性</text>
+<rect x="454" y="64" width="186" height="30" rx="6" fill="#9FE1CB" stroke="#0F6E56" stroke-width="0.5"/>
+<text x="466" y="79" font-size="13" font-weight="500" fill="#04342C" dominant-baseline="central">结构感知</text>
+<text x="628" y="79" font-size="11" fill="#085041" text-anchor="end" dominant-baseline="central">利用文档结构</text>
+<g>
+<rect x="40" y="100" width="186" height="50" rx="8" fill="#FAEEDA" stroke="#854F0B" stroke-width="0.5"/>
+<text x="52" y="118" font-size="13" font-weight="500" fill="#412402" dominant-baseline="central">固定大小 Fixed-size</text>
+<text x="52" y="136" font-size="11" fill="#633806" dominant-baseline="central">按字符数硬切，最简单</text>
+<rect x="40" y="158" width="186" height="50" rx="8" fill="#FAEEDA" stroke="#0F6E56" stroke-width="1.5"/>
+<text x="52" y="176" font-size="13" font-weight="500" fill="#412402" dominant-baseline="central">递归字符 Recursive</text>
+<text x="52" y="194" font-size="11" fill="#633806" dominant-baseline="central">分隔符优先级切 · 在用</text>
+<rect x="40" y="216" width="186" height="50" rx="8" fill="#FAEEDA" stroke="#854F0B" stroke-width="0.5"/>
+<text x="52" y="234" font-size="13" font-weight="500" fill="#412402" dominant-baseline="central">滑动窗口 Overlap</text>
+<text x="52" y="252" font-size="11" fill="#633806" dominant-baseline="central">相邻块重叠缓断裂</text>
+</g>
+<g>
+<rect x="247" y="100" width="186" height="50" rx="8" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+<text x="259" y="118" font-size="13" font-weight="500" fill="#042C53" dominant-baseline="central">句子级 Sentence</text>
+<text x="259" y="136" font-size="11" fill="#0C447C" dominant-baseline="central">按句号切，语义单元小</text>
+<rect x="247" y="158" width="186" height="50" rx="8" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+<text x="259" y="176" font-size="13" font-weight="500" fill="#042C53" dominant-baseline="central">段落级 Paragraph</text>
+<text x="259" y="194" font-size="11" fill="#0C447C" dominant-baseline="central">按段落切，自然语义块</text>
+<rect x="247" y="216" width="186" height="50" rx="8" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+<text x="259" y="234" font-size="13" font-weight="500" fill="#042C53" dominant-baseline="central">语义分块 Semantic</text>
+<text x="259" y="252" font-size="11" fill="#0C447C" dominant-baseline="central">向量相似度找切点</text>
+<rect x="247" y="274" width="186" height="50" rx="8" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+<text x="259" y="292" font-size="13" font-weight="500" fill="#042C53" dominant-baseline="central">命题级 Proposition</text>
+<text x="259" y="310" font-size="11" fill="#0C447C" dominant-baseline="central">每条独立主张为原子</text>
+</g>
+<g>
+<rect x="454" y="100" width="186" height="50" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="1.5"/>
+<text x="466" y="118" font-size="13" font-weight="500" fill="#04342C" dominant-baseline="central">标题层级 Header</text>
+<text x="466" y="136" font-size="11" fill="#085041" dominant-baseline="central">按 ##/### 切 · 在用</text>
+<rect x="454" y="158" width="186" height="50" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="1.5"/>
+<text x="466" y="176" font-size="13" font-weight="500" fill="#04342C" dominant-baseline="central">父子分块 Parent-child</text>
+<text x="466" y="194" font-size="11" fill="#085041" dominant-baseline="central">小块检索大块返回 · 在用</text>
+<rect x="454" y="216" width="186" height="50" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+<text x="466" y="234" font-size="13" font-weight="500" fill="#04342C" dominant-baseline="central">LLM 分块 Agentic</text>
+<text x="466" y="252" font-size="11" fill="#085041" dominant-baseline="central">LLM 定切点，最贵</text>
+<rect x="454" y="274" width="186" height="50" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+<text x="466" y="292" font-size="13" font-weight="500" fill="#04342C" dominant-baseline="central">摘要块 Summarize</text>
+<text x="466" y="310" font-size="11" fill="#085041" dominant-baseline="central">块配摘要辅助检索</text>
+</g>
+</svg>

@@ -1,0 +1,31 @@
+<svg viewBox="0 0 680 500" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="b" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<text x="40" y="24" font-size="14" font-weight="500" fill="#2C2C2A">query 改写分诊流程（ADR-0009）</text>
+<rect x="270" y="40" width="140" height="44" rx="8" fill="#F1EFE8" stroke="#888780" stroke-width="0.5"/>
+<text x="340" y="62" font-size="13" font-weight="500" fill="#2C2C2A" text-anchor="middle" dominant-baseline="central">用户 query</text>
+<path d="M340 84 L340 104" fill="none" stroke="#888780" stroke-width="1.5" marker-end="url(#b)"/>
+<rect x="180" y="108" width="320" height="56" rx="8" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+<text x="340" y="128" font-size="13" font-weight="500" fill="#042C53" text-anchor="middle" dominant-baseline="central">① 静态分诊（jieba 分词 → 术语查 FTS 倒排）</text>
+<text x="340" y="148" font-size="11" fill="#0C447C" text-anchor="middle" dominant-baseline="central">零成本，不触发向量检索</text>
+<path d="M230 164 L140 192" fill="none" stroke="#185FA5" stroke-width="1.5" marker-end="url(#b)"/>
+<path d="M450 164 L540 192" fill="none" stroke="#185FA5" stroke-width="1.5" marker-end="url(#b)"/>
+<text x="150" y="182" font-size="11" fill="#0F6E56">术语命中</text>
+<text x="470" y="182" font-size="11" fill="#A32D2D">术语不命中/有代词</text>
+<rect x="40" y="196" width="200" height="56" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+<text x="140" y="216" font-size="13" font-weight="500" fill="#04342C" text-anchor="middle" dominant-baseline="central">精确 → 直接检索</text>
+<text x="140" y="236" font-size="11" fill="#085041" text-anchor="middle" dominant-baseline="central">不改写，一次检索→生成</text>
+<rect x="440" y="196" width="200" height="56" rx="8" fill="#FCEBEB" stroke="#A32D2D" stroke-width="0.5"/>
+<text x="540" y="216" font-size="13" font-weight="500" fill="#501313" text-anchor="middle" dominant-baseline="central">模糊 → 走改写路径</text>
+<text x="540" y="236" font-size="11" fill="#791F1F" text-anchor="middle" dominant-baseline="central">LLM 生成 rewritten_query</text>
+<path d="M540 252 L540 268" fill="none" stroke="#A32D2D" stroke-width="1.5" marker-end="url(#b)"/>
+<rect x="380" y="272" width="260" height="56" rx="8" fill="#FAEEDA" stroke="#854F0B" stroke-width="0.5"/>
+<text x="510" y="292" font-size="13" font-weight="500" fill="#412402" text-anchor="middle" dominant-baseline="central">② 保真预检</text>
+<text x="510" y="312" font-size="11" fill="#633806" text-anchor="middle" dominant-baseline="central">改写 vs 原 query 余弦 &lt; 0.6 → 回退原话</text>
+<path d="M510 328 L510 344" fill="none" stroke="#854F0B" stroke-width="1.5" marker-end="url(#b)"/>
+<rect x="350" y="348" width="300" height="56" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+<text x="500" y="368" font-size="13" font-weight="500" fill="#04342C" text-anchor="middle" dominant-baseline="central">③ 并行检索 + 绝对余弦择优</text>
+<text x="500" y="388" font-size="11" fill="#085041" text-anchor="middle" dominant-baseline="central">原 query 与改写各检索一次，谁 top-1 高用谁</text>
+<path d="M500 404 L500 424" fill="none" stroke="#0F6E56" stroke-width="1.5" marker-end="url(#b)"/>
+<rect x="230" y="428" width="220" height="48" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.5"/>
+<text x="340" y="452" font-size="13" font-weight="500" fill="#26215C" text-anchor="middle" dominant-baseline="central">④ 生成答案</text>
+</svg>

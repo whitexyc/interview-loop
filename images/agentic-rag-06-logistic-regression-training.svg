@@ -1,0 +1,15 @@
+<svg viewBox="0 0 680 480" width="100%" role="img" xmlns="http://www.w3.org/2000/svg">
+<title>逻辑回归分类头训练流水线</title>
+<desc>bge-m3 冻结编码标注数据为向量矩阵，仅训练逻辑回归的权重与偏置，评估后保存部署</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<text x="40" y="28" font-size="14" font-weight="500" fill="#444441">训练流水线：只训练分类头，不训练 bge-m3</text>
+<g><rect x="40" y="46" width="600" height="66" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/><text x="56" y="66" font-size="13" font-weight="500" fill="#2C2C2A">① 准备标注数据（几十~几百条就够）</text><text x="56" y="86" font-size="12" fill="#5F5E5A">"什么是G1垃圾收集器？" → knowledge　"你好呀" → casual_chat　"现在几点？" → realtime</text><text x="56" y="102" font-size="12" fill="#5F5E5A">来源：golden 集 + 手工标注 + 前端👍/👎飞轮回流（L4）</text></g>
+<line x1="340" y1="112" x2="340" y2="134" stroke="#888780" stroke-width="1.5" marker-end="url(#arrow)"/>
+<g><rect x="40" y="134" width="600" height="66" rx="8" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/><text x="56" y="154" font-size="13" font-weight="500" fill="#042C53">② bge-m3 编码（冻结，不训练）</text><text x="56" y="174" font-size="12" fill="#0C447C">每条 query 过 bge-m3 → 1024 维向量，拼成特征矩阵 X（N × 1024）</text><text x="56" y="190" font-size="12" fill="#0C447C">冻结 = 权重固定不变，只是用它把文本"翻译"成向量</text></g>
+<line x1="340" y1="200" x2="340" y2="222" stroke="#185FA5" stroke-width="1.5" marker-end="url(#arrow)"/>
+<g><rect x="40" y="222" width="600" height="66" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/><text x="56" y="242" font-size="13" font-weight="500" fill="#04342C">③ 训练逻辑回归（唯一被训练的部分）</text><text x="56" y="262" font-size="12" fill="#085041">sklearn 一行：model.fit(X, y) → 学出 1024 个权重 + 1 个偏置</text><text x="56" y="278" font-size="12" fill="#085041">数学本质：最小化交叉熵损失，解一个凸优化问题，秒级收敛</text></g>
+<line x1="340" y1="288" x2="340" y2="310" stroke="#0F6E56" stroke-width="1.5" marker-end="url(#arrow)"/>
+<g><rect x="40" y="310" width="600" height="66" rx="8" fill="#FAEEDA" stroke="#854F0B" stroke-width="0.5"/><text x="56" y="330" font-size="13" font-weight="500" fill="#412402">④ 评估（复用 L1 评测集）</text><text x="56" y="350" font-size="12" fill="#633806">留出测试集 → Accuracy + 每类 F1 + 混淆矩阵 → 与 LLM 分类对比</text><text x="56" y="366" font-size="12" fill="#633806">达标后：model 文件 + bge-m3 一起部署，推理毫秒级本地跑</text></g>
+<line x1="340" y1="376" x2="340" y2="398" stroke="#854F0B" stroke-width="1.5" marker-end="url(#arrow)"/>
+<g><rect x="40" y="398" width="600" height="60" rx="10" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.5"/><text x="56" y="418" font-size="12" font-weight="500" fill="#26215C">关键认知：这不是"训练大模型"，是"训练一个小分类头"</text><text x="56" y="438" font-size="12" fill="#3C3489">参数仅 1025 个、数据几百条、训练几秒——比 LLM fine-tune 轻几个数量级</text><text x="56" y="454" font-size="12" fill="#3C3489">不需要 GPU、不需要大语料，普通笔记本 sklearn 就能跑</text></g>
+</svg>

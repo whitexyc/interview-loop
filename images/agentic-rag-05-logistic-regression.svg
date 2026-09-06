@@ -1,0 +1,17 @@
+<svg viewBox="0 0 680 470" width="100%" role="img" xmlns="http://www.w3.org/2000/svg">
+<title>逻辑回归分类器工作原理</title>
+<desc>文本经 bge-m3 编码为向量，逻辑回归做线性加权求和再经 sigmoid 映射为概率，阈值决策分类</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<text x="40" y="28" font-size="14" font-weight="500" fill="#444441">逻辑回归：把文本变成"是不是知识库问题"的概率</text>
+<g><rect x="40" y="46" width="280" height="56" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/><text x="180" y="66" font-size="13" text-anchor="middle" dominant-baseline="central" fill="#2C2C2A">"什么是G1垃圾收集器？"</text><text x="180" y="86" font-size="11" text-anchor="middle" dominant-baseline="central" fill="#5F5E5A">真实答案：knowledge</text></g>
+<g><rect x="360" y="46" width="280" height="56" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/><text x="500" y="66" font-size="13" text-anchor="middle" dominant-baseline="central" fill="#2C2C2A">"你好呀"</text><text x="500" y="86" font-size="11" text-anchor="middle" dominant-baseline="central" fill="#5F5E5A">真实答案：casual_chat</text></g>
+<line x1="180" y1="102" x2="180" y2="130" stroke="#888780" stroke-width="1.5" marker-end="url(#arrow)"/>
+<line x1="500" y1="102" x2="500" y2="130" stroke="#888780" stroke-width="1.5" marker-end="url(#arrow)"/>
+<g><rect x="40" y="130" width="600" height="56" rx="8" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/><text x="340" y="150" font-size="13" text-anchor="middle" dominant-baseline="central" fill="#042C53">第一步 · bge-m3 把文本编码成 1024 维向量</text><text x="340" y="170" font-size="11" text-anchor="middle" dominant-baseline="central" fill="#185FA5">[0.32, -0.18, 0.87, ...] × 1024 个数字，语义相近的文本向量也相近</text></g>
+<line x1="340" y1="186" x2="340" y2="214" stroke="#185FA5" stroke-width="1.5" marker-end="url(#arrow)"/>
+<g><rect x="40" y="214" width="600" height="56" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/><text x="340" y="234" font-size="13" text-anchor="middle" dominant-baseline="central" fill="#04342C">第二步 · 逻辑回归：每个维度加权求和</text><text x="340" y="254" font-size="11" text-anchor="middle" dominant-baseline="central" fill="#0F6E56">z = w₁x₁ + w₂x₂ + ... + w₁₀₂₄x₁₀₂₄ + b，权重 w 从标注数据里训练学出</text></g>
+<line x1="340" y1="270" x2="340" y2="298" stroke="#0F6E56" stroke-width="1.5" marker-end="url(#arrow)"/>
+<g><rect x="40" y="298" width="600" height="56" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/><text x="340" y="318" font-size="13" text-anchor="middle" dominant-baseline="central" fill="#04342C">第三步 · sigmoid 把 z 压成 0~1 的概率</text><text x="340" y="338" font-size="11" text-anchor="middle" dominant-baseline="central" fill="#0F6E56">P = 1 / (1 + e⁻ᶻ)：z 越大 P 越接近 1，z 越小 P 越接近 0</text></g>
+<line x1="340" y1="354" x2="340" y2="382" stroke="#0F6E56" stroke-width="1.5" marker-end="url(#arrow)"/>
+<g><rect x="40" y="382" width="600" height="56" rx="8" fill="#FAEEDA" stroke="#854F0B" stroke-width="0.5"/><text x="340" y="402" font-size="13" text-anchor="middle" dominant-baseline="central" fill="#412402">第四步 · 阈值决策</text><text x="340" y="422" font-size="11" text-anchor="middle" dominant-baseline="central" fill="#854F0B">P &gt; 0.5 → knowledge；P &lt; 0.5 → casual_chat（P 就是校准过的真概率）</text></g>
+</svg>
