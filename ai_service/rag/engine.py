@@ -47,6 +47,7 @@ from rag.memory.memory import memory_service, format_memory_line
 from rag.memory.memory_extractor import extract_facts
 from rag.memory.session_memory import session_memory_service
 from rag.retrieval import query_rewrite
+from rag.crawl.sanitize import check_canary_leak  # module-086 输出侧 canary 泄漏检测
 
 logger = logging.getLogger(__name__)
 
@@ -519,6 +520,10 @@ class RAGEngine:
                 request.query, docs, history=effective_history, memory=memory_text,
             )
             observability.timing("generate", time.perf_counter() - _gen_t0)
+            # module-086：输出侧 canary 泄漏检测（knowledge 路径；check_canary_leak
+            # 自身 fail-open 不抛，开关关时零调用）
+            if settings.crawl_canary_enabled:
+                await check_canary_leak(answer)
             # module-039：证据链验证——逐句检查答案是否被检索文档支持
             _vf_t0 = time.perf_counter()
             verified = await reflector.verify_answer(answer, docs)

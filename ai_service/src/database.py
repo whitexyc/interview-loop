@@ -241,6 +241,36 @@ async def ensure_tasks_table() -> None:
         await session.commit()
 
 
+# crawl_canaries 表 DDL（module-086 注入防护 canary 金丝雀）：与 feedback/
+# request_logs 同款模式——独立建表 + 启动 init_db 自愈建表（CREATE TABLE IF
+# NOT EXISTS + 唯一索引，幂等）。每篇爬虫文档一个 8-hex canary 令牌映射行
+#（doc_id/canary/source_url），输出侧 check_canary_leak 据此判定泄漏来源。
+# canary 全库唯一（UNIQUE INDEX）；无 JSONB 列（规避 asyncpg dict 绑定坑）。
+CRAWL_CANARIES_DDL = """
+CREATE TABLE IF NOT EXISTS crawl_canaries (
+    id         BIGSERIAL   PRIMARY KEY,
+    doc_id     BIGINT      NOT NULL,
+    canary     VARCHAR(32) NOT NULL,
+    source_url TEXT        NOT NULL DEFAULT '',
+    created_at TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_crawl_canaries_canary ON crawl_canaries (canary);
+COMMENT ON TABLE crawl_canaries IS '爬虫 canary 金丝雀映射（module-086：文档→令牌，输出侧泄漏检测对账）';
+COMMENT ON COLUMN crawl_canaries.doc_id IS '入库文档 ID（documents.id，ingest 返回）';
+COMMENT ON COLUMN crawl_canaries.canary IS 'canary 令牌（8 位小写 hex，全文唯一）';
+COMMENT ON COLUMN crawl_canaries.source_url IS '抓取来源 URL（泄漏对账定位）';
+"""
+
+
+async def ensure_crawl_canaries_table() -> None:
+    """幂等创建 crawl_canaries 表（与 feedback/request_logs 同款拆分执行模式）"""
+    statements = [s.strip() for s in CRAWL_CANARIES_DDL.split(";") if s.strip()]
+    async with async_session_factory() as session:
+        for stmt in statements:
+            await session.execute(text(stmt))
+        await session.commit()
+
+
 # verify_results 表 DDL（module-060 verify 异步化）：与 feedback/request_logs
 # 同款模式——独立建表 + 启动 init_db 自愈建表（CREATE TABLE IF NOT EXISTS，幂等）。
 # claims 用 JSONB 存逐句验证结果（claim/verdict/evidence），overall_confidence/
@@ -406,6 +436,8 @@ async def init_db():
     logger.info("request_spans 表已就绪（module-088 链路式观测）")
     await ensure_tasks_table()
     logger.info("tasks 表已就绪（module-087 任务抽象）")
+    await ensure_crawl_canaries_table()
+    logger.info("crawl_canaries 表已就绪（module-086 注入防护 canary）")
 
 # documents.embedding HNSW 索引（backlog P2 修复，2026-08-26）：
 # 检索/去重均走 ORDER BY embedding <=> :vec LIMIT k，无索引时是 14k+ 行顺序扫描。

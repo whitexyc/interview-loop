@@ -30,6 +30,7 @@ from mcp_server import mcp as mcp_server, mcp_http_lifespan
 from agent import mcp_client
 from agent.tool_registry import registry
 from rag.engine import rag_engine, resolve_tool_history
+from rag.crawl.sanitize import check_canary_leak  # module-086 输出侧 canary 泄漏检测
 from rag.schemas import (
     SearchRequest, SearchResponse, ChatRequest, ChatResponse,
     MemorySaveRequest, MemoryRecallRequest, FeedbackRequest,
@@ -588,6 +589,10 @@ async def _stream_generate_verify(request, fastapi_req, identity, intent, _t, do
             break
     sources = _extract_sources(docs)
     answer_text = "".join(answer_parts)
+    # module-086：输出侧 canary 泄漏检测（流式路径；check_canary_leak 自身
+    # fail-open 不抛，开关关时零调用）
+    if settings.crawl_canary_enabled:
+        await check_canary_leak(answer_text)
     schedule_stream_persist(intent, request.query, answer_text, identity, request.history)
     rag_engine._schedule_session_persist(identity, request.query, answer_text)
     observability.timing("generate", _t() - gen_t0)

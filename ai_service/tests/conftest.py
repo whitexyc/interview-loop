@@ -330,3 +330,19 @@ def default_mcp_external_disabled(monkeypatch):
     from agent.mcp_client import external
     external.registered = set()
     external._registry = None
+
+
+@pytest.fixture(autouse=True)
+def default_crawl_sanitize_disabled(monkeypatch):
+    """测试环境统一钉住注入防护开关=关闭（module-086，对齐 056/058/087/088 模式）
+
+    生产默认开启（PW_CRAWL_SANITIZE_ENABLED / PW_CRAWL_CANARY_ENABLED 默认 true），
+    但单测需 hermetic：存量爬虫/引擎测试以无 sanitize/canary 的原文行为为准——
+    钉住双 false 保证存量测试零漂移（爬虫链逐字、chat 零泄漏检测调用）。
+    新测试（tests/crawl/test_sanitize.py）体内显式 setattr True 验证三态清洗/
+    令牌嵌入/泄漏检测（配合 mock 打桩，不依赖真实 DB）。
+    """
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "crawl_sanitize_enabled", False)
+    monkeypatch.setattr(settings, "crawl_canary_enabled", False)

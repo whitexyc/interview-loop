@@ -425,6 +425,19 @@ class Settings(BaseSettings):
     crawl_robots_cache_ttl: int = 3600
     crawl_user_agents: str = ""
 
+    # 入口注入防护（module-086 / 缺陷补全 T4）：爬虫内容入口 sanitize + canary 金丝雀。
+    #   crawl_sanitize_enabled —— sanitize 总开关（PW_CRAWL_SANITIZE_ENABLED）。
+    #   crawl_sanitize_mode —— 处置三档（PW_CRAWL_SANITIZE_MODE，Literal 非法值启动即抛）：
+    #     detect（只记 findings 内容零改动，评估/逃生口）/ strip（默认：载体族剥离 +
+    #     指令族标记，可见正文零损伤）/ strict（strip 全部 + 任一指令族命中 → 该页
+    #     review_status 强制 rejected，对齐 module-075 rejected 仍入库契约）。
+    #   crawl_canary_enabled —— canary 金丝雀开关（PW_CRAWL_CANARY_ENABLED）：爬虫
+    #     文档嵌入 [canary:8hex] 令牌 + crawl_canaries 映射 + 输出侧泄漏检测。
+    #   测试环境由 conftest autouse fixture 钉住 sanitize/canary 双关（hermetic）。
+    crawl_sanitize_enabled: bool = True
+    crawl_sanitize_mode: Literal["detect", "strip", "strict"] = "strip"
+    crawl_canary_enabled: bool = True
+
     # 反向闭环（module-080）：待学笔记优先级加权
     # 待学笔记主题关键词匹配源 url_pattern/name 时，动态提升该源的内存态 priority
     #（不写回 DB，每次 run_crawl 动态算）。默认 10，PW_WEAK_TOPIC_PRIORITY_BOOST 可覆盖。

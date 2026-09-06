@@ -23,6 +23,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit, urlparse
 import httpx
 
 from src.config import settings
+from rag.crawl.sanitize import embed_canary, new_canary, record_canary, sanitize_crawl_content  # module-086 入口注入防护
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,7 @@ class CrawlSummary:
     approved: int = 0
     rejected: int = 0
     conflict_count: int = 0  # 检测到矛盾的文档数（module-078，与是否 rejected 独立计数）
+    sanitized: int = 0  # sanitize 有 findings 的页数（module-086，与 approved/rejected 独立计数）
     skipped: int = 0
     errors: int = 0
     details: list = field(default_factory=list)
@@ -547,18 +549,37 @@ async def _crawl_page_and_store(url: str, summary: CrawlSummary) -> list[str]:
         summary.errors += 1
         summary.details.append({"url": url, "status": "error", "error": result.error})
         return []
+    # module-086: 入口 sanitize（审查节点前清洗，防审查器自身被投毒；异常 fail-open 原文路径）
+    sanitize_result = None
+    if settings.crawl_sanitize_enabled:
+        try:
+            sanitize_result = sanitize_crawl_content(result.content, settings.crawl_sanitize_mode)
+        except Exception as e:
+            logger.warning("sanitize 失败，fail-open 原文继续: %s — %s", url[:80], e)
+            sanitize_result = None
+    content_for_review = sanitize_result.cleaned_text if sanitize_result else result.content
     try:
-        review = await _review_content(url, result.content, result.title)
+        review = await _review_content(url, content_for_review, result.title)
     except Exception as e:
         logger.warning("审查调用异常，fail-open approved: %s — %s", url[:80], e)
         review = "approved"
     review_status = str(review)
+    if sanitize_result and sanitize_result.rejected:  # strict 指令族命中强制拒收（075 契约仍入库）
+        review_status = "rejected"
     review_score = getattr(review, "score", None)
     conflict = bool(getattr(review, "conflict", False))
+    sanitize_note = ({"findings": sanitize_result.findings, "rejected": sanitize_result.rejected}
+                     if sanitize_result and sanitize_result.findings else None)
+    if sanitize_note:
+        summary.sanitized += 1
     try:
         from rag.retrieval.document_ingest import ingest_document
+        canary = new_canary() if settings.crawl_canary_enabled else ""
+        # 空清洗结果不嵌 canary（保留 AC-20 纯注释页 → IngestError 降级路径）
+        content_for_ingest = (embed_canary(content_for_review, canary)
+                              if canary and content_for_review.strip() else content_for_review)
         ingest_result = await ingest_document(
-            data=result.content.encode("utf-8"), filename=_crawl_filename(url),
+            data=content_for_ingest.encode("utf-8"), filename=_crawl_filename(url),
             title=result.title or url, source=f"crawl:{url}",
             review_status=review_status, review_score=review_score)
         summary.crawled += 1
@@ -568,9 +589,12 @@ async def _crawl_page_and_store(url: str, summary: CrawlSummary) -> list[str]:
             summary.rejected += 1
         if conflict:
             summary.conflict_count += 1
+        if canary and ingest_result.get("id"):
+            await record_canary(ingest_result["id"], canary, url)
         summary.details.append({"url": url, "status": "ok", "review": review_status,
                                 "review_score": review_score, "conflict": conflict,
-                                "doc_id": ingest_result.get("id")})
+                                "doc_id": ingest_result.get("id"),
+                                **({"sanitize": sanitize_note} if sanitize_note else {})})
         logger.info("递归入库成功: %s (doc_id=%s, review=%s, score=%s, conflict=%s)",
                     url[:80], ingest_result.get("id"), review_status, review_score, conflict)
     except Exception as e:
@@ -657,8 +681,8 @@ async def run_crawl(sources: list[dict], *, max_pages: int = 0) -> CrawlSummary:
         await _crawl_single_source(src, visited, limit, summary)
 
     logger.info(
-        "抓取批次完成: crawled=%d, approved=%d, rejected=%d, errors=%d, skipped=%d",
-        summary.crawled, summary.approved, summary.rejected,
+        "抓取批次完成: crawled=%d, approved=%d, rejected=%d, sanitized=%d, errors=%d, skipped=%d",
+        summary.crawled, summary.approved, summary.rejected, summary.sanitized,
         summary.errors, summary.skipped,
     )
     return summary
