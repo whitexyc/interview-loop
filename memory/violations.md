@@ -324,3 +324,5 @@
 | module-082-sag-hardening | 5 | 2026-08-26 | 裸 except + pass（吞异常）: ai_service/rag/retrieval/sag_extractor.py:49 |
 | module-082-sag-hardening | 5 | 2026-08-26 | 裸 except + pass（吞异常）: ai_service/rag/retrieval/sag_extractor.py:56 |
 | module-082-sag-hardening | 5 | 2026-08-26 | 裸 except + pass（吞异常）: ai_service/rag/retrieval/sag_retriever.py:145 |
+| module-012 | 11 | 2026-09-06 | 记忆文件内容缺少本次模块标识 module-012（疑似未实际写入，仅刷新时间戳）: project-context.md, agent-activity-lo |
+| module-012 | 11 | 2026-09-06 | 记忆文件内容缺少本次模块标识 module-012（疑似未实际写入，仅刷新时间戳）: project-context.md, agent-activity-lo |
