@@ -156,6 +156,19 @@ def default_tasks_disabled(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def default_task_budget_unlimited(monkeypatch):
+    """测试环境统一钉住任务 token 预算=不限（module-089，对齐 087 钉桩模式）
+
+    生产默认 0=不限（零执法），但显式钉住防开发者机器 OS env
+    PW_TASK_BUDGET_TOKEN_LIMIT 泄漏进测试（预算意外执法漂移存量行为）。
+    新测试（test_budget.py）体内显式 setattr 正数开启验证熔断执法。
+    """
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "task_budget_token_limit", 0)
+
+
+@pytest.fixture(autouse=True)
 def default_verify_async_disabled(monkeypatch):
     """测试环境统一钉住 verify 异步开关=关闭（module-060，对齐 056/058 模式）
 

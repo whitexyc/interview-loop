@@ -35,6 +35,7 @@ from typing import AsyncGenerator, Optional
 from src.config import settings
 from src.observability import get_trace_id
 from src import tracing  # module-088 链路式观测埋点（写侧 fail-open）
+from src import tasks  # module-089 预算账本（budget_exceeded/budget_break）
 from llm.client import LLMFactory
 from agent.reflector import reflector
 from agent.tool_registry import ToolRegistry, registry
@@ -364,7 +365,14 @@ async def execute_tool_with_log(name: str, args: dict, tool,
     started = time.perf_counter()
     result_ok = tool is not None
     result = ""
-    if tool is not None and (not _phase_allows(name, ctx)
+    if tool is not None and tasks.budget_exceeded():
+        # module-089：任务 token 预算熔断（第 4 维守门，先于阶段/权限）——
+        # 拒绝增量成本喂回 LLM；span 复用既有三态（result 非空+result_ok=False
+        # → status="blocked" + decision 附熔断文本），tool_call_logs 照常落库
+        result_ok = False
+        result = "（任务 token 预算已耗尽，工具执行被熔断，module-089）"
+        logger.warning("工具 %s 被任务 token 预算熔断拒绝（module-089）", name)
+    elif tool is not None and (not _phase_allows(name, ctx)
                              or (allowed_tools is not None and name not in allowed_tools)):
         result_ok = False
         if allowed_tools is not None and name not in allowed_tools:
@@ -485,6 +493,18 @@ async def react_loop(
         return
 
     while tool_count < budget:
+        # module-089：任务 token 预算熔断（循环层，chat_with_tools 之前）——
+        # used>=N 且 N>0 → break 落入既有"预算耗尽兜底生成"（reflector
+        # .generate_answer），熔断只断增量成本不断最终答案（plan §1 决策 3/6）；
+        # budget_break span 对齐 budget_truncate 先例（仅手写 react_loop，
+        # langgraph 循环层不单记——工具层经共享 execute_tool_with_log 继承）
+        if tasks.budget_exceeded():
+            tracing.record_span(
+                "budget_break", "decision",
+                decision=f"used={tasks.budget_used()} limit={tasks.get_budget_limit()}")
+            logger.warning("任务 token 预算耗尽 (used=%d limit=%d)，中断工具循环兜底生成",
+                           tasks.budget_used(), tasks.get_budget_limit())
+            break
         # module-058（ADR-0012 方案 A）：按 ctx.phase 阶段选工具 schema
         #（检索阶段 7 个 / 生成阶段 4 个；开关 false → 全量，零回归）
         response = await client.chat_with_tools(messages, schemas_for_phase(tools, ctx))

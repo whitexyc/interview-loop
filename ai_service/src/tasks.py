@@ -29,10 +29,13 @@ logger = logging.getLogger(__name__)
 
 # 当前 task_id（begin_task 压入；downstream task 经 contextvar 快照继承，
 # 058/088 已实证）+ 记忆写所有权（"子只读父写"：父 task=write 子 task=read）
+# + 任务 token 预算上限（module-089；begin_task 解析 config 压入，0=不限）
 _task_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
     "current_task_id", default="")
 _memory_write_var: contextvars.ContextVar[str] = contextvars.ContextVar(
     "memory_write_mode", default="write")
+_budget_limit_var: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "task_budget_limit", default=0)
 
 # task 建行参数化 INSERT（11 绑定列全 :xxx 绑定，无任何拼接；created_at 走
 # DB default、finished_at 由收口 UPDATE 传入——NULL=仍 running）
@@ -69,6 +72,13 @@ _SQL_OVERVIEW = """
             WHERE c.trace_id = t.trace_id) AS tool_calls
     FROM tasks t
     WHERE t.task_id = :task_id
+"""
+
+# 预算上限覆盖（module-089：task 级 set_task_budget 原语的落库 UPDATE；不加
+# status 条件——覆盖语义重放安全；无 JSONB 列，全标量绑定）
+_SQL_BUDGET = """
+    UPDATE tasks SET budget_token_limit = :budget_token_limit
+    WHERE task_id = :task_id
 """
 
 # fire-and-forget 任务引用池（防 GC：asyncio 规范要求保存任务引用，否则任务
@@ -120,12 +130,15 @@ def begin_task(trace_id: str, endpoint: str, identity: str = "") -> str:
     """
     task_id = uuid.uuid4().hex
     _task_id_var.set(task_id)
+    budget_limit = int(settings.task_budget_token_limit or 0)  # module-089
+    _budget_limit_var.set(budget_limit)
     if not settings.tasks_enabled:
         return task_id
     _spawn(_SQL_INSERT, {
         "task_id": task_id, "parent_task_id": "", "trace_id": trace_id,
         "endpoint": endpoint, "intent": "", "status": "running",
-        "budget_token_limit": 0, "tokens_used": 0, "memory_write": "write",
+        "budget_token_limit": budget_limit, "tokens_used": 0,
+        "memory_write": "write",
         # JSONB 列经 text() 绑定必须传 JSON 字符串（asyncpg 对 dict 调 .encode()
         # 必炸 DataError 且被 fail-open 吞——Tester 发现-1；与 DDL default 同值）
         "checkpoint": "{}", "identity": identity or "",
@@ -188,6 +201,70 @@ def memory_write_allowed() -> bool:
         子 task 只读——MemoryService.save 入口闸的消费口径）
     """
     return _memory_write_var.get() != "read"
+
+
+def get_budget_limit() -> int:
+    """当前上下文任务 token 预算上限（module-089）
+
+    Returns:
+        预算上限（0=不限；begin_task 压入 config 解析值，set_task_budget 覆盖）
+    """
+    return _budget_limit_var.get()
+
+
+def budget_used() -> int:
+    """当前请求已用 token 总量（实时口径，与 087 收口逐字同式）
+
+    数据源 observability.get_request_stats()（只读快照，不改写入侧）；Σ 各
+    供应商 usage 的 prompt+completion，缺键兜 0，空 usage → 0。边界：logs 关
+    时 record_usage 短路 → 恒 0（087 tokens_used 恒 0 同源边界，如实声明）。
+
+    Returns:
+        已用 token 标量（不分桶；供应商细分读侧经 request_logs.usage join，085 口径）
+    """
+    from src import observability
+
+    stats = observability.get_request_stats()
+    return sum(int(u.get("prompt", 0)) + int(u.get("completion", 0))
+               for u in (stats.get("usage") or {}).values())
+
+
+def budget_exceeded() -> bool:
+    """当前上下文是否已超任务 token 预算（module-089 熔断执法判定）
+
+    语义（plan §1 决策 6 钉死）：limit<=0（不限/未建 task）或 tasks_enabled
+    关 → False（零执法）；used >= limit 即 True（到达即熔断，防恰等于上限时
+    再烧一轮）。纯 ContextVar + usage 快照，零 DB 访问。
+
+    Returns:
+        True=已超预算（两拦截点应拒绝增量成本）；False=未超或预算未启用
+    """
+    limit = get_budget_limit()
+    if limit <= 0 or not settings.tasks_enabled:
+        return False
+    return budget_used() >= limit
+
+
+def set_task_budget(limit: int) -> None:
+    """覆盖当前上下文任务 token 预算（task 级原语，module-089）
+
+    负数 no-op（对齐 set_memory_write_mode 非法值语义）；正数/0 更新上下文
+    var，且 tasks_enabled 且已建 task 时 fire-and-forget UPDATE
+    tasks.budget_token_limit（fail-open，审计列可查）。v1 无生产调用方
+    （调用方 T5 子任务差异化预算），语义由单测锁定。
+
+    Args:
+        limit: 新预算上限（0=不限；负数 no-op）
+
+    Returns:
+        None（落库经 _spawn 异步旁路，失败仅 warning）
+    """
+    if limit < 0:
+        return
+    _budget_limit_var.set(int(limit))
+    if settings.tasks_enabled and _task_id_var.get():
+        _spawn(_SQL_BUDGET, {"budget_token_limit": int(limit),
+                             "task_id": _task_id_var.get()})
 
 
 async def get_task_overview(task_id: str) -> dict | None:

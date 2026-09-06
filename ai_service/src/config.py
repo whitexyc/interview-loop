@@ -161,6 +161,14 @@ class Settings(BaseSettings):
     # .env 写错名 extra_forbidden 启动即崩 / OS env 静默无效）。
     tasks_enabled: bool = True
 
+    # 任务级 token 预算上限（module-089 预算账本）：begin_task 时解析写入
+    # tasks.budget_token_limit（审计可查）+ 上下文执法（工具层/循环层双拦截点，
+    # 超限熔断只断增量成本不断兜底答案——plan §1 决策 3/6）。0 = 不限（默认，
+    # 行为与 087 逐字一致）。
+    # 环境变量：PW_TASK_BUDGET_TOKEN_LIMIT（唯一口径，勿写 PW_TASK_BUDGET 等
+    # 变体——088 发现-1 教训：.env 写错名 extra_forbidden 启动即崩）。
+    task_budget_token_limit: int = 0
+
     # 工具默认超时（module-083 WP-C）：AgentTool.timeout 缺省值来源——现有
     # 10 工具不传 → 全 15.0（零行为变化）；测量调优不在本模块（tool_call_logs
     # 已记 duration_ms，module-085 看板拉 P95 后按数据调整各工具值）。
