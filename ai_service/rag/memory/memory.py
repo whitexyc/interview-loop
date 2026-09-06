@@ -51,6 +51,7 @@ from sqlalchemy import func, select, update
 
 from src.config import settings
 from src.database import async_session_factory
+from src.tasks import memory_write_allowed as tasks_memory_write_allowed  # module-087
 from rag.models import Document
 from rag.retrieval.chunker import chunker
 from rag.retrieval.embeddings import embedding_service
@@ -326,6 +327,12 @@ class MemoryService:
             ValueError: content 为空
             RuntimeError: 向量化或入库失败
         """
+        # module-087："子只读父写"所有权闸（只设 save 入口，不设 _save——
+        # save_short 委托 _save，闸设 _save 会误伤短期层）。read 模式拒绝
+        # fail-open 不上抛（引擎侧忽略返回值；/ai/memory/save 透传进 data）。
+        if not tasks_memory_write_allowed():
+            logger.warning("长期记忆写入被拒绝（task 所有权：子只读父写，module-087）")
+            return {"status": "blocked"}
         return await self._save(content, identity, layer="", dedup=dedup,
                                 memory_type=memory_type)
 

@@ -23,6 +23,7 @@ from src.cache import cache
 from src.identity import parse_jwt, resolve_identity
 from src import observability
 from src import tracing  # module-088 链路式观测（span 树写侧/读侧）
+from src import tasks  # module-087 任务抽象（task 写侧原语/读侧概览）
 from src.dashboard import get_dashboard_metrics  # module-085 可观测看板读侧聚合
 from src.verify_tasks import submit_verify_task, get_verify_task
 from mcp_server import mcp as mcp_server, mcp_http_lifespan
@@ -202,6 +203,13 @@ app.add_middleware(
 )
 
 
+# module-087：任务覆盖面白名单——精确对齐 persist_request_log 既有调用面
+#（对话四端点），保证每个 task 必有唯一收口点；429/health/其余端点零 task。
+_TASK_ENDPOINTS = frozenset({
+    "/ai/rag/chat", "/ai/rag/chat/stream", "/ai/rag/chat/agent", "/ai/rag/chat/agent-lg",
+})
+
+
 # ─── IP 限流中间件（除 health 外所有请求） ───
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
@@ -255,6 +263,17 @@ async def rate_limit_middleware(request: Request, call_next):
         request.state.trace_id = trace_id
         tracing.begin_request(trace_id=trace_id, endpoint=request.url.path,
                               identity=resolve_identity(request))
+
+    # module-087：任务抽象——一次对话请求 = 1 task（观测聚合/预算/checkpoint
+    # 挂载点）。块位置在 088 块之后（trace_id 终值已定）、call_next 之前
+    #（contextvar 快照传 downstream，058/088 已实证）；429/health 不建 task
+    #（同 088 边界）。trace 缺失（logs+spans 全关）跳过——聚合锚缺失。
+    if settings.tasks_enabled and request.url.path in _TASK_ENDPOINTS:
+        _trace_id = getattr(request.state, "trace_id", "")
+        if _trace_id:
+            request.state.task_id = tasks.begin_task(
+                trace_id=_trace_id, endpoint=request.url.path,
+                identity=resolve_identity(request))
 
     return await call_next(request)
 
@@ -315,9 +334,19 @@ def persist_request_log(fastapi_req: Request, endpoint: str, intent: str = "", e
         intent: 意图（knowledge/casual_chat/realtime/agent）
         error: 请求错误标记（主链路异常置 true）
     """
+    # module-087（决策 9）：stats 上移到 request_logs gate 之前——任务收口需要
+    # usage（logs off 时多一次空 dict 快照，_obs() 惰性初始化安全，无行为变化）
+    stats = observability.get_request_stats()
+    # module-087：任务收口——status/tokens_used/intent 一次 UPDATE（fire-and-
+    # forget fail-open；独立于 request_logs_enabled，tasks_enabled 自有开关；
+    # 流式请求在流 finally 收口 → 终态与 request_logs 同口径）。
+    tasks.finish_task(
+        getattr(fastapi_req.state, "task_id", ""),
+        intent=intent, error=error,
+        tokens_used=sum(int(u.get("prompt", 0)) + int(u.get("completion", 0))
+                        for u in stats.get("usage", {}).values()))
     if not settings.request_logs_enabled:
         return
-    stats = observability.get_request_stats()
     record = {
         "trace_id": stats.get("trace_id") or getattr(fastapi_req.state, "trace_id", ""),
         "identity": resolve_identity(fastapi_req),
@@ -910,6 +939,10 @@ async def memory_save(request: MemorySaveRequest, fastapi_req: Request):
         if identity == "unknown" and request.ip:
             identity = request.ip
         result = await memory_service.save(request.content, identity)
+        # module-087：所有权闸拒绝必须可见（编排者裁定：code 1，fail-closed 对齐
+        # 083 审批闸语义；engine 侧两调用面忽略 save 返回值不受影响）
+        if result.get("status") == "blocked":
+            return {"code": 1, "message": "记忆保存被拒绝（task 所有权：子只读父写）"}
         return {"code": 0, "data": result}
     except ValueError as e:
         return {"code": 1, "message": str(e)}
@@ -1352,6 +1385,31 @@ async def get_observability_trace(trace_id: str):
     if tree is None:
         return {"code": 1, "msg": "trace 不存在"}
     return {"code": 0, "msg": "success", "data": tree}
+
+
+# ─── 任务概览（module-087：一次请求 = 1 task，观测聚合挂 task，只读） ───
+
+
+@app.get("/ai/observability/task/{task_id}")
+async def get_observability_task(task_id: str):
+    """单任务概览（module-087；只读 fail-open）
+
+    Args:
+        task_id: 任务 ID（task 行 task_id，uuid4 hex 32）
+
+    Returns:
+        {code, msg, data}：data = task 13 列 + obs 子 dict（request_logs/
+        request_spans/tool_calls 三计数，经 trace_id 读侧 join，plan §7 契约）；
+        task 不存在 / 查询异常 → code 1 友好降级不 500（088 trace 端点同构）
+    """
+    try:
+        task = await tasks.get_task_overview(task_id)
+    except Exception as e:  # fail-open：读侧降级为提示，不 500
+        logger.warning("task 查询失败（fail-open）: %s", e)
+        return {"code": 1, "msg": "task 查询失败（fail-open）"}
+    if task is None:
+        return {"code": 1, "msg": "task 不存在"}
+    return {"code": 0, "msg": "success", "data": task}
 
 
 if __name__ == "__main__":

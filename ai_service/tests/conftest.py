@@ -142,6 +142,20 @@ def default_trace_spans_disabled(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def default_tasks_disabled(monkeypatch):
+    """测试环境统一钉住任务抽象开关=关闭（module-087，对齐 056/058/088 模式）
+
+    生产默认已开启（PW_TASKS_ENABLED 默认 true），但单测需 hermetic：不依赖
+    真实 DB 落库、不污染 tasks 表（中间件 087 块整块跳过、begin/finish 首行
+    短路，058/088 行为逐字不变——存量测试零漂移）。新测试（test_tasks.py）
+    体内显式开启验证（配合假 session / mock _spawn 打桩）。
+    """
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "tasks_enabled", False)
+
+
+@pytest.fixture(autouse=True)
 def default_verify_async_disabled(monkeypatch):
     """测试环境统一钉住 verify 异步开关=关闭（module-060，对齐 056/058 模式）
 

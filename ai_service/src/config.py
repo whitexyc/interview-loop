@@ -153,6 +153,14 @@ class Settings(BaseSettings):
     # false（存量测试零漂移）。
     trace_spans_enabled: bool = True
 
+    # 任务抽象（module-087）：一次对话请求 = 1 task（tasks 表 + 中间件白名单
+    # 建 + persist_request_log 收口 + "子只读父写"所有权原语）。默认 true
+    #（对齐 088 trace_spans_enabled 先例）；false 零建零收口（058/088 行为
+    # 逐字不变）。测试环境由 conftest autouse fixture 钉住 false（零漂移）。
+    # 环境变量：PW_TASKS_ENABLED（唯一口径，勿写 PW_TASKS——088 发现-1 教训：
+    # .env 写错名 extra_forbidden 启动即崩 / OS env 静默无效）。
+    tasks_enabled: bool = True
+
     # 工具默认超时（module-083 WP-C）：AgentTool.timeout 缺省值来源——现有
     # 10 工具不传 → 全 15.0（零行为变化）；测量调优不在本模块（tool_call_logs
     # 已记 duration_ms，module-085 看板拉 P95 后按数据调整各工具值）。

@@ -189,6 +189,58 @@ async def ensure_request_spans_table() -> None:
         await session.commit()
 
 
+# tasks 表 DDL（module-087 任务抽象）：与 feedback/request_logs 同款模式——
+# 独立建表 + 启动 init_db 自愈建表（CREATE TABLE IF NOT EXISTS，幂等）。
+# 一次对话请求 = 1 task：中间件建（status=running）→ persist_request_log 收口
+# （UPDATE intent/status/tokens_used/finished_at）。观测聚合/预算/checkpoint
+# 均挂 task 上：tokens_used 收口回写、budget_token_limit/checkpoint 仅结构
+# 预留（089 熔断账本 / 090 断点续跑接管，本模块零执法零读写逻辑）；
+# memory_write 为"子只读父写"所有权列（父=write 子=read）。关联维度 =
+# tasks.trace_id 与 request_logs/tool_call_logs/request_spans 读侧 join
+#（裁定 1：三表既有 DDL 零改动，写入侧在 src/tasks.py，无 ORM 模型）。
+TASKS_DDL = """
+CREATE TABLE IF NOT EXISTS tasks (
+    id                 BIGSERIAL    PRIMARY KEY,
+    task_id            VARCHAR(32)  NOT NULL UNIQUE,
+    parent_task_id     VARCHAR(32)  NOT NULL DEFAULT '',
+    trace_id           VARCHAR(64)  NOT NULL DEFAULT '',
+    endpoint           VARCHAR(128) NOT NULL DEFAULT '',
+    intent             VARCHAR(32)  NOT NULL DEFAULT '',
+    status             VARCHAR(16)  NOT NULL DEFAULT 'running',
+    budget_token_limit INTEGER      NOT NULL DEFAULT 0,
+    tokens_used        INTEGER      NOT NULL DEFAULT 0,
+    memory_write       VARCHAR(16)  NOT NULL DEFAULT 'write',
+    checkpoint         JSONB        NOT NULL DEFAULT '{}',
+    identity           VARCHAR(256) NOT NULL DEFAULT '',
+    created_at         TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_at        TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_trace ON tasks (trace_id);
+COMMENT ON TABLE tasks IS '任务抽象（module-087：一次请求=1 task，观测聚合/预算/checkpoint 挂载点）';
+COMMENT ON COLUMN tasks.task_id IS '任务 ID（uuid4 hex 32）';
+COMMENT ON COLUMN tasks.parent_task_id IS '父任务 ID（父子链；根任务为空串，v1 恒根，生产写入方在 T5）';
+COMMENT ON COLUMN tasks.trace_id IS '请求追踪 ID（关联 request_logs/tool_call_logs/request_spans 的读侧 join 键）';
+COMMENT ON COLUMN tasks.endpoint IS '创建任务的端点路径（对话四端点白名单内）';
+COMMENT ON COLUMN tasks.intent IS '任务意图（chat 分类结果；agent 端点=agent；请求收口时回写）';
+COMMENT ON COLUMN tasks.status IS '任务状态：running/completed/failed';
+COMMENT ON COLUMN tasks.budget_token_limit IS 'token 预算上限（0=不限；module-089 熔断账本用，本模块只存不执法）';
+COMMENT ON COLUMN tasks.tokens_used IS '已用 token 总量（usage 各供应商 prompt+completion 汇总，收口回写）';
+COMMENT ON COLUMN tasks.memory_write IS '记忆写所有权（子只读父写：父=write 子=read，module-087 关键设计约束）';
+COMMENT ON COLUMN tasks.checkpoint IS '断点续跑检查点（module-090 预留，v1 零读零写）';
+COMMENT ON COLUMN tasks.identity IS '请求身份（user_id 优先 client_ip 兜底，对齐 048 口径）';
+COMMENT ON COLUMN tasks.finished_at IS '任务收口时间（NULL=仍 running）';
+"""
+
+
+async def ensure_tasks_table() -> None:
+    """幂等创建 tasks 表（与 feedback/request_logs 同款拆分执行模式）"""
+    statements = [s.strip() for s in TASKS_DDL.split(";") if s.strip()]
+    async with async_session_factory() as session:
+        for stmt in statements:
+            await session.execute(text(stmt))
+        await session.commit()
+
+
 # verify_results 表 DDL（module-060 verify 异步化）：与 feedback/request_logs
 # 同款模式——独立建表 + 启动 init_db 自愈建表（CREATE TABLE IF NOT EXISTS，幂等）。
 # claims 用 JSONB 存逐句验证结果（claim/verdict/evidence），overall_confidence/
@@ -352,6 +404,8 @@ async def init_db():
     logger.info("SAG 三表已就绪（module-081 sag_entities/sag_events/sag_relations）")
     await ensure_request_spans_table()
     logger.info("request_spans 表已就绪（module-088 链路式观测）")
+    await ensure_tasks_table()
+    logger.info("tasks 表已就绪（module-087 任务抽象）")
 
 # documents.embedding HNSW 索引（backlog P2 修复，2026-08-26）：
 # 检索/去重均走 ORDER BY embedding <=> :vec LIMIT k，无索引时是 14k+ 行顺序扫描。
