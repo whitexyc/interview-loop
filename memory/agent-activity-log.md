@@ -284,3 +284,6 @@
 | module-091 | Developer | [HANDOFF] 交 Reviewer：parity-report/ADR-0020/changelog 齐；偏离 6 项申报（deepseek 401 改 qwen / mock 点同对象勘误 / AST 193）；T6 清理 SQL 见 changelog §六 |
 | module-091 | Reviewer | [REVIEW] PASS：8/8 项核查过，0 阻塞；实例隔离 PASS（run_round:109 每侧新建 _FixtureClient，勘误成立不摇 AC-2）；AST 193 复算一致；.env 零改动；2 LOW 备忘（临时文件 2 个非空） |
 | module-091 | Tester | [TEST] 验收通过：T1-T6 全过（id=4/5 落库对账 + fixture 36/36 复跑 + 指标逐值复算 + trace 时间戳交替铁证 + 红线零 diff + 删 69 行/10 文件）；全量 1769/0/3；AC 22/22；2 minor 备忘（清理 SQL 口径/3 函数 Args:Returns） |
+| module-092 | Planner | [PLAN] 数据深化轮：--repeat 3 多轮采样（消除单次采样边界）+ 分阶段遥测（LLM/工具/编排三段拆解）+ 冷启动（图编译 import 计时 + cold/warm 比值） |
+| module-092 | Planner | [PLAN] 关键事实：usage 走 llm.client._record_usage 逐次上报（eval 层可拦截拿逐次 prompt/completion）；编排开销=总时长−ΣLLM−Σ工具=StateGraph 归因钥匙 |
+| module-092 | Planner | [HANDOFF] 交 Developer：先冒烟 --repeat 1 --sample 2，再正式 --repeat 3；顺带修 091 遗留 3 docstring；多轮下若 P95 结论翻转如实提请复核 ADR-0020 |
