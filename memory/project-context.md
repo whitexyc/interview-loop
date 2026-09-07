@@ -133,6 +133,7 @@
 | adr-018 | MCP 集成（ToolRegistry 暴露为标准 MCP Server：6 只读工具 + stdio/Streamable HTTP 双传输 + PW_MCP_TOKEN fail-closed） | ✅ 已实施（module-067，2026-08-17）…详情→archive/adr-rows-2026-09-06.md 与 docs/adr/|
 
 ## 5. 当前迭代状态
+- 🔵 规划完成（待 Developer）: **module-091 LangGraph 复刻实验 → 转正对比报告**（2026-09-07，路线图阶段 E 最后一块）：WP-A 等价性 fixture 零 LLM（36 条任务两条环路工具序列逐字比对，等价率须 100%）→ WP-B 真实模式同任务集**交替执行**双跑（pass^k/工具正确率/tokens/P50P95，落 agent_eval_runs 用 config_snapshot.loop 区分，零新表零 ALTER）→ WP-C parity-report.md + ADR-0020；**红线：agent/ src/ main.py 零 diff**，新增仅 eval/langgraph_parity.py ~95 AST≤200；转正判据事前定死（等价率100% + pass^1 差≥-0.05 + tokens/P95≤1.20×，任一不满足即维持自研），**结论对自研不利也照实写**；plan.md + acceptance-criteria.md（AC-1~22 + T1-T6）已产出
 - 当前迭代版本: v0.90.0（module-090 失败隔离+checkpoint ✅ 四阶段闭环验收通过 2026-09-06，阶段 D 全收官）
 - ✅ 完成: **module-090 失败隔离 + checkpoint**（2026-09-06 四阶段闭环验收通过，版本 v0.90.0 阶段 D 全收官：Tester 全量 1754/0/3（1730+24）零新增失败 + T1-T6 真实 PG 对账 28 断言全过（T2 跨进程断点恢复逐值不从头 / T3 父子双向隔离 / T4 幂等边界 / T5 开关关 load 不设闸 / T6 基线还原 0 行）+ AC-1~23 全签 + Reviewer LOW-1 补测（非法 JSON 第 4 形状）+ B1①rowcount→bool/B1②真实行形态闭环；归档给 T5：本机 asyncpg JSONB 裸读=str（str 兜底为真实主路径）+ begin_task 返回值是 task_id 唯一来源；明细见 file-index module-090 行）
 - ✅ 完成: **module-086 注入防护实测**（2026-09-06 四阶段闭环验收通过：Tester 命令表全项复跑 + 全量 1730/0/3（1690+40）零新增失败 + T1-T6 真实 PG 对账全过（strip 载体剥离/canary 14e40840 映射/strict 17464 rejected/AC-20 errors=1/泄漏 span 四要素/eval id=61 逐值对账 strict FP=1 设计内归因/双关零漂移/上传零漂移）+ 探针全清还原基线 16365/0/0 + AC 33/33；Reviewer 2 LOW 属实非阻塞遗留（sanitize.py:33 未用导入 + find_canaries docstring）随下轮顺带；明细见 file-index module-086 行）

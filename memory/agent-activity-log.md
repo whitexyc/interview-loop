@@ -275,3 +275,7 @@
 | module-090 | Tester | [TEST] T5过：PW_TASKS_ENABLED=false 进程级下 save/resume no-op+load 不设闸读 T2 遗留行；T6过：探针按 task_id 精确清理基线还原 0 行+脚本用后即删 |
 | module-090 | Tester | [TEST] 验收通过：AC-1~23 全签；T1-T6 28 断言全过；B1/B2 闭环；对账脚本 v1 丢 begin_task 返回值 bug 2 轮如实归档（非被测代码非环境） |
 | module-090 | Tester | [HANDOFF] 四阶段闭环收口 v0.90.0（阶段 D 全收官）：归档给 T5——asyncpg JSONB 裸读=str+begin_task 返回值是 task_id 唯一来源；移交编排者收口提交 |
+| module-091 | Planner | [PLAN] 阶段 E（路线图最后一块）：LangGraph 复刻实验→转正对比报告；WP-A 等价性 fixture 零 LLM + WP-B 真实交替双跑 + WP-C 报告+ADR-0020 |
+| module-091 | Planner | [PLAN] 关键事实：langgraph_react.py 421 行 StateGraph 已复用 ReactContext/ToolRegistry；非流式对拍入口 langgraph_react_agent:382；fixture mock 点两处不同源（agent.react vs agent.langgraph_react） |
+| module-091 | Planner | [PLAN] 红线：agent/ src/ main.py 零 diff；新增仅 eval/langgraph_parity.py ~95 AST≤200；落库复用 config_snapshot.loop 零新表零 ALTER |
+| module-091 | Planner | [HANDOFF] 交 Developer：先跑通 WP-A 等价性（AC-1~6），再 WP-B 真实 --sample 12 交替执行（AC-7~12）；判据事前定死，结论对自研不利也照实写 |
