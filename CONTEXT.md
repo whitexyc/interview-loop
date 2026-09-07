@@ -290,3 +290,13 @@
 - **工具失败自动重试（WP-B，PW_TOOL_AUTO_RETRY 默认 true）**：`AgentTool.run` catch 异常后**重试 1 次同一 func（同参数同 ctx）**——只读检索类（search_*/extract_entities/recall_memory/re_search）+ note_to_self 重试（异常多为瞬时抖动 429/网络闪断）；**generate_answer/verify_answer 不重试**（`_NO_RETRY_TOOLS` 排除清单——15s 超时是常态，重试无意义；排除清单比白名单简单，未来新工具默认继承重试）。**超时（15s）永不重试**（超时=慢不是抖动，重试不修复根因只把单工具墙钟翻倍到 30s，15s 是 module-042 预算围栏语义）；TimeoutError 分支先于重试分支判断（存量超时测试精确文案兼容前提）。重试发生在 run 内部 → react_loop/langgraph/MCP（mcp_server.py:90 复用同一 run）自动继承**零改动**；**不增加 tool_count/phase_count**（计数点在 react_loop run 之前，预算语义不变——单测锁定）；tool_call_logs 只记最终结果（result_ok/duration_ms 含重试耗时，**表结构一字不改 ADR-0017 红线**），重试细节在 logger.warning（"首次失败，自动重试"/"重试仍失败，返回空"）。
 - **日志隐私（WP-C）：正常截断 / 异常完整**——engine.py:246/307 正常路径 query 改 `[:50]` 截断（存量 6 处截断外新增 2 处共 8 处）；:513 异常路径改完整 `query=%s, error=%s, exc_info=True`（排查需要完整信息，原来反而缺 query）；原则注释声明：正常路径一律 [:50] 截断 / 异常路径完整记录 / tool_call_logs args 完整保留（审计用途）。本模块只动指定 3 行（task-brief 口径"其余 8 处"与实测 6 处有出入，以实测为准）。
 - **配置与测试**：`tool_auto_retry: bool = True`（PW_TOOL_AUTO_RETRY 回退，少数默认 true 的开关）；conftest autouse 钉住 false（hermetic，存量测试零改动）；新增 test_tool_retry_dedup.py 19 项 + test_log_privacy.py 5 项（caplog + levelno==INFO 过滤——错误路径日志也含完整 query，不按级别过滤会假阴性；mock resolve_tool_history 抛错触发 L513 异常路径）。
+
+## LangGraph 对拍实验领域（2026-09-07 讨论，module-091，ADR-0020）
+
+- **等价性夹具（WP-A）**：fixture 假 LLM 按 `expected_tools` 逐次回放计划 + 假工具固定文本，同一任务分别驱动 `react_loop`（手写）与 `langgraph_react_loop`（StateGraph），四维逐字比对（工具名序列 / tool_count / answer / 判定器四规则）——36/36 = 100%，零 LLM 零 DB 秒级可复现。**实例隔离关键**：每次 `run_round` 新建 `_FixtureClient`（计划队列独占消费），两侧串行 patch 窗口不重叠。
+- **mock 点勘误（plan 事实 7 修正）**：`agent.react.LLMFactory` 与 `agent.langgraph_react.LLMFactory` 两个 patch 字符串解析到**同一个 LLMFactory 类对象**（两文件均 `from llm.client import LLMFactory`，patch 类属性全局生效）——"不同源"仅在字符串层面成立；因串行执行 + 每次新建实例，等价性结论不受影响。教训：patch 的隔离性要看**对象身份与作用窗口**，不能只看字符串路径。
+- **交替执行（WP-B）**：真实对比逐任务 hand→langgraph 交替（`random.Random(42)` 固定选样可复现）——供应商限流是时段性的，先跑完一条再跑另一条会让时段差异污染延迟对比；Tester 用 tool_call_logs 22 个 trace 时间戳验证严格交替。
+- **转正判据（事前定死）**：①fixture 等价率 100% ②LangGraph pass^1 ≥ 手写 −0.05 ③tokens 与 P95 ≤ 手写 ×1.20；任一不满足即维持自研，**事后放宽阈值 = 找补**（ADR-0020 明确否决）。实测：①②过、③ P95 ×1.224（P50 同向 ×1.163 非尾部噪声）→ **维持自研**。
+- **诚实记录**：LangGraph 质量全面占优（pass^1 0.5833 vs 0.4167、工具正确率 0.75 vs 0.5833、Grounding 0.8636 vs 0.8030、tokens −3.6%）——维持依据仅是延迟；单次采样无统计效力，重启转正条件 = 多次采样（≥3）复测 + StateGraph 调度开销归因（节点调度 vs 供应商方差）。
+- **口径**：`--sample 12` 固定种子；tokens 不分桶（085/089 口径）；相对结论两侧同模型有效，绝对值不可外推（deepseek key 401 后运行期切 PW_LLM_PROVIDER=qwen，.env 零改动）；落库 `agent_eval_runs` id=4/5，`config_snapshot.loop` 区分环路（零新表零 ALTER）。
+- **T6 清理口径坑**：`DELETE ... WHERE trace_id LIKE 'eval-at-%'` 会误删 066 历史评测 449 行（066 的 trace 无 loop 段同样命中）——必须加时间窗 `AND created_at >= '<本次评测日期>'`（Tester 实删 69 行回基线 467）。
