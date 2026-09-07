@@ -279,3 +279,8 @@
 | module-091 | Planner | [PLAN] 关键事实：langgraph_react.py 421 行 StateGraph 已复用 ReactContext/ToolRegistry；非流式对拍入口 langgraph_react_agent:382；fixture mock 点两处不同源（agent.react vs agent.langgraph_react） |
 | module-091 | Planner | [PLAN] 红线：agent/ src/ main.py 零 diff；新增仅 eval/langgraph_parity.py ~95 AST≤200；落库复用 config_snapshot.loop 零新表零 ALTER |
 | module-091 | Planner | [HANDOFF] 交 Developer：先跑通 WP-A 等价性（AC-1~6），再 WP-B 真实 --sample 12 交替执行（AC-7~12）；判据事前定死，结论对自研不利也照实写 |
+| module-091 | Developer | [DEV] WP-A fixture 36/36 等价率 1.0（四维逐字）；WP-B qwen 交替双跑 pass^1 0.4167/0.5833、tokens 143834/138700、P95 101654/124428；落库 id=4/5 |
+| module-091 | Developer | [DEV] 结论=维持自研（判据①②过、③P95×1.224 超标）；LangGraph 质量占优已照实写（AC-22）；AST 193≤200；单测 15/15；全量 1769/0/3 零新增失败；红线零 diff |
+| module-091 | Developer | [HANDOFF] 交 Reviewer：parity-report/ADR-0020/changelog 齐；偏离 6 项申报（deepseek 401 改 qwen / mock 点同对象勘误 / AST 193）；T6 清理 SQL 见 changelog §六 |
+| module-091 | Reviewer | [REVIEW] PASS：8/8 项核查过，0 阻塞；实例隔离 PASS（run_round:109 每侧新建 _FixtureClient，勘误成立不摇 AC-2）；AST 193 复算一致；.env 零改动；2 LOW 备忘（临时文件 2 个非空） |
+| module-091 | Tester | [TEST] 验收通过：T1-T6 全过（id=4/5 落库对账 + fixture 36/36 复跑 + 指标逐值复算 + trace 时间戳交替铁证 + 红线零 diff + 删 69 行/10 文件）；全量 1769/0/3；AC 22/22；2 minor 备忘（清理 SQL 口径/3 函数 Args:Returns） |
