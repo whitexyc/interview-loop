@@ -212,7 +212,14 @@ async def run_equivalence(tasks: list) -> list:
 
 
 def print_equivalence(pairs: list) -> None:
-    """打印等价性逐条表 + 不一致明细（不静默通过）"""
+    """打印等价性逐条表 + 不一致明细（不静默通过）
+
+    Args:
+        pairs: compare_pair 结果列表
+
+    Returns:
+        None（打印到 stdout）
+    """
     print("\n" + "=" * 64)
     print("LangGraph Parity — fixture 等价性（零 LLM，确定性）")
     print("=" * 64)
@@ -303,7 +310,15 @@ def build_config_snapshot(base: dict, loop: str) -> dict:
 
 
 def print_real(results: dict, scores: dict) -> None:
-    """打印真实模式对比表 + 运行期失败清单（不掩盖）"""
+    """打印真实模式对比表 + 运行期失败清单（不掩盖）
+
+    Args:
+        results: {loop: per_question list}
+        scores: {loop: scores dict}
+
+    Returns:
+        None（打印到 stdout）
+    """
     print("\n" + "=" * 64)
     print("LangGraph Parity — real 模式对比（单次采样，非置信区间）")
     print("=" * 64)
@@ -333,7 +348,14 @@ def print_real(results: dict, scores: dict) -> None:
 
 
 async def main() -> None:
-    """CLI 入口：fixture 等价性 / real 真实对比"""
+    """CLI 入口：fixture 等价性 / real 真实对比
+
+    Args:
+        None（参数经 argparse 读取：--mode/--sample/--pass-k/--limit/--no-save）
+
+    Returns:
+        None
+    """
     parser = argparse.ArgumentParser(
         description="LangGraph 复刻等价性 + 转正对比（module-091）")
     parser.add_argument("--mode", choices=["fixture", "real"], default="fixture",
