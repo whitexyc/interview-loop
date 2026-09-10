@@ -68,3 +68,6 @@ ai_service/eval/datasets/public/
 
 # 本机 skills 指针文件（内容=绝对路径，不出库）
 .claude/skills/
+
+# 评测 IO 留痕数据（module-092 扩展：LLM 阶段输入输出 JSONL，体量大不入库）
+eval_io_traces/

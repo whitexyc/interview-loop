@@ -37,14 +37,15 @@ class Settings(BaseSettings):
     deepseek_model: str = "deepseek-chat"
     deepseek_base_url: str = "https://api.deepseek.com/v1"
 
-    # OpenCode Zen（AI 网关，OpenAI 兼容；module-093）
-    # 免费层模型（-free 后缀）直连报 MissingSessionID，客户端注入 X-Session-Id 放行。
-    # 免费层配额：30 RPM / 500 RPD / 1M TPD（2026-09 实测）。
-    # 候选模型：deepseek-v4-flash-free / mimo-v2.5-free（目标）；上游不可用或配额
-    # 耗尽时切 nemotron-3.5-lightning-free 或 nemotron-3-ultra-free（实测可用）。
+    # OpenCode 网关（OpenAI 兼容；module-093）
+    # ⚠️ 两个端点互不相通、模型不通用（2026-09-10 实测）：
+    #   https://opencode.ai/zen/v1     免费层（-free 后缀，需 X-Session-Id 头，客户端已注入，
+    #                                  30 RPM / 500 RPD / 1M TPD）+ Zen 按量余额（需充值）
+    #   https://opencode.ai/zen/go/v1  Go 订阅（$10/月，24 个开源模型，按美元额度计）
+    # Go 模型示例：glm-5.3-flash（$0.15/$0.50 per 1M）/ deepseek-v4-pro / qwen3.6-plus / kimi-k3
     opencode_api_key: str = ""
-    opencode_model: str = "deepseek-v4-flash-free"
-    opencode_base_url: str = "https://opencode.ai/zen/v1"
+    opencode_model: str = "glm-5.3-flash"
+    opencode_base_url: str = "https://opencode.ai/zen/go/v1"
 
     # Qwen (通过 ModelScope API，默认首选)
     qwen_model: str = "Qwen/Qwen3.5-35B-A3B"

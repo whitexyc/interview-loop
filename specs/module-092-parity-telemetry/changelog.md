@@ -102,3 +102,111 @@ Error code: 429 - {'error': {'message': 'We have to rate limit you for model
 `repeat`/`repeat_of`/`module=092`，commit `8ac4c4a6`。**保留作为失败证据**（不删、不掩盖）；
 重跑前的清理须用时间窗口径并**更新日期为实际评测日**（本节为 2026-09-10，
 T6 原文的 `2026-09-07` 已过时）。
+
+## 八、正式跑批成功（2026-09-10，OpenCode Go 端点 + glm-5.3-flash）
+
+**运行配置**：`PW_LLM_PROVIDER=opencode`（Go 订阅端点 `https://opencode.ai/zen/go/v1`）
++ `glm-5.3-flash`；`--sample 12 --repeat 3`；**墙钟 32.5 分钟**；**运行期失败 0 条**。
+
+### 8.1 三轮聚合
+
+| 指标 | 手写 react_loop | LangGraph | 对比 |
+|------|----------------|-----------|------|
+| pass^1 | 0.6944 ± 0.1735 [0.50, 0.75, 0.8333] | **0.7500 ± 0.0000** [0.75, 0.75, 0.75] | lg 均值更高且**三轮零波动** |
+| 工具正确率 | 0.5278 ± 0.2097 | 0.5278 ± 0.0481 | 均值相同，lg 更稳 |
+| tokens 总量 | 135955 ± 9321 | 141298 ± 9099 | lg +3.9% |
+| P50 | 21553 ± 1309ms | 24808 ± 2799ms | lg +15% |
+| **P95** | 72708 ± 8455ms | **46011 ± 10286ms** | **lg 快 1.6×** |
+| **P95 比值** | — | **[0.6069, 0.5636, 0.7166]** | **3/3 未超 1.20 阈值**，均值 **0.6290** |
+| 编排开销 | 290.0 ± 11.5ms | 595.8 ± 17.0ms | lg +305.8ms/轮 |
+| LLM 调用次数 | 54.0 | 56.3 | — |
+| 冷启动 import 中位 | 30747ms | 34990ms | lg +4243ms（含图编译） |
+
+工具级明细：全部工具 `fail=0`；`generate_answer` p50 从 qwen 时代的 15012ms（贴 15s 上限）
+降到 **5776ms**，不再触发工具超时。
+
+### 8.2 核心发现：ADR-0020 的结论基础被推翻
+
+| 维度 | 091（qwen，单轮） | 本次（glm-5.3-flash，3 轮） |
+|------|------------------|---------------------------|
+| P95 比值 | **1.224（超阈）** | **0.6290（3/3 未超阈）** |
+| pass^1（hand / lg） | 0.4167 / 0.5833 | 0.6944 / 0.7500 |
+| P95 绝对值（hand / lg） | 101654 / 124427ms | 72708 / 46011ms |
+
+**方向完全反转**：091 因「LangGraph P95 超阈 ×1.224」判**维持自研**；本次三轮数据下
+LangGraph **全面占优**（质量均值更高、三轮零波动、P95 快 1.6 倍）。
+
+**同时必须说清的边界（三条）**：
+
+1. **供应商不同**（qwen vs glm-5.3-flash）——两次实验各只覆盖一个供应商，差异中
+   混着供应商因素，**不能断言「091 测错了」**。
+2. **本次数据质量显著更高**：091 为单轮采样；本次 3 轮 + 零失败 + 跨轮 std 小。
+3. **唯一跨供应商稳定的结论**：编排开销为百毫秒级（290ms / 595.8ms，占单次运行
+   1.2% / 2.4%）——**框架调度成本可忽略**，这条三次独立测量（−4.9 / +48.7 / +305.8ms）都成立。
+
+### 8.3 按 ADR-0020 预留条件提请复核
+
+ADR-0020 写明转正重启条件 = **多次采样复测 + StateGraph 调度开销归因**。本次两项均已满足：
+
+- 多次采样：3 轮，0 失败
+- 开销归因：编排开销差 +305.8ms/轮（lg 更贵，但仅占其 P50 的 2.4%，**不足以解释 P95 差异**）
+- P95 比值 3/3 未超阈
+
+→ **提请 ADR-0020 复核**（复核裁定归下一轮，本 changelog 只呈报数据，不擅自改判）。
+
+### 8.4 IO 留痕（本模块新增能力）
+
+`eval_io_traces/io-20260910-162434.jsonl`：**552 条 / 4.1MB**，覆盖
+hand 环路级 162 + 工具内 108、langgraph 环路级 169 + 工具内 113。
+每条含完整 `messages` / `tools` / `content` / `tool_calls` / `duration_ms` / `in_tool`。
+（工具阶段的输入输出见 `tool_call_logs.args` + `result_preview`，无需重复记录。）
+实现见 §九。
+
+### 8.5 落库
+
+`agent_eval_runs` id=12~17（3 轮 × 2 环路），`git_commit=4673de65`，
+`config_snapshot` 含 `repeat`/`repeat_of`/`module=092`/`loop`。可对账。
+
+## 九、IO 留痕实现（用户需求「各个阶段的输入输出也需要」）
+
+### 9.1 需求拆解
+
+| 阶段 | 现有能力 | 结论 |
+|------|---------|------|
+| 工具执行 | `tool_call_logs.args`（jsonb 输入）+ `result_preview`（输出） | **已有，无需新增** |
+| LLM 调用 | 仅耗时 + tokens（092 WP-B 三段遥测） | **缺输入输出 → 本次补齐** |
+
+### 9.2 实现
+
+新增 `ai_service/eval/parity_io.py`（90 AST）：
+
+- `LlmIoTracer`：包在 `_TimingClientProxy` **外层**（只旁路记录，不参与计时/分桶口径），
+  逐次记录 `(messages/prompt/tools)` → `(content/tool_calls)`，含 `in_tool` 标记与 `duration_ms`
+- `wrap_llm_io()`：便捷工厂（组装 meta：loop / task_id / round）
+- `write_io_trace()`：追加写 `eval_io_traces/io-<时间戳>.jsonl`，**fail-open**（写失败不中断跑批）
+- `read_tool_rows()`：自 `parity_telemetry._tool_rows` **迁入**（腾出 AST 空间）
+- `_trunc()`：单字段 20000 字符上限（超长截断并标注原长度，防单条记录过大）
+
+`parity_telemetry.py` 仅加 5 行（`io_records` 收集 + `wrap_llm_io` 包装 + `write_io_trace` 落盘），
+同时移出 `_tool_rows` → **AST 198 → 193**（红线 ≤200 仍守）。
+
+### 9.3 记录格式
+
+```json
+{
+  "seq": 0, "loop": "hand", "task_id": "at-002", "round": 1, "in_tool": false,
+  "input": {"method": "chat_with_tools", "messages": ["..."], "tools": ["..."]},
+  "duration_ms": 3042.8,
+  "output": {"content": "...", "tool_calls": ["..."], "message": {}}
+}
+```
+
+- **`in_tool`** 区分环路级 / 工具内 LLM 调用（与三段遥测分桶口径一致，防误读）
+- **异常路径**也留痕（`output.error`）后再抛出，不丢信息
+- 体量：552 条 / 4.1MB，**不入 git**（`.gitignore` 已覆盖 `eval_io_traces/`）
+
+### 9.4 验证
+
+- 单测 `tests/eval/test_parity_io.py` **19 项全绿**（连 092 原有 21 项 → 40 passed）
+- 小规模实跑产出 25 条 / 197KB，字段完整（文件改名 `smoke-io-*.jsonl` 标注为验证跑）
+- 正式跑批产出 552 条，环路级/工具内分布符合预期

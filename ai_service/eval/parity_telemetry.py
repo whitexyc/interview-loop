@@ -54,7 +54,7 @@ from sqlalchemy import text
 
 import agent.react as _agent_react
 import agent.langgraph_react as _agent_lg
-from eval import agent_tasks as at, langgraph_parity as lp
+from eval import agent_tasks as at, langgraph_parity as lp, parity_io
 from src.database import async_session_factory, ensure_tool_call_logs_table
 
 logger = logging.getLogger("parity_telemetry")
@@ -140,20 +140,6 @@ def _usage_interceptor(records: list):
         yield
 
 
-async def _tool_rows(trace_id: str) -> list:
-    """读回一次运行的 tool_call_logs 行（工具段数据源，AC-5）；失败返回 []"""
-    try:
-        async with async_session_factory() as session:
-            rows = (await session.execute(
-                text("SELECT tool_name, duration_ms, result_ok FROM tool_call_logs"
-                     " WHERE trace_id = :t ORDER BY id"),
-                {"t": trace_id})).mappings().all()
-        return [dict(r) for r in rows]
-    except Exception as e:
-        logger.warning("tool_call_logs 读回失败（工具段记 0，如实标注）: %s", e)
-        return []
-
-
 def segment_summary(duration_ms: int, llm_durs: list, tool_rows: list) -> dict:
     """三段拆解 + 闭合校验（纯函数，AC-6/AC-7）
 
@@ -201,8 +187,11 @@ async def run_telemetry_side(loop: str, item: dict, k: int) -> dict:
     llm_durs: list = []
     in_tool_durs: list = []
     usage_records: list = []
+    io_records: list = []
     proxy = _TimingClientProxy(llm_client.LLMFactory.get_client(),
                                llm_durs, in_tool_durs)
+    traced = parity_io.wrap_llm_io(proxy, io_records, loop, item["id"], k,
+                                   depth_getter=lambda: _DEPTH[0])
     try:  # 预清理同 trace 历史 tool_call_logs 行（防重复运行累积污染工具段；
         # 仅精确命中本 eval trace，066 历史行无 loop 段不匹配）
         async with async_session_factory() as session:
@@ -212,14 +201,14 @@ async def run_telemetry_side(loop: str, item: dict, k: int) -> dict:
             await session.commit()
     except Exception as e:
         logger.warning("tool_call_logs 预清理失败（fail-open）: %s", e)
-    with mock.patch(lp._LLM_PATCH[loop], return_value=proxy), \
+    with mock.patch(lp._LLM_PATCH[loop], return_value=traced), \
             mock.patch.object(_agent_react, "execute_tool_with_log",
                               _tool_guard(_agent_react.execute_tool_with_log)), \
             mock.patch.object(_agent_lg, "execute_tool_with_log",
                               _tool_guard(_agent_react.execute_tool_with_log)), \
             _usage_interceptor(usage_records):
         result = await lp.run_side(loop, item, k, real=True)
-    tool_rows = await _tool_rows(trace_id)
+    tool_rows = await parity_io.read_tool_rows(trace_id)
     tel = segment_summary(result["duration_ms"], llm_durs, tool_rows)
     for key in ("prompt_tokens", "completion_tokens"):
         tel[key] = sum(r[key] for r in usage_records)
@@ -228,6 +217,7 @@ async def run_telemetry_side(loop: str, item: dict, k: int) -> dict:
                          "duration_ms": r["duration_ms"],
                          "result_ok": r["result_ok"]} for r in tool_rows]
     result["telemetry"] = tel
+    parity_io.write_io_trace(io_records)   # LLM 阶段输入输出留痕（JSONL，旁路）
     return result
 
 
