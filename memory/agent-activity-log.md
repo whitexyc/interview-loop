@@ -300,3 +300,6 @@
 | module-092 | Developer | [FIX] 修复轮：IO trace round→attempt+repeat(round_idx透传/移除round/测试同步)；§二 AST 193→195；补 docstring+常量+guard(lg)；46单测+1825/0/3 全绿；红线零diff |
 | module-092 | Tester | [TEST] 验收通过(附条件)：AST parity_telemetry=195/parity_io=118≤200；单测 46/46 全绿；全量 1825/0/3 零失败(junitxml 权威)；红线 agent/src/main.py 全空；AC 26/28+2 附条件；test-report.md 产出 |
 | module-092 | Tester | [REGRESSION] T1-T9 真实 PG 对账全过：T1 18行(6失败证据+12成功)/T2 6-6/T3 3-3/T4 ±30%/T7 564行字段齐/T8 10-10/T9 0.6290vs0.9179；冒烟 round→attempt+repeat 端到端生效；清理删70行(066遗留449保留) | |
+| module-092 | Reviewer | [REVIEW] 记录维度增强(parity_events) PASS 0阻塞/3低:事件5/5全覆盖+裸失败不误判;口径一致225例0不一致;emit-warning符铁律5;capture双路径摘handler;JSONL b3/4齐;AST 198/118/43(余量2≠195);单测67+全量1849/0/0/3;红线零diff |
+| module-092 | Tester | [TEST] 最终验收(附条件): AST198/118/43≤200; 单测67; 全量1849/0/0/3; 红线agent/src/main.py空; AC27/28+1; 新字段answer_points_hit/failed_points/telemetry.events落库验证(id24/30); test-report.md |
+| module-092 | Tester | [REGRESSION] 全量1849/0/0/3零新增失败; T1-T9真实PG全过(T1 30行/T2 12-12/T3 3-3/T4±30%/T7批3·4齐/T8一致/T9 4批均值0.8882·2-12超阈); 冒烟端到端+新trace全字段 | |

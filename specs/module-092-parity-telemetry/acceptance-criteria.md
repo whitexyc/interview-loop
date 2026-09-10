@@ -90,6 +90,7 @@ PW_LLM_PROVIDER=opencode .venv/Scripts/python.exe -u -X utf8 \
 
 | 角色 | 结论 | 日期 | 备注 |
 |------|------|------|------|
-| Developer | ⬜ | | changelog.md |
-| Reviewer | ⬜ | | review-report.md |
-| Tester | ✅ 验收通过（附条件） | 2026-09-10 | test-report.md：T1-T9 全过、AC 26/28+2 附条件、全量 1825/0/3、AST 195/118、红线全空、冒烟验证 round→attempt+repeat 生效 |
+| Developer | ✅ | 2026-09-11 | changelog.md（含 §十二~§十四 记录维度增强 + Reviewer 补审） |
+| Reviewer（主体） | ✅ | 2026-09-10 | review-report.md（PASS 附条件，0 阻塞/2 中/5 低） |
+| Reviewer（记录维度增强） | ✅ | 2026-09-11 | review-report-events.md（PASS 0 阻塞/0 高/3 低） |
+| Tester | ✅ 验收通过（附条件） | 2026-09-11 | tester-092-final：T1-T9 全过（30行/12-12一致/3-3闭合/±30%/T7批3·4全字段/T8 stage_tokens一致/T9 4批均值0.6290·0.9179·1.0362·0.9696=0.8882、2-12超阈）、AC 27/28+1附条件、全量 1849/0/0/3、AST 198/118/43、红线全空、记录维度增强 answer_points_hit/failed_points/telemetry.events 真实落库验证（id24/30）、冒烟管道端到端+新trace全字段；2项非阻塞（AC-15 main/print_report超50行、parity_telemetry余量仅2行文档误报） |

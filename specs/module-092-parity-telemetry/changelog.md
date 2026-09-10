@@ -310,7 +310,8 @@ hand 环路级 162 + 工具内 108、langgraph 环路级 169 + 工具内 113。
 ### 12.2 验证
 
 - 单测 `tests/eval/test_parity_events.py` **21 项全绿**
-- 三文件 AST：`parity_telemetry` **198** / `parity_io` 118 / `parity_events` **42**（均 ≤200）
+- 三文件 AST：`parity_telemetry` **198** / `parity_io` 118 / `parity_events` **43**（均 ≤200）
+  —— ⚠️ **`parity_telemetry` 余量仅 2 行**，后续任何 +3 AST 改动会顶破红线（详见 §十三 与 §十四）
   —— ⚠️ `parity_telemetry` 仅剩 **2 行余量**，后续改动须先腾空间
 - 全量回归 **1848 tests / 0 failures / 0 errors / 3 skipped**（junitxml 权威计数）
 - **口径一致性抽查**：18 例（3 组要点 × 6 种答案形态，含 None/空串）**0 不一致**
@@ -322,7 +323,7 @@ hand 环路级 162 + 工具内 108、langgraph 环路级 169 + 工具内 113。
 ### 12.3 流程偏差申报（如实）
 
 本次以**轻量模式**直接实现（未走 Plan→Develop→Review→Test 四阶段），依据铁律 1 的豁免条款。
-**事后评估该判断偏松**：新增文件 42 AST + 21 单测 + 3 处接入，规模已够格走闭环；且
+**事后评估该判断偏松**：新增文件 43 AST + 21 单测 + 3 处接入，规模已够格走闭环；且
 「自己实现的代码自己验证」不符合**独立验证原则**。已补派 Reviewer（`reviewer-events`），
 但因**平台 429 频率限制**（00:12 重置）暂未执行，**待额度恢复后补审**。
 
@@ -432,4 +433,44 @@ hand 环路级 162 + 工具内 108、langgraph 环路级 169 + 工具内 113。
 `pytest tests/eval/test_parity_telemetry.py tests/eval/test_parity_io.py -q` 全绿；
 全量回归 `1825 passed / 0 failed / 3 skipped`；`git diff --stat -- ai_service/agent ai_service/main.py` 为空；
 `main`/`print_report` 行数复算见上「已知偏差」节。
+
+## 十四、Reviewer 补审 + 数字校正（2026-09-11 凌晨）
+
+`reviewer-events-2` 独立审查「记录维度增强」改动，**结论 PASS（0 阻塞 / 0 高 / 3 低）**。
+报告：`review-report-events.md`。
+
+### 14.1 Reviewer 的独立验证（比编排者自测更严格）
+
+| 项 | 编排者自测 | Reviewer 独立复现 |
+|----|-----------|------------------|
+| 口径一致性 | 18 例（3 组要点 × 6 答案形态） | **225 例**（含要点正则特殊字符 `(G1)`/`.*`/`[`/`$1`/`^x`、答案含 emoji 😀 / 中文、`points=[]`、`answer=None`）—— **0 不一致** |
+| 事件分类完备性 | 按 5 条文案设计 | **逐条比对 `tool_registry.py:_execute` 的 :250/:255/:259/:262/:264 —— 5/5 全覆盖** |
+| JSONL 新字段 | 只看字段名 | 批次 3（532 行）/ 批次 4（507 行）逐项抽查：`repeat∈{0,1,2}`、`in_tool=True` 时 `tool` 全非空（216/203 条）、`usage` 全非空 |
+| 单测 / 回归 | 21 passed / EXIT=1（误报） | **67 passed**；全量 **junitxml tests=1849 / failures=0 / errors=0 / skipped=3** |
+
+**裁定**：`_EventSink.emit` 的 fail-open 写法**满足铁律 5**（原 `pass` 已改 `logger.warning`，对齐 `parity_io` 先例）；
+`capture_tool_events` 正常 + 异常两条路径均 `try/finally` 摘 handler，**72 次跑批无泄漏**。
+
+### 14.2 ⚠️ 数字校正（Reviewer 发现编排者文档有误）
+
+| 位置 | 原记 | 权威实测 | 说明 |
+|------|------|---------|------|
+| `parity_telemetry.py` AST | 193（§二）/ 195（§修复轮） | **198** | §二 的 193 为**原始交付时**值；此后修复轮 +1 常量、round 透传、`tel["events"]`、`quality_detail` 等累计至 198。**余量仅 2 行** |
+| `parity_events.py` AST | 42 | **43** | 后来加 `_logger` + emit 的 warning 语句 +1 |
+
+**教训**：AST 这类可机械复算的数字，**每次改动后必须重新复算并同步文档**，不能沿用旧值。
+`parity_telemetry.py` 余量只剩 2 行 → **后续任何 +3 AST 的改动都必须先拆分 `main`/`print_report`**（当前「已知偏差」项）。
+
+### 14.3 LOW-3：`summarize_events` 的 `total` 口径说明
+
+`total` 统计挂在共享 logger `agent.tool_registry` 上的**全部 WARNING**（含非执行类告警，如 schema
+校验失败），**三桶之和可能 < total**。144 次真实运行事件全 0，未触发该差异；
+`details` 保留全量日志供诊断。**使用者须知**：`total` 是"该 logger 的告警总数"，不是"执行类事件数"。
+
+### 14.4 残留文件处置
+
+Reviewer 的临时脚本与 junitxml 因 **sandbox safe-delete 钩子拦截**未能删除，残留于 `ai_service/`：
+`_r.xml`、`_pytest_full_092.xml`、`_pytest_full_092b.xml`、`_reviewer_consistency_check.py`、
+`_reviewer_mem.py`、`_t092_audit.py`（均 untracked，不影响被审代码）。
+**注意 `_probe_real_mcp.py` 为历史遗留，保留不删**。清理归 Tester（T6）。
 
