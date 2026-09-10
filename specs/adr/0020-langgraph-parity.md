@@ -3,6 +3,10 @@
 ## 元信息
 
 - 状态：✅ **已裁定：维持自研**（2026-09-07；module-091 阶段 E；对比报告 `specs/module-091-langgraph-parity/parity-report.md`）
+  → ⚖️ **2026-09-10 经 ADR-0021 复核**（本 ADR §后续 预留的重启条件已满足：module-092 完成
+  4 批 12 轮复测 + StateGraph 开销归因）。**复核结论仍为「维持自研（附条件）」**，但本 ADR 的
+  决策依据（单轮 P95 ×1.224 超阈）**已被大幅削弱** —— 12 轮均值 0.8882、超阈 2/12。
+  **详见 `specs/adr/0021-langgraph-parity-review.md`**（含判据空白提请：多轮口径未定义）
 - 日期：2026-09-07
 - 关联：ADR-0012（工具治理阶段切分）、ADR-0017（Agent 评估体系）、module-030（LangGraph 实验端点 `/ai/rag/chat/agent-lg`）、module-066（评测基建）、`knowledge-interview/docs/AGENT-GROWTH-ROADMAP.md` 阶段 E
 
