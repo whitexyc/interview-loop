@@ -71,6 +71,9 @@ _METRICS = ("pass_1", "tool_correct_rate", "avg_tokens", "tokens_total",
 # 工具执行窗口栈（eval 层标记；串行 await 无并发，存工具名供 IO 留痕按工具归因 token）
 _TOOL_STACK: list = []
 
+# 冷启动子进程 import 计时超时（秒）；独立子进程 import，超时即放弃该样本
+_SUBPROCESS_TIMEOUT_S = 600
+
 
 def _tool_guard(original):
     """包装 execute_tool_with_log：工具窗口栈标记（供 proxy 分桶 + IO 留痕归因）
@@ -125,8 +128,18 @@ class _TimingClientProxy:
 
 @contextmanager
 def _usage_interceptor(records: list):
-    # 包装 llm.client._record_usage：原函数先执行（观测口径不变）再本地捕获
-    # records 逐次追加 {"label","prompt_tokens","completion_tokens"}（AC-4）
+    """包装 llm.client._record_usage：原函数先执行（observability 计数口径不变）
+    再本地捕获逐次 (label, prompt_tokens, completion_tokens) 到 records（AC-4）。
+
+    Args:
+        records: 本次运行的 usage 收集列表；每次 LLM 调用经 _record_usage 触发后，
+            若响应含 usage 则追加一条 {"label","prompt_tokens","completion_tokens"}，
+            **稀疏 usage（供应商未返回）静默跳过，不追加、不中断跑批**。
+
+    Returns:
+        contextmanager，yield None（进入后 _record_usage 已被 mock 包装；
+        退出后恢复原函）。
+    """
     original = llm_client._record_usage
 
     def _wrap(label, response):
@@ -172,13 +185,15 @@ def segment_summary(duration_ms: int, llm_durs: list, tool_rows: list) -> dict:
     }
 
 
-async def run_telemetry_side(loop: str, item: dict, k: int) -> dict:
+async def run_telemetry_side(loop: str, item: dict, k: int, round_idx: int) -> dict:
     """单次运行（一条任务 × 一条环路）+ 分阶段遥测（复用 091 run_side 全流程）
 
     Args:
         loop: LOOP_HAND 或 LOOP_LANGGRAPH
         item: 任务条目
         k: 独立尝试序号（进 trace_id，与 run_side 内部一致）
+        round_idx: 采样轮序号（0-based，进 IO 留痕 meta 的 repeat 字段，
+            用于批次内按轮分离；修复前此值硬编码为 1 导致 round 恒等）
 
     Returns:
         091 同款逐任务明细 dict，附 "telemetry" 三段+tokens 遥测子 dict
@@ -191,7 +206,7 @@ async def run_telemetry_side(loop: str, item: dict, k: int) -> dict:
     proxy = _TimingClientProxy(llm_client.LLMFactory.get_client(),
                                llm_durs, in_tool_durs)
     traced = parity_io.wrap_llm_io(
-        proxy, io_records, loop, item["id"], k,
+        proxy, io_records, loop, item["id"], k, round_idx,
         tool_name_getter=lambda: _TOOL_STACK[-1] if _TOOL_STACK else None,
         usage_records=usage_records)
     try:  # 预清理同 trace 历史 tool_call_logs 行（防重复运行累积污染工具段；
@@ -207,7 +222,7 @@ async def run_telemetry_side(loop: str, item: dict, k: int) -> dict:
             mock.patch.object(_agent_react, "execute_tool_with_log",
                               _tool_guard(_agent_react.execute_tool_with_log)), \
             mock.patch.object(_agent_lg, "execute_tool_with_log",
-                              _tool_guard(_agent_react.execute_tool_with_log)), \
+                              _tool_guard(_agent_lg.execute_tool_with_log)), \
             _usage_interceptor(usage_records):
         result = await lp.run_side(loop, item, k, real=True)
     tool_rows = await parity_io.read_tool_rows(trace_id)
@@ -223,11 +238,12 @@ async def run_telemetry_side(loop: str, item: dict, k: int) -> dict:
     return result
 
 
-async def run_round_real(tasks: list) -> dict:
+async def run_round_real(tasks: list, round_idx: int) -> dict:
     """一轮：任务按传入顺序逐条、两环路交替执行（091 同款 hand→langgraph）
 
     Args:
         tasks: 本轮任务顺序（轮间已重洗，集合与首轮相同）
+        round_idx: 采样轮序号（0-based，透传至 IO 留痕 meta.repeat）
 
     Returns:
         {loop: per_question list（每项附 telemetry；pass^1 口径）}
@@ -235,7 +251,7 @@ async def run_round_real(tasks: list) -> dict:
     out = {LOOP_HAND: [], LOOP_LANGGRAPH: []}
     for i, item in enumerate(tasks):
         for loop in (LOOP_HAND, LOOP_LANGGRAPH):
-            first = await run_telemetry_side(loop, item, 1)
+            first = await run_telemetry_side(loop, item, 1, round_idx)
             out[loop].append(first)
             logger.info("[%d] %s %-9s pass=%s tools=%s %.0fms", i + 1,
                         item["id"], loop, first["pass"], first["actual_names"],
@@ -370,7 +386,7 @@ def measure_import_coldstart(trials: int = 3) -> dict:
         samples = [int(subprocess.run(
             [sys.executable, "-c", f"import time;t0=time.perf_counter();"
              f"import {mod};print(int((time.perf_counter()-t0)*1000))"],
-            capture_output=True, text=True, timeout=600)
+            capture_output=True, text=True, timeout=_SUBPROCESS_TIMEOUT_S)
             .stdout.strip().splitlines()[-1]) for _ in range(trials)]
         out[name] = {"samples": samples, "median": statistics.median(samples)}
     out["delta_ms"] = round(out["langgraph"]["median"] - out["hand"]["median"], 1)
@@ -496,7 +512,7 @@ async def main() -> None:
     rounds_scores, rounds_results = [], []
     t0 = time.perf_counter()
     for i in range(repeat):
-        results = await run_round_real(round_order(sampled, i))
+        results = await run_round_real(round_order(sampled, i), i)
         rounds_results.append(results)
         rounds_scores.append({loop: round_scores(loop, results[loop],
                                                  len(sampled))

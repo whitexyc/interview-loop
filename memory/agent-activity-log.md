@@ -292,3 +292,11 @@
 | 供应商接入 | 编排者 | [DEV] OpenCode Go 端点打通（用户买的是 $10/月 Go 订阅，非 Zen 余额）：`/zen/go/v1` 才是 Go 的门，`/zen/v1` 只认余额——之前全部 401 是端点用错（非 key/充值问题）；glm-5.3-flash 在 Go 端点可用，24 个模型 |
 | module-092 | 编排者 | [DEV] 分阶段 token 补齐：`parity_io` 加 usage 差分归属（`_usage_delta`）+ 工具名归因（`_TOOL_STACK`）+ `stage_tokens()`；单测 25 项全绿；AST 193 ≤200 |
 | module-092 | 编排者 | [RUN] 跑批成功（Go 端点 glm-5.3-flash，0 失败，26.3 分钟，id=18~23）：P95 比值 [0.783/0.9421/1.0285] 3/3 未超阈；**⚠️ 两次跑批不一致**（0.6290 vs 0.9179，差 46%）→ `--repeat` 只消除轮内波动 |
+
+### 2026-09-10（module-092 对比评测深化审查）
+| 模块 | 角色 | 摘要 |
+|------|------|------|
+| module-092 | Reviewer | [REVIEW] ✅ PASS（附条件）。0 阻塞/0 高/2 中/5 低。AST parity_telemetry=193/parity_io=118≤200；单测 21+25 全绿；全量回归 1825/0/3（0 failed 权威，1800 系陈旧基线）；AC-23 usage 差分归属裁定正确稳健（反例不触发）；config.py 红线偏离=纯增量免 ADR；报告 specs/module-092-parity-telemetry/review-report.md | |
+| module-092 | Developer | [FIX] 修复轮：IO trace round→attempt+repeat(round_idx透传/移除round/测试同步)；§二 AST 193→195；补 docstring+常量+guard(lg)；46单测+1825/0/3 全绿；红线零diff |
+| module-092 | Tester | [TEST] 验收通过(附条件)：AST parity_telemetry=195/parity_io=118≤200；单测 46/46 全绿；全量 1825/0/3 零失败(junitxml 权威)；红线 agent/src/main.py 全空；AC 26/28+2 附条件；test-report.md 产出 |
+| module-092 | Tester | [REGRESSION] T1-T9 真实 PG 对账全过：T1 18行(6失败证据+12成功)/T2 6-6/T3 3-3/T4 ±30%/T7 564行字段齐/T8 10-10/T9 0.6290vs0.9179；冒烟 round→attempt+repeat 端到端生效；清理删70行(066遗留449保留) | |

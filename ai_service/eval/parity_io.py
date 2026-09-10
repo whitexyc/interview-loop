@@ -105,7 +105,8 @@ class LlmIoTracer:
     Args:
         inner: 被包装客户端（_TimingClientProxy 或真实 client，行为透传）
         records: 本次运行的记录收集列表
-        meta: 运行上下文 {"loop","task_id","round"}
+        meta: 运行上下文 {"loop","task_id","attempt","repeat"}
+            （attempt=独立尝试序号 k；repeat=采样轮序号 round_idx）
         tool_name_getter: 返回当前工具名（None = 环路级调用）
         usage_records: usage 收集列表（差分归属本次调用的 token；None = 不记录）
     """
@@ -151,6 +152,7 @@ class LlmIoTracer:
 
 
 def wrap_llm_io(inner, records: list, loop: str, task_id: str, k: int,
+                round_idx: int,
                 tool_name_getter=None, usage_records=None) -> LlmIoTracer:
     """构造 IO 留痕代理（便捷工厂，封装 meta 组装）
 
@@ -159,7 +161,9 @@ def wrap_llm_io(inner, records: list, loop: str, task_id: str, k: int,
         records: 记录收集列表（调用方持有，运行结束交由 write_io_trace 落盘）
         loop: 环路名
         task_id: 任务 id
-        k: 独立尝试序号（轮次）
+        k: 独立尝试序号（attempt，进 IO 留痕 meta.attempt）
+        round_idx: 采样轮序号（进 meta.repeat，用于批次内按轮分离；
+            修复前此值未透传导致 repeat 字段恒等）
         tool_name_getter: 返回当前工具名（None = 环路级调用）
         usage_records: usage 收集列表（差分归属 token；None = 不记录）
 
@@ -167,7 +171,8 @@ def wrap_llm_io(inner, records: list, loop: str, task_id: str, k: int,
         LlmIoTracer 实例（可 mock.patch 回填给 agent 层）
     """
     return LlmIoTracer(inner, records,
-                       {"loop": loop, "task_id": task_id, "round": k},
+                       {"loop": loop, "task_id": task_id,
+                        "attempt": k, "repeat": round_idx},
                        tool_name_getter=tool_name_getter,
                        usage_records=usage_records)
 

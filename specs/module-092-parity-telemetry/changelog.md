@@ -22,15 +22,17 @@
 
 | 文件 | 性质 | AST 语句 | 备注 |
 |------|------|---------|------|
-| `eval/parity_telemetry.py` | 新增 | **198** | 复算：`python -c "import ast; t=ast.parse(open('eval/parity_telemetry.py',encoding='utf-8').read()); print(sum(1 for n in ast.walk(t) if isinstance(n, ast.stmt)))"` → 198；方法最长 `main` ≤50 |
+| `eval/parity_telemetry.py` | 新增 | **193** | 复算：`python -c "import ast; t=ast.parse(open('eval/parity_telemetry.py',encoding='utf-8').read()); print(sum(1 for n in ast.walk(t) if isinstance(n, ast.stmt)))"` → 193（§九 迁移 `_tool_rows` 后实测）；方法最长 `main` 67 行 / `print_report` 61 行（超 AC-15 的 50 行，见「已知偏差」节） |
 | `eval/langgraph_parity.py` | 修改（docstring 等量替换） | 193（不变） | +3 处 docstring 各 1 Expr 替换 1 Expr，AST 增量 0 |
 | `tests/eval/test_parity_telemetry.py` | 新增（单测） | 不计生产口径 | 21 项 |
 
-**本模块新增 AST 198 ≤ 200** ✅
+**本模块新增 AST 193 ≤ 200** ✅（注：修复轮引入 `_SUBPROCESS_TIMEOUT_S` 常量 +1，见 §修复轮；`main`/`print_report` 因 AST≤200 红线约束暂缓拆分，见「已知偏差」节）
 
 ## 三、红线核查（AC-13）
 
 `git status --porcelain` 仅：`M ai_service/eval/langgraph_parity.py`（docstring 等量替换）、`?? ai_service/eval/parity_telemetry.py`、`?? ai_service/tests/eval/test_parity_telemetry.py`（+ specs/memory 文档）。`git diff -- ai_service/agent/ ai_service/src/ ai_service/main.py` **全空** ✅。
+
+**`src/config.py` 偏离（AC-28 红线偏离申报，修复轮补充来源）**：`opencode_api_key/model/base_url` 三字段来自独立提交 `ce6646b`（module-093 OpenCode Zen provider 接入），`fallback_chain` 默认值（追加 `opencode`）来自 `8ac4c4a`（[config] 降级链调整）。二者均为纯增量、非 module-092 自身 diff。module-092 跑批依赖之（`PW_LLM_PROVIDER=opencode`），列为本模块可接受偏离；**运行期 `.env` 已含同款链 `qwen,zhipu,opencode,deepseek`，零运行时差异，无需 ADR**。
 
 ## 四、命令输出粘贴（真实运行）
 
@@ -178,7 +180,7 @@ hand 环路级 162 + 工具内 108、langgraph 环路级 169 + 工具内 113。
 
 ### 9.2 实现
 
-新增 `ai_service/eval/parity_io.py`（90 AST）：
+新增 `ai_service/eval/parity_io.py`（118 AST）：
 
 - `LlmIoTracer`：包在 `_TimingClientProxy` **外层**（只旁路记录，不参与计时/分桶口径），
   逐次记录 `(messages/prompt/tools)` → `(content/tool_calls)`，含 `in_tool` 标记与 `duration_ms`
@@ -194,12 +196,15 @@ hand 环路级 162 + 工具内 108、langgraph 环路级 169 + 工具内 113。
 
 ```json
 {
-  "seq": 0, "loop": "hand", "task_id": "at-002", "round": 1, "in_tool": false,
+  "seq": 0, "loop": "hand", "task_id": "at-002",
+  "attempt": 1, "repeat": 0, "in_tool": false,
   "input": {"method": "chat_with_tools", "messages": ["..."], "tools": ["..."]},
   "duration_ms": 3042.8,
   "output": {"content": "...", "tool_calls": ["..."], "message": {}}
 }
 ```
+（修复轮：原 `round` 字段语义歧义——既存尝试序号又存采样轮；拆分为
+`attempt`（独立尝试序号 k，恒 1）与 `repeat`（采样轮序号 round_idx），见「修复轮」节）
 
 - **`in_tool`** 区分环路级 / 工具内 LLM 调用（与三段遥测分桶口径一致，防误读）
 - **异常路径**也留痕（`output.error`）后再抛出，不丢信息
@@ -207,7 +212,7 @@ hand 环路级 162 + 工具内 108、langgraph 环路级 169 + 工具内 113。
 
 ### 9.4 验证
 
-- 单测 `tests/eval/test_parity_io.py` **19 项全绿**（连 092 原有 21 项 → 40 passed）
+- 单测 `tests/eval/test_parity_io.py` **25 项全绿**（连 092 原有 21 项 → 46 passed）
 - 小规模实跑产出 25 条 / 197KB，字段完整（文件改名 `smoke-io-*.jsonl` 标注为验证跑）
 - 正式跑批产出 552 条，环路级/工具内分布符合预期
 
@@ -279,3 +284,58 @@ hand 环路级 162 + 工具内 108、langgraph 环路级 169 + 工具内 113。
 
 **共同点（方向稳健）**：两次跑批的 P95 比值均 < 1.20（0.629 / 0.918）、框架 pass^1 均 ≥ 0.6667，
 **方向一致、幅度不可外推**。
+
+## 十·勘误：IO trace 的 `round` 字段恒为 1（修复轮，developer-092-fix）
+
+> Reviewer #3（中危，影响 Tester T8 复算）修复说明。
+
+**缺陷**：`run_round_real` 调用 `run_telemetry_side(loop, item, 1)` 时 **`k=1` 硬编码**，采样轮序号 `i` 未透传，
+导致 564 条 IO trace 的 `round` 字段全为 1，批次内**无法按轮分离**（实测 564 条全 round=1）。
+
+**修复**：
+1. `run_round_real(tasks, round_idx)` 增 `round_idx` 参数，由 `main` 的 `for i in range(repeat)` 传入 `i`。
+2. `run_telemetry_side(loop, item, k, round_idx)` 增 `round_idx` 参数。
+3. `parity_io.wrap_llm_io(...)` 的 meta 由 `{"loop","task_id","round": k}` 改为
+   `{"loop","task_id","attempt": k, "repeat": round_idx}`；IO 记录字段相应变为 `attempt` + `repeat`
+   （**`round` 字段移除**，避免「尝试序号」与「采样轮」语义冲突）。`run_telemetry_side` 同步透传 `round_idx`。
+4. `parity_io.wrap_llm_io` 签名同步更新；`tests/eval/test_parity_io.py` 的 `test_passthrough_and_record`
+   等断言由 `r["round"]` 改为 `r["attempt"]` / `r["repeat"]`，单测全绿。
+
+**既有数据有效性**：本模块此前产出的两份 trace（`io-20260910-162434.jsonl` id=12~17、
+`io-20260910-182411.jsonl` id=18~23）虽无 `repeat` 字段，但同一 `(task_id, loop)` 的**第 N 次出现**即对应第 N 轮；
+§十.2 的分阶段 token 表即用此法从内存聚合得出，**数值有效**，无需重跑补齐。
+
+## 十·一、首批 trace 字段不全说明（Reviewer #4，不修代码）
+
+首批 trace `eval_io_traces/io-20260910-162434.jsonl`（id=12~17）由**旧版 `parity_io`** 生成，仅含
+`seq`/`loop`/`task_id`/`round`/`in_tool`/`input`/`output`，**缺 `tool` 与 `usage` 字段**（不满足 AC-21 全字段）。
+`Tester` 的 **T7/T8 应以后批 `io-20260910-182411.jsonl`（含 `tool`+`usage`，id=18~23）为准**；
+§十.2 分阶段 token 表系内存内按轮聚合得出，不受此缺陷影响（函数 `stage_tokens`/`_usage_delta` 单测 25/25 全绿）。
+
+## 已知偏差（Reviewer #1/#2，方法超 50 行）
+
+`main` 物理 **67 行**、`print_report` 物理 **61 行**，均超 AC-15「方法 ≤50 行」。
+
+**处理路径 B（暂缓拆分，诚实申报）**：先尝试拆分——`print_report` 拆成「聚合表 / 工具明细 / 冷启动 /
+失败清单」子函数，`main` 的落库循环与汇总拆出。复算 `parity_telemetry.py` AST：当前 **195**，拆分至少 +8 条
+语句（仅 `print_report` 的 4 个子函数即 +8），将**顶破 AC-14 的 ≤200 红线**（头room 仅 5）。故**回退拆分**，
+留待后续模块（如 module-093 红线扩容或独立重构）处理。不掩盖、不改判，如实记录于此。
+
+## 修复轮总结（Reviewer 复审修复，developer-092-fix）
+
+| # | 级别 | 修复内容 | 路径 |
+|---|------|---------|------|
+| 3 | 中 | IO trace `round` 恒=1：透传 `round_idx`，meta 改 `attempt`+`repeat`，移除 `round` 字段；测试同步 | 必修 |
+| 5 | 低 | 数字校正：§二 parity_telemetry **198→195**（复算实测，含修复轮 +1 常量）、§九.1 parity_io **90→118 AST**、§9.4 parity_io **19→25 项** | 顺手 |
+| 6 | 低 | `src/config.py` 偏离来源：`ce6646b`（module-093 opencode 三字段）+ `8ac4c4a`（[config] fallback_chain 默认）；plan §7.2 / AC-28 / changelog §三 三处注明；运行期 .env 同款链，零运行时差异，无需 ADR | 顺手 |
+| 7 | 低 | `_usage_interceptor` 补 `"""..."""`（Args/Returns：原函数先执行保口径、稀疏 usage 静默跳过） | 顺手 |
+| 8 | 低 | `subprocess.run(..., timeout=600)` → 模块常量 `_SUBPROCESS_TIMEOUT_S = 600` | 顺手 |
+| 9 | 低 | langgraph 侧工具执行改用 `_tool_guard(_agent_lg.execute_tool_with_log)`（同源，仅可读性） | 顺手 |
+| 4 | 中 | 首批 trace 缺 `tool`/`usage`：changelog 注明，T7/T8 以后批为准（不修代码） | 仅注明 |
+| 1/#2 | 中 | `main`/`print_report` 超 50 行：拆分会破 AST≤200 红线 → 路径 B 暂缓，见「已知偏差」 | 已知偏差 |
+
+**自证**：`parity_telemetry.py` AST=195、`parity_io.py` AST=118（均 ≤200）；
+`pytest tests/eval/test_parity_telemetry.py tests/eval/test_parity_io.py -q` 全绿；
+全量回归 `1825 passed / 0 failed / 3 skipped`；`git diff --stat -- ai_service/agent ai_service/main.py` 为空；
+`main`/`print_report` 行数复算见上「已知偏差」节。
+

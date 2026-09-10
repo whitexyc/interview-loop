@@ -114,13 +114,13 @@ class TestLlmIoTracer:
     def test_passthrough_and_record(self):
         records: list = []
         tracer = parity_io.wrap_llm_io(_FakeClient(result="答案"), records,
-                                       "hand", "at-001", 1)
+                                       "hand", "at-001", 1, 0)
         out = asyncio.run(tracer.chat([{"role": "user", "content": "q"}]))
         assert out == "答案"                     # 返回值原样透传
         assert len(records) == 1
         rec = records[0]
-        assert (rec["seq"], rec["loop"], rec["task_id"], rec["round"]) == \
-            (0, "hand", "at-001", 1)
+        assert (rec["seq"], rec["loop"], rec["task_id"],
+                rec["attempt"], rec["repeat"]) == (0, "hand", "at-001", 1, 0)
         assert rec["input"]["method"] == "chat"
         assert rec["output"]["content"] == "答案"
         assert rec["duration_ms"] >= 0
@@ -128,7 +128,7 @@ class TestLlmIoTracer:
     def test_seq_increments_per_call(self):
         records: list = []
         tracer = parity_io.wrap_llm_io(_FakeClient(result="x"), records,
-                                       "hand", "t", 1)
+                                       "hand", "t", 1, 0)
         asyncio.run(tracer.chat([{"role": "user"}]))
         asyncio.run(tracer.generate("p"))
         assert [r["seq"] for r in records] == [0, 1]
@@ -138,7 +138,7 @@ class TestLlmIoTracer:
         records: list = []
         stack: list = []
         tracer = parity_io.wrap_llm_io(
-            _FakeClient(result="x"), records, "hand", "t", 1,
+            _FakeClient(result="x"), records, "hand", "t", 1, 0,
             tool_name_getter=lambda: stack[-1] if stack else None)
         asyncio.run(tracer.chat([{"role": "user"}]))     # 环路级
         stack.append("generate_answer")                  # 进入工具窗口
@@ -153,7 +153,7 @@ class TestLlmIoTracer:
         payload = {"content": "", "tool_calls": [{"name": "search_knowledge"}],
                    "message": {"role": "assistant"}}
         tracer = parity_io.wrap_llm_io(_FakeClient(result=payload), records,
-                                       "lg", "at-002", 1)
+                                       "lg", "at-002", 1, 0)
         asyncio.run(tracer.chat_with_tools([{"role": "user"}], [{"type": "function"}]))
         assert records[0]["output"]["tool_calls"] == [{"name": "search_knowledge"}]
         assert records[0]["input"]["tools"] == [{"type": "function"}]
@@ -161,7 +161,7 @@ class TestLlmIoTracer:
     def test_error_records_then_raises(self):
         records: list = []
         tracer = parity_io.wrap_llm_io(_FakeClient(error=RuntimeError("boom")),
-                                       records, "hand", "t", 2)
+                                       records, "hand", "t", 2, 0)
         with pytest.raises(RuntimeError):
             asyncio.run(tracer.chat([{"role": "user"}]))
         assert len(records) == 1                      # 失败也留痕（含 error 字段）
@@ -171,7 +171,7 @@ class TestLlmIoTracer:
         records: list = []
         inner = _FakeClient(result="x")
         inner._provider_label = lambda: "opencode"    # 非三方法属性应透传
-        tracer = parity_io.wrap_llm_io(inner, records, "hand", "t", 1)
+        tracer = parity_io.wrap_llm_io(inner, records, "hand", "t", 1, 0)
         assert tracer._provider_label() == "opencode"
         assert records == []
 
@@ -197,7 +197,7 @@ class TestUsageAndStage:
         inner = _FakeClient(result="x", usage_sink=usage,
                             usage={"label": "opencode", "prompt_tokens": 100,
                                    "completion_tokens": 10})
-        tracer = parity_io.wrap_llm_io(inner, records, "hand", "t", 1,
+        tracer = parity_io.wrap_llm_io(inner, records, "hand", "t", 1, 0,
                                        usage_records=usage)
         asyncio.run(tracer.chat([{"role": "user"}]))
         asyncio.run(tracer.chat([{"role": "user"}]))
@@ -208,7 +208,7 @@ class TestUsageAndStage:
     def test_no_usage_records_leaves_empty(self):
         records: list = []
         tracer = parity_io.wrap_llm_io(_FakeClient(result="x"), records,
-                                       "hand", "t", 1)   # 不传 usage_records
+                                       "hand", "t", 1, 0)   # 不传 usage_records
         asyncio.run(tracer.chat([{"role": "user"}]))
         assert records[0]["usage"] == {}
 

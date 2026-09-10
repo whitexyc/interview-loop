@@ -64,3 +64,37 @@
 | 限流 429（deepseek key 已 401，qwen 为主） | 沿用 091 先例：qwen shell 环境变量；失败如实记 fail_reason 不重跑 |
 | 三段闭合对不齐（异步计时重叠） | 工具耗时与 LLM 耗时天然不重叠（串行 await），闭合校验兜底 |
 | 多轮结果波动大 | 这本身就是数据——如实报 std，不做"挑好看的一轮" |
+
+## 7. 需求变更（2026-09-10，用户追加）
+
+> Planner 原始范围（WP-A ~ WP-D）于 2026-09-07 冻结；本节记录运行期追加需求与实现范围变更。
+
+### 7.1 追加需求拆解
+
+用户原话：「各个阶段的输入输出也需要」「每个阶段的 token 消耗有没有？」
+
+| 需求 | 落地 | 验收项 |
+|------|------|--------|
+| 各阶段**输入输出** | 工具阶段**已有**（`tool_call_logs.args` + `result_preview`）；**LLM 阶段新增** `eval/parity_io.py` 逐次留痕 | AC-21 / AC-22 |
+| 各阶段 **token** | 新增 `_usage_delta` 差分归属 + `stage_tokens()` 聚合（环路级 / 工具内 / 按工具名） | AC-23 |
+
+### 7.2 实现范围变更
+
+| 项 | 原 plan | 变更后 |
+|----|---------|--------|
+| 新增文件 | 仅 `eval/parity_telemetry.py` | 追加 `eval/parity_io.py`（LLM IO 留痕）+ `tests/eval/test_parity_io.py` |
+| `parity_telemetry.py` AST | ≤200（09-07 实测 198） | **193**（`_tool_rows` 迁入 `parity_io`，腾出空间后仍守红线） |
+| 红线 | `agent/` `src/` `main.py` 零 diff | **`src/config.py` 偏离**——接入 OpenCode Go provider 新增 3 字段 + `fallback_chain` 默认值追加 `opencode`；**来源提交**：`ce6646b`（module-093 OpenCode Zen provider 接入，opencode 三字段）+ `8ac4c4a`（[config] 降级链调整，`fallback_chain` 默认值）。module-092 跑批依赖之，列为本模块可接受偏离；**运行期 `.env` 已含同款链（`qwen,zhipu,opencode,deepseek`），零运行时差异，无需 ADR**；`agent/`、`main.py` 仍零 diff |
+
+### 7.3 环境变更（影响复跑）
+
+跑批供应商由 qwen（ModelScope，跑批中途限流）改为 **OpenCode Go 端点 + `glm-5.3-flash`**，
+原因与端点判定规则见 `specs/llm-providers.md`；可运行命令已同步更新（AC §5）。
+
+### 7.4 追加风险（实测暴露）
+
+| 风险 | 实测证据 | 应对 |
+|------|---------|------|
+| **批次间波动**（原 plan 只考虑轮内波动） | 同配置连跑两次，P95 比值 **0.6290 vs 0.9179（差 46%）** | AC-27 要求如实记录；写明"结论强度须匹配采样层级（多批次 × 多轮）" |
+| 供应商端点混淆 | 前期全部 401 系**端点用错**（非 key / 充值问题） | `specs/llm-providers.md` 记录双端点判定规则 |
+| 工具 15s 超时与供应商强相关 | qwen/nemotron 下 `generate_answer` p50 恒贴 15012ms；glm-5.3-flash 降至 5776ms | 如实记录；按工具分档超时留作后续优化项 |
