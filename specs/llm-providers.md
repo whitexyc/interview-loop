@@ -36,6 +36,29 @@
 | `muse-spark-1.3 / 1.2-contributor-free` | ❌ 403 `RegionError` | — | 中国区不可用 |
 | `north-mini-code-free` | ❌ 401 模型不支持 | — | 不在本账户目录 |
 
+### 1.2b 付费模型（需账户余额，当前不可用）
+
+Zen 共 63 个模型，其中 **56 个是付费模型**（不带 `-free` 后缀），需要账户有余额。
+用户询问的 **`glm-5.3-flash`** 属于此类（GLM 系列在 Zen 上还有 `glm-5.3` / `glm-5.2` / `glm-5.1` / `glm-5`）。
+2026-09-10 实测：
+
+```
+401 {"type":"error","error":{"type":"CreditsError","message":"Insufficient balance.
+     Manage your billing here: https://opencode.ai/workspace/wrk_.../billing"}}
+```
+
+**判定规则（实测总结，可用于任何模型）**：
+
+| 模型 ID 形态 | 层级 | 鉴权要求 | 计费 |
+|--------------|------|---------|------|
+| 带 `-free` 后缀（如 `mimo-v2.5-free`） | 免费层 | **必须带 `X-Session-Id` 头**（否则 400 MissingSessionID） | $0，有日/速率配额 |
+| 不带后缀（如 `glm-5.3-flash`） | 付费层 | 只认账户余额，**带不带 session 头都一样 401** | 按 token 计费 |
+
+同批实测同样 401 的付费模型：`deepseek-v4-flash` / `deepseek-v4-pro`。
+
+**接入方式**：**代码零改动**——`OpenCodeClient` 支持任意模型 ID，切换只改 `PW_OPENCODE_MODEL`
+一个配置值（`.env.example` 已登记候选）。代价是必须先给 Zen 账户充值，否则调不通。
+
 ### 1.3 实现（路线 A：单 provider + 模型名走配置）
 
 | 文件 | 改动 |
