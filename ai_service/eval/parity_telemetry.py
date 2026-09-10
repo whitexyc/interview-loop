@@ -54,7 +54,7 @@ from sqlalchemy import text
 
 import agent.react as _agent_react
 import agent.langgraph_react as _agent_lg
-from eval import agent_tasks as at, langgraph_parity as lp, parity_io
+from eval import agent_tasks as at, langgraph_parity as lp, parity_events, parity_io
 from src.database import async_session_factory, ensure_tool_call_logs_table
 
 logger = logging.getLogger("parity_telemetry")
@@ -203,6 +203,7 @@ async def run_telemetry_side(loop: str, item: dict, k: int, round_idx: int) -> d
     in_tool_durs: list = []
     usage_records: list = []
     io_records: list = []
+    tool_events: list = []
     proxy = _TimingClientProxy(llm_client.LLMFactory.get_client(),
                                llm_durs, in_tool_durs)
     traced = parity_io.wrap_llm_io(
@@ -223,7 +224,8 @@ async def run_telemetry_side(loop: str, item: dict, k: int, round_idx: int) -> d
                               _tool_guard(_agent_react.execute_tool_with_log)), \
             mock.patch.object(_agent_lg, "execute_tool_with_log",
                               _tool_guard(_agent_lg.execute_tool_with_log)), \
-            _usage_interceptor(usage_records):
+            _usage_interceptor(usage_records), \
+            parity_events.capture_tool_events(tool_events):
         result = await lp.run_side(loop, item, k, real=True)
     tool_rows = await parity_io.read_tool_rows(trace_id)
     tel = segment_summary(result["duration_ms"], llm_durs, tool_rows)
@@ -233,7 +235,9 @@ async def run_telemetry_side(loop: str, item: dict, k: int, round_idx: int) -> d
     tel["tool_rows"] = [{"tool_name": r["tool_name"],
                          "duration_ms": r["duration_ms"],
                          "result_ok": r["result_ok"]} for r in tool_rows]
+    tel["events"] = parity_events.summarize_events(tool_events)  # 异常事件（超时/重试/失败）
     result["telemetry"] = tel
+    result.update(parity_events.quality_detail(item, result))    # 答案质量细节（要点命中/失分点）
     parity_io.write_io_trace(io_records)   # LLM 阶段输入输出留痕（JSONL，旁路）
     return result
 
