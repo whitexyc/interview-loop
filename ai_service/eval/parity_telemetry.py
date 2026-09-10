@@ -68,26 +68,26 @@ _METRICS = ("pass_1", "tool_correct_rate", "avg_tokens", "tokens_total",
             "orch_ms_total", "llm_calls", "prompt_tokens", "completion_tokens",
             "llm_in_tool_ms_total", "llm_in_tool_calls")
 
-# 工具执行窗口深度（eval 层标记；串行 await 无并发，单元素列表即可）
-_DEPTH = [0]
+# 工具执行窗口栈（eval 层标记；串行 await 无并发，存工具名供 IO 留痕按工具归因 token）
+_TOOL_STACK: list = []
 
 
 def _tool_guard(original):
-    """包装 execute_tool_with_log：工具窗口深度标记（供 proxy 分桶，防双重计数）
+    """包装 execute_tool_with_log：工具窗口栈标记（供 proxy 分桶 + IO 留痕归因）
 
     Args:
         original: agent.react.execute_tool_with_log（两环路共用的工具执行入口）
 
     Returns:
-        同签名 async 包装（计数后透传原行为）
+        同签名 async 包装（压栈后透传原行为，出栈在 finally）
     """
     async def _inner(name, args, tool, ctx, allowed_tools=None):
-        _DEPTH[0] += 1
+        _TOOL_STACK.append(name)
         try:
             return await original(name, args, tool, ctx,
                                   allowed_tools=allowed_tools)
         finally:
-            _DEPTH[0] -= 1
+            _TOOL_STACK.pop()
     return _inner
 
 
@@ -113,7 +113,7 @@ class _TimingClientProxy:
             return attr
 
         async def _timed(*args, **kwargs):
-            sink = self._tool if _DEPTH[0] else self._loop
+            sink = self._tool if _TOOL_STACK else self._loop
             t0 = time.perf_counter()
             try:
                 return await attr(*args, **kwargs)
@@ -190,8 +190,10 @@ async def run_telemetry_side(loop: str, item: dict, k: int) -> dict:
     io_records: list = []
     proxy = _TimingClientProxy(llm_client.LLMFactory.get_client(),
                                llm_durs, in_tool_durs)
-    traced = parity_io.wrap_llm_io(proxy, io_records, loop, item["id"], k,
-                                   depth_getter=lambda: _DEPTH[0])
+    traced = parity_io.wrap_llm_io(
+        proxy, io_records, loop, item["id"], k,
+        tool_name_getter=lambda: _TOOL_STACK[-1] if _TOOL_STACK else None,
+        usage_records=usage_records)
     try:  # 预清理同 trace 历史 tool_call_logs 行（防重复运行累积污染工具段；
         # 仅精确命中本 eval trace，066 历史行无 loop 段不匹配）
         async with async_session_factory() as session:

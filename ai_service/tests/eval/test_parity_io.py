@@ -31,25 +31,34 @@ def isolate_trace_file(tmp_path, monkeypatch):
 
 
 class _FakeClient:
-    """假 LLM 客户端：三方法可配（返回固定值或抛错），记录调用"""
+    """假 LLM 客户端：三方法可配（返回固定值或抛错），可模拟内部触发 _record_usage"""
 
-    def __init__(self, result=None, error=None):
+    def __init__(self, result=None, error=None, usage_sink=None, usage=None):
         self._result = result
         self._error = error
+        self._usage_sink = usage_sink      # 模拟 llm.client 内部的 usage 收集列表
+        self._usage = usage
         self.calls: list = []
+
+    def _emit_usage(self):
+        if self._usage_sink is not None and self._usage is not None:
+            self._usage_sink.append(dict(self._usage))
 
     async def chat(self, messages):
         self.calls.append(("chat", messages))
         if self._error:
             raise self._error
+        self._emit_usage()
         return self._result
 
     async def chat_with_tools(self, messages, tools):
         self.calls.append(("chat_with_tools", messages, tools))
+        self._emit_usage()
         return self._result
 
     async def generate(self, prompt):
         self.calls.append(("generate", prompt))
+        self._emit_usage()
         return self._result
 
 
@@ -125,16 +134,19 @@ class TestLlmIoTracer:
         assert [r["seq"] for r in records] == [0, 1]
         assert records[1]["input"]["method"] == "generate"
 
-    def test_in_tool_flag_follows_depth(self):
+    def test_tool_name_and_in_tool_flag(self):
         records: list = []
-        depth = [0]
-        tracer = parity_io.wrap_llm_io(_FakeClient(result="x"), records,
-                                       "hand", "t", 1,
-                                       depth_getter=lambda: depth[0])
+        stack: list = []
+        tracer = parity_io.wrap_llm_io(
+            _FakeClient(result="x"), records, "hand", "t", 1,
+            tool_name_getter=lambda: stack[-1] if stack else None)
+        asyncio.run(tracer.chat([{"role": "user"}]))     # 环路级
+        stack.append("generate_answer")                  # 进入工具窗口
         asyncio.run(tracer.chat([{"role": "user"}]))
-        depth[0] = 2                                  # 进入工具窗口
-        asyncio.run(tracer.chat([{"role": "user"}]))
-        assert [r["in_tool"] for r in records] == [False, True]
+        assert records[0]["tool"] is None
+        assert records[0]["in_tool"] is False
+        assert records[1]["tool"] == "generate_answer"
+        assert records[1]["in_tool"] is True
 
     def test_chat_with_tools_records_tool_calls(self):
         records: list = []
@@ -162,6 +174,67 @@ class TestLlmIoTracer:
         tracer = parity_io.wrap_llm_io(inner, records, "hand", "t", 1)
         assert tracer._provider_label() == "opencode"
         assert records == []
+
+
+class TestUsageAndStage:
+    """usage 差分归属 + 分阶段 token 聚合（module-092 分阶段 token 口径）"""
+
+    def test_usage_delta_none_or_no_new(self):
+        assert parity_io._usage_delta(None, 0) == {}
+        assert parity_io._usage_delta(
+            [{"prompt_tokens": 1, "completion_tokens": 2}], 1) == {}
+
+    def test_usage_delta_sums_new_only(self):
+        records = [{"prompt_tokens": 10, "completion_tokens": 5},
+                   {"prompt_tokens": 20, "completion_tokens": 7},
+                   {"prompt_tokens": 30, "completion_tokens": 9}]
+        assert parity_io._usage_delta(records, 1) == {
+            "prompt_tokens": 50, "completion_tokens": 16, "calls": 2}
+
+    def test_usage_attributed_to_each_call(self):
+        records: list = []
+        usage: list = []
+        inner = _FakeClient(result="x", usage_sink=usage,
+                            usage={"label": "opencode", "prompt_tokens": 100,
+                                   "completion_tokens": 10})
+        tracer = parity_io.wrap_llm_io(inner, records, "hand", "t", 1,
+                                       usage_records=usage)
+        asyncio.run(tracer.chat([{"role": "user"}]))
+        asyncio.run(tracer.chat([{"role": "user"}]))
+        expected = {"prompt_tokens": 100, "completion_tokens": 10, "calls": 1}
+        assert records[0]["usage"] == expected
+        assert records[1]["usage"] == expected      # 每次调用各归属一份，不累积
+
+    def test_no_usage_records_leaves_empty(self):
+        records: list = []
+        tracer = parity_io.wrap_llm_io(_FakeClient(result="x"), records,
+                                       "hand", "t", 1)   # 不传 usage_records
+        asyncio.run(tracer.chat([{"role": "user"}]))
+        assert records[0]["usage"] == {}
+
+    def test_stage_tokens_splits_loop_and_tool(self):
+        rows = [
+            {"in_tool": False,
+             "usage": {"prompt_tokens": 100, "completion_tokens": 10, "calls": 1}},
+            {"in_tool": True, "tool": "generate_answer",
+             "usage": {"prompt_tokens": 200, "completion_tokens": 20, "calls": 1}},
+            {"in_tool": True, "tool": "re_search",
+             "usage": {"prompt_tokens": 50, "completion_tokens": 5, "calls": 1}},
+        ]
+        out = parity_io.stage_tokens(rows)
+        assert out["loop"]["prompt_tokens"] == 100
+        assert out["tool"]["prompt_tokens"] == 250
+        assert out["tool"]["by_tool"]["generate_answer"]["prompt_tokens"] == 200
+        assert out["tool"]["by_tool"]["re_search"]["calls"] == 1
+        assert out["total"] == {"prompt_tokens": 350, "completion_tokens": 35,
+                                "calls": 3}
+
+    def test_stage_tokens_ignores_empty_usage(self):
+        out = parity_io.stage_tokens([{"in_tool": False},
+                                      {"in_tool": True, "usage": {}}])
+        assert out["total"]["calls"] == 0
+        assert out["loop"]["by_tool"] == {}
+        assert out["tool"]["by_tool"] == {}
 
 
 class TestWriteTrace:

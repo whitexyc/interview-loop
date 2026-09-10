@@ -289,3 +289,6 @@
 | module-092 | Planner | [HANDOFF] 交 Developer：先冒烟 --repeat 1 --sample 2，再正式 --repeat 3；顺带修 091 遗留 3 docstring；多轮下若 P95 结论翻转如实提请复核 ADR-0020 |
 | 供应商接入 | 编排者 | [DEV] OpenCode Zen provider 接入解 092 跑批阻塞：OpenCodeClient（X-Session-Id 破免费层 MissingSessionID）+ config +3 字段 + 10 单测；全量 1800/0/3；agent/main 零 diff，src/config.py 纯增量偏离已申报（用户：不算 module，改落 specs/llm-providers.md） |
 | 供应商接入 | 探针 | [PROBE] Zen：mimo-v2.5-free 配额耗尽 / deepseek-v4-flash-free 上游不可用；可用=nemotron-3.5-lightning-free、ultra。Command Code：3 免费模型需账户 ≥$1（实测 400 insufficient credits）；mimo-v2.5 折扣 98%（$0.14/$0.28 per 1M），比免费模型更适合批量评测 |
+| 供应商接入 | 编排者 | [DEV] OpenCode Go 端点打通（用户买的是 $10/月 Go 订阅，非 Zen 余额）：`/zen/go/v1` 才是 Go 的门，`/zen/v1` 只认余额——之前全部 401 是端点用错（非 key/充值问题）；glm-5.3-flash 在 Go 端点可用，24 个模型 |
+| module-092 | 编排者 | [DEV] 分阶段 token 补齐：`parity_io` 加 usage 差分归属（`_usage_delta`）+ 工具名归因（`_TOOL_STACK`）+ `stage_tokens()`；单测 25 项全绿；AST 193 ≤200 |
+| module-092 | 编排者 | [RUN] 跑批成功（Go 端点 glm-5.3-flash，0 失败，26.3 分钟，id=18~23）：P95 比值 [0.783/0.9421/1.0285] 3/3 未超阈；**⚠️ 两次跑批不一致**（0.6290 vs 0.9179，差 46%）→ `--repeat` 只消除轮内波动 |

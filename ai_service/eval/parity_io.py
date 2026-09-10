@@ -77,6 +77,28 @@ def _snap_output(out) -> dict:
     return {"content": _trunc(out)}
 
 
+def _usage_delta(records, start: int) -> dict:
+    """取本次 LLM 调用新增的 usage（与 _record_usage 调用顺序对齐）
+
+    `_record_usage` 在客户端内部、每次调用返回前触发，顺序与 LLM 调用一致；
+    故用「调用前长度 → 调用后长度」差分即可把 usage 精确归属到本次调用，
+    无需改动生产代码（module-092 分阶段 token 口径）。
+
+    Args:
+        records: usage 收集列表（_usage_interceptor 填充）；None 表示未接入
+        start: 本次调用前的列表长度
+
+    Returns:
+        {"prompt_tokens", "completion_tokens", "calls"}；无新增返回 {}
+    """
+    if not records or len(records) <= start:
+        return {}
+    new = records[start:]
+    return {"prompt_tokens": sum(r["prompt_tokens"] for r in new),
+            "completion_tokens": sum(r["completion_tokens"] for r in new),
+            "calls": len(new)}
+
+
 class LlmIoTracer:
     """LLM 客户端 IO 留痕代理（包在 _TimingClientProxy 外层，只旁路记录）
 
@@ -84,16 +106,19 @@ class LlmIoTracer:
         inner: 被包装客户端（_TimingClientProxy 或真实 client，行为透传）
         records: 本次运行的记录收集列表
         meta: 运行上下文 {"loop","task_id","round"}
-        depth_getter: 返回当前工具窗口深度（>0 表示工具内调用）
+        tool_name_getter: 返回当前工具名（None = 环路级调用）
+        usage_records: usage 收集列表（差分归属本次调用的 token；None = 不记录）
     """
 
     METHODS = ("chat", "chat_with_tools", "generate")
 
-    def __init__(self, inner, records: list, meta: dict, depth_getter=None):
+    def __init__(self, inner, records: list, meta: dict, tool_name_getter=None,
+                 usage_records=None):
         self._inner = inner
         self._records = records
         self._meta = meta
-        self._depth = depth_getter
+        self._tool_name = tool_name_getter
+        self._usage = usage_records
         self._seq = 0
 
     def __getattr__(self, name):
@@ -102,8 +127,10 @@ class LlmIoTracer:
             return attr
 
         async def _traced(*args, **kwargs):
+            tool = self._tool_name() if self._tool_name else None
+            u0 = len(self._usage) if self._usage else 0
             rec = {"seq": self._seq, **self._meta,
-                   "in_tool": bool(self._depth()) if self._depth else None,
+                   "tool": tool, "in_tool": tool is not None,
                    "input": _snap_input(name, args, kwargs)}
             self._seq += 1
             t0 = time.perf_counter()
@@ -116,6 +143,7 @@ class LlmIoTracer:
                 raise
             rec["duration_ms"] = round((time.perf_counter() - t0) * 1000, 1)
             rec["output"] = _snap_output(out)
+            rec["usage"] = _usage_delta(self._usage, u0)
             self._records.append(rec)
             return out
 
@@ -123,7 +151,7 @@ class LlmIoTracer:
 
 
 def wrap_llm_io(inner, records: list, loop: str, task_id: str, k: int,
-                depth_getter=None) -> LlmIoTracer:
+                tool_name_getter=None, usage_records=None) -> LlmIoTracer:
     """构造 IO 留痕代理（便捷工厂，封装 meta 组装）
 
     Args:
@@ -132,14 +160,53 @@ def wrap_llm_io(inner, records: list, loop: str, task_id: str, k: int,
         loop: 环路名
         task_id: 任务 id
         k: 独立尝试序号（轮次）
-        depth_getter: 工具窗口深度取值回调
+        tool_name_getter: 返回当前工具名（None = 环路级调用）
+        usage_records: usage 收集列表（差分归属 token；None = 不记录）
 
     Returns:
         LlmIoTracer 实例（可 mock.patch 回填给 agent 层）
     """
     return LlmIoTracer(inner, records,
                        {"loop": loop, "task_id": task_id, "round": k},
-                       depth_getter=depth_getter)
+                       tool_name_getter=tool_name_getter,
+                       usage_records=usage_records)
+
+
+def stage_tokens(records: list) -> dict:
+    """按阶段汇总 token（module-092 分阶段 token 口径）
+
+    阶段划分与三段遥测一致：
+      - `loop`  环路级 LLM 调用（ReAct 推理轮次 + 预算耗尽兜底生成）
+      - `tool`  工具内 LLM 调用（generate_answer 内部生成、re_search 图抽取等）
+
+    Args:
+        records: 一次运行或全量的 IO 留痕记录列表
+
+    Returns:
+        {"loop": {...}, "tool": {...}, "total": {...}}，每项含
+        prompt_tokens / completion_tokens / calls / by_tool（工具内按工具名细分）
+    """
+    out: dict = {"loop": {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0,
+                          "by_tool": {}},
+                 "tool": {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0,
+                          "by_tool": {}}}
+    for r in records:
+        usage = r.get("usage") or {}
+        if not usage:
+            continue
+        stage = "tool" if r.get("in_tool") else "loop"
+        bucket = out[stage]
+        for key in ("prompt_tokens", "completion_tokens", "calls"):
+            bucket[key] += usage.get(key, 0)
+        if stage == "tool":
+            name = r.get("tool") or "unknown"
+            sub = bucket["by_tool"].setdefault(
+                name, {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0})
+            for key in ("prompt_tokens", "completion_tokens", "calls"):
+                sub[key] += usage.get(key, 0)
+    out["total"] = {k: out["loop"][k] + out["tool"][k]
+                    for k in ("prompt_tokens", "completion_tokens", "calls")}
+    return out
 
 
 def trace_file() -> Path:
