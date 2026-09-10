@@ -300,3 +300,12 @@
 - **诚实记录**：LangGraph 质量全面占优（pass^1 0.5833 vs 0.4167、工具正确率 0.75 vs 0.5833、Grounding 0.8636 vs 0.8030、tokens −3.6%）——维持依据仅是延迟；单次采样无统计效力，重启转正条件 = 多次采样（≥3）复测 + StateGraph 调度开销归因（节点调度 vs 供应商方差）。
 - **口径**：`--sample 12` 固定种子；tokens 不分桶（085/089 口径）；相对结论两侧同模型有效，绝对值不可外推（deepseek key 401 后运行期切 PW_LLM_PROVIDER=qwen，.env 零改动）；落库 `agent_eval_runs` id=4/5，`config_snapshot.loop` 区分环路（零新表零 ALTER）。
 - **T6 清理口径坑**：`DELETE ... WHERE trace_id LIKE 'eval-at-%'` 会误删 066 历史评测 449 行（066 的 trace 无 loop 段同样命中）——必须加时间窗 `AND created_at >= '<本次评测日期>'`（Tester 实删 69 行回基线 467）。
+
+## 分阶段遥测领域（2026-09-10，module-092）
+
+- **三段拆解（残差法）**：把单次运行耗时拆成 **LLM 轮次 / 工具执行 / 编排开销**，其中编排开销 = 总 `duration_ms` − ΣLLM − Σ工具（残差定义）。**三段必须严格不相交**：工具内部还会调 LLM（`generate_answer` 内含一次生成、`re_search` 触发图抽取），这些调用已含在工具 `duration_ms` 中，须按"工具执行窗口深度"单列（`llm_in_tool_ms`），否则双重计数（冒烟实测 ΣLLM+Σ工具 = 总时长 **2.2 倍**）。**闭合校验**：残差为负即闭合失败，误差 = |残差|/总时长，超限逐条解释。
+- **逐次 token 的唯一干净入口**：`chat_with_tools` 返回体**不含 usage**（供应商原始响应在 client 内部被消费），逐次 prompt/completion tokens 只能通过 `mock.patch("llm.client._record_usage", side_effect=...)` 包装捕获——原函数先执行（observability 口径不变），再从 `_extract_usage` 取。全程 eval 层拦截，**零生产 diff**。
+- **StateGraph 归因（ADR-0020 追认）**：091 推测"P95 超阈 = StateGraph 调度开销"，**被三段遥测证伪**——三次独立测量编排开销分别为 **−4.9ms / +48.7ms / +390.5ms**（均百毫秒级，占单次运行 60–136 秒的 ≤0.53%）。**框架调度成本可忽略**；延迟差异主要来自 LLM 调用次数（57 vs 59）与供应商波动。
+- **供应商敏感性**：同一实验在不同供应商下 **P95 比值方向翻转**（nemotron 0.2809 = LangGraph 快 3.6× vs qwen 1.0901 / 1.1456 = 慢）。结论边界：**"框架成本可忽略"跨供应商稳定，具体延迟数字必须绑定供应商说**。
+- **`generate_answer` 15s 工具超时**：qwen 与 nemotron 下均频繁触发（工具级明细 p50 恒为 15012ms 上限值），说明该工具本身耗时 15s+。它是**生产配置的真实行为**，带超时跑批才是忠实测量（红线要求 `agent/` 零 diff 的题中之义）。
+- **免费层可用性陷阱**：ModelScope 免费层的"可用"是**请求量相关**的——单次探针通过、4 次小规模运行也通过，累积到数百次请求（约 40–50 次运行）才触发 429 `insufficient balance` / rate limit。**验证供应商可用性必须按目标规模量级试跑，探针一次不足为凭**（2026-09-10 实测：72 次运行中 38 次失败，429 出现 158 次）。
