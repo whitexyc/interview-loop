@@ -137,3 +137,61 @@ Command Code 上 `mimo-v2.5`（即用户原本想用的 MiMo V2.5）有 **98% �
 
 **教训**：跑批类任务的供应商余额应在 **Planner 阶段就探针**——092 plan 查了代码事实
 （usage 上报路径、span 表结构）却没查"钱包"，导致代码全部写完才卡在最后一环。
+
+---
+
+## 四、运行时降级链（2026-09-10 调整）
+
+### 4.1 发现问题
+
+排查时发现**两个独立的失效点**：
+
+1. `.env` 的 `PW_LLM_PROVIDER=deepseek` 是**单供应商模式，不走降级链**，
+   而该 key 已 401 失效 → 服务重启后任何 LLM 调用必失败。
+2. **Redis 运行时链 `llm:fallback_chain = deepseek,qwen,zhipu`，链首同样是失效的 deepseek**。
+   ⚠️ **Redis 链优先级高于 `.env` 配置**（`main.py:95 load_fallback_chain_from_redis`，
+   启动时加载；只有链为空/非法才回退配置默认）——**只改 `.env` 不生效**。
+
+### 4.2 调整（三处同步，缺一不可）
+
+| 位置 | 改前 | 改后 |
+|------|------|------|
+| `.env` `PW_LLM_PROVIDER` | `deepseek`（单点） | `fallback`（自动降级） |
+| `.env` `PW_FALLBACK_CHAIN` | 未设置（走 config 默认） | `qwen,zhipu,opencode,deepseek` |
+| `src/config.py` `fallback_chain` 默认值 | `qwen,zhipu,deepseek` | `qwen,zhipu,opencode,deepseek` |
+| **Redis `llm:fallback_chain`** | `deepseek,qwen,zhipu` | `qwen,zhipu,opencode,deepseek` |
+
+**理由**：deepseek key 失效 → 移到链尾兜底；`opencode`（本文件 §一 新接入）补入倒数第二；
+链首保持 `qwen`。四家全挂才会整体失败。
+
+### 4.3 验证
+
+- **端到端**：模拟启动路径（`load_fallback_chain_from_redis()` → `get_client('fallback')` → 实调）
+  通过——链读回 `['qwen','zhipu','opencode','deepseek']`，`FallbackClient._chain` 一致，
+  实调走 qwen 返回成功。
+- **回归**：全量 **1800 passed / 0 failed / 3 skipped**（与改动前逐字一致，零新增失败）。
+
+### 4.4 六 provider 实测状态（2026-09-10 13:27，逐个真实探针）
+
+| provider | 模型 | key | 实测 |
+|----------|------|-----|------|
+| claude | claude-sonnet-5-20251001 | ❌ 空 | 未配置 |
+| deepseek | deepseek-v4-flash | 已配置 | ❌ 服务不可用（401） |
+| **qwen** | Qwen/Qwen3.5-35B-A3B | 走 ModelScope | ✅ **可用** |
+| **zhipu** | ZhipuAI/GLM-5.2 | 走 ModelScope | ✅ **可用** |
+| **modelscope** | deepseek-ai/DeepSeek-V4-Pro | 已配置 | ✅ **可用** |
+| **opencode** | nemotron-3.5-lightning-free | 已配置 | ✅ 可用 |
+
+**ModelScope 余额已恢复**（此前 429 `insufficient balance`，是 092 跑批阻塞的根因）。
+
+### 4.5 对 092 跑批的结论
+
+ModelScope 恢复后，**092 应改用 `qwen` 而非 OpenCode 免费层**：
+
+1. **与 091 同源**（091 就是用 `PW_LLM_PROVIDER=qwen` 跑的）→ 对比结论可直接对话；
+   换免费模型会引入不可比因素（供应商差异 + 模型行为差异）。
+2. **无硬配额顶**（免费层是 500 RPD / 1M TPD，72 次运行无重试余量）。
+3. **避免工具超时污染**：`nemotron` 是推理型模型，实测慢到触发 `generate_answer` 15s 超时
+   （试跑日志实证 2 次），会让延迟数据被超时/重试主导。
+
+OpenCode 免费层降为**链上兜底**（第四顺位前的第三位），主用途是"其他家全挂时还能跑"。

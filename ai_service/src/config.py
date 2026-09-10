@@ -20,12 +20,13 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
 
     # LLM 供应商
-    # fallback: 按 fallback_chain 顺序自动降级（默认 qwen → zhipu → deepseek）
+    # fallback: 按 fallback_chain 顺序自动降级（默认 qwen → zhipu → opencode → deepseek）
     # 单供应商: claude | deepseek | qwen | zhipu | modelscope | opencode
     llm_provider: str = "fallback"
 
     # 降级链（逗号分隔，仅 llm_provider=fallback 时生效）
-    fallback_chain: str = "qwen,zhipu,deepseek"
+    # 2026-09-10：deepseek key 失效移至链尾兜底，opencode（OpenCode Zen 免费层）补入
+    fallback_chain: str = "qwen,zhipu,opencode,deepseek"
 
     # Claude
     claude_api_key: str = ""
