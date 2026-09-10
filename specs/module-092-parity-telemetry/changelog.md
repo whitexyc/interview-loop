@@ -54,3 +54,51 @@
 - **T4**：冷启动独立复现：`python -c "import time;t0=time.perf_counter();import agent.langgraph_react;print(int((time.perf_counter()-t0)*1000))"` × 3 取中位，与报告同量级（±30% 内，进程噪声如实标注）。
 - **T6**：评测 trace 清理用**时间窗口径**（091 勘误先例）：`DELETE FROM tool_call_logs WHERE trace_id LIKE 'eval-%' AND created_at >= '2026-09-07';`（**必须带时间窗**，否则误删 066 历史 449 行）。agent_eval_runs 中 module=092 的 6 条 run 为验收证据建议保留。
 - 冒烟期临时文件 `_smoke092.log`、`_pytest_full_092.log` 于正式跑批收尾后删除。
+
+## 七、首次正式跑批失败记录（2026-09-10，编排者执行）
+
+> **结论：72 次运行中 38 次失败，仅第 1 轮完整可用，数据不足以支撑结论。如实留痕，不掩盖。**
+
+### 7.1 失败分布（真实日志统计，非估算）
+
+| 轮次 | 失败数 | hand pass^1 | langgraph pass^1 | 有效性 |
+|------|--------|-------------|------------------|--------|
+| repeat=0 | 0 / 24 | 0.5000 | 0.6667 | ✅ 完整 |
+| repeat=1 | 14 / 24 | 0.2500 | 0.2500 | ⚠️ 部分 |
+| repeat=2 | 24 / 24 | 0.0000 | 0.0000 | ❌ 无效（tokens=0） |
+
+失败日志共 38 条，**时间上全部落在 14:22–14:23 一分钟内**（前 30 分钟零失败）。
+
+### 7.2 根因：ModelScope 免费层限流（非间歇抖动）
+
+38 条失败全为 `LLMException: [llm] 工具调用服务暂不可用`，底层原始异常（日志实录）：
+
+```
+Error code: 429 - {'error': {'message': 'insufficient balance', ...}}
+Error code: 429 - {'error': {'message': 'We have to rate limit you for model
+  Qwen/Qwen3.5-35B-A3B. If you need higher limits, please consider other
+  (commercial) API providers.', ...}}
+```
+
+统计：**429 共 158 次**（`insufficient balance` 25 次 + rate limit 152 次）。
+
+**时间线**：13:27 单次探针成功 → 13:45 小规模体检（4 次运行）成功 →
+13:52 正式批启动 → **14:22 起限流** → 此后 1 分钟内 38 次运行全部瞬时失败（每次约 1.5 秒，
+日志特征 `pass=False tools=[] 1484ms`）。
+
+**关键教训**：ModelScope 免费层的"可用"是**请求量相关**的——单次探针、甚至 4 次小规模运行
+都看不出问题，只有累积到数百次请求才触发。**Planner 阶段"探针一次"不足以验证批量评测的
+供应商可用性**，必须按目标规模的量级试跑。
+
+### 7.3 被污染的数据（不可引用）
+
+聚合表跨轮 std 极大（`tokens 总量 mean=68069 std=71785`、`tokens 总量` 的 min=0），
+因 repeat=2 轮全失败为 0 值。`逐轮 P95 比值 [1.1456, 0.7996, 1.0257]` 中第三轮基于
+全失败数据，同样不可引用。**只有 repeat=0 单轮**（24 次运行全成功）可作参考。
+
+### 7.4 落库现状
+
+`agent_eval_runs` id=6~11（3 轮 × 2 环路）已写入，`config_snapshot` 含
+`repeat`/`repeat_of`/`module=092`，commit `8ac4c4a6`。**保留作为失败证据**（不删、不掩盖）；
+重跑前的清理须用时间窗口径并**更新日期为实际评测日**（本节为 2026-09-10，
+T6 原文的 `2026-09-07` 已过时）。
