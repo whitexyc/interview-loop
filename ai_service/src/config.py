@@ -21,7 +21,7 @@ class Settings(BaseSettings):
 
     # LLM 供应商
     # fallback: 按 fallback_chain 顺序自动降级（默认 qwen → zhipu → deepseek）
-    # 单供应商: claude | deepseek | qwen | zhipu | modelscope
+    # 单供应商: claude | deepseek | qwen | zhipu | modelscope | opencode
     llm_provider: str = "fallback"
 
     # 降级链（逗号分隔，仅 llm_provider=fallback 时生效）
@@ -35,6 +35,15 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_model: str = "deepseek-chat"
     deepseek_base_url: str = "https://api.deepseek.com/v1"
+
+    # OpenCode Zen（AI 网关，OpenAI 兼容；module-093）
+    # 免费层模型（-free 后缀）直连报 MissingSessionID，客户端注入 X-Session-Id 放行。
+    # 免费层配额：30 RPM / 500 RPD / 1M TPD（2026-09 实测）。
+    # 候选模型：deepseek-v4-flash-free / mimo-v2.5-free（目标）；上游不可用或配额
+    # 耗尽时切 nemotron-3.5-lightning-free 或 nemotron-3-ultra-free（实测可用）。
+    opencode_api_key: str = ""
+    opencode_model: str = "deepseek-v4-flash-free"
+    opencode_base_url: str = "https://opencode.ai/zen/v1"
 
     # Qwen (通过 ModelScope API，默认首选)
     qwen_model: str = "Qwen/Qwen3.5-35B-A3B"

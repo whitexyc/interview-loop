@@ -32,6 +32,7 @@ LLM 多供应商适配层 — RAG 链路的推理引擎
 
 import json
 import logging
+import uuid
 from abc import ABC, abstractmethod
 from typing import AsyncGenerator, Optional
 
@@ -178,8 +179,11 @@ class LLMClient(ABC):
         感知具体供应商，旧实现恒标 "llm" 导致工具调用轮次用量无法按供应商
         归属（fallback 链切换混在同一桶）。按实现类映射：
         DeepSeekClient → "deepseek"；_ModelScopeBaseClient 系 → self._label
-        （qwen/zhipu/modelscope）；ClaudeClient（bind_tools 路径）→ "claude"。
+        （qwen/zhipu/modelscope）；ClaudeClient（bind_tools 路径）→ "claude"；
+        OpenCodeClient（module-093）→ "opencode"。
         """
+        if isinstance(self, OpenCodeClient):
+            return "opencode"
         if isinstance(self, DeepSeekClient):
             return "deepseek"
         if isinstance(self, _ModelScopeBaseClient):
@@ -465,6 +469,73 @@ class ModelScopeClient(_ModelScopeBaseClient):
         super().__init__(model=settings.modelscope_model, label="modelscope", temperature=temperature)
 
 
+class OpenCodeClient(LLMClient):
+    """OpenCode Zen 网关客户端（OpenAI 兼容，module-093）
+
+    Zen（https://opencode.ai/zen/v1）是 OpenCode 团队的模型网关。其免费层模型
+    （`-free` 后缀）直连会被网关拒绝：
+
+        MissingSessionID: OpenCode's free tier can only be used in OpenCode
+
+    实测（2026-09-10）带上任意 `X-Session-Id` 请求头即放行，故此处通过
+    default_headers 注入实例级 UUID（每次实例化生成，无跨实例一致性要求）。
+
+    免费层配额较紧（30 RPM / 500 RPD / 1M TPD），批量评测前须先估算请求数：
+    超限返回 429（不重试即失败），故调用方需自行控制并发与重试。
+
+    与 _ModelScopeBaseClient 的差异：base_url/api_key 独立配置，且多带
+    X-Session-Id 头（免费层必需）；其余调用形态一致（底层同为 ChatOpenAI，
+    chat_with_tools 直接复用基类的 _chat_with_tools_openai 路径）。
+    """
+
+    def __init__(self, temperature: float = 0.7):
+        if not settings.opencode_api_key:
+            raise LLMException("opencode", "OPENCODE_API_KEY 未配置")
+        self._session_id = str(uuid.uuid4())
+        self._llm = ChatOpenAI(
+            model=settings.opencode_model,
+            api_key=settings.opencode_api_key,
+            base_url=settings.opencode_base_url,
+            default_headers={"X-Session-Id": self._session_id},
+            temperature=temperature,  # 默认 0.7；结构化任务可传低温度
+            timeout=180,   # 网关上游抖动较大，比 deepseek 的 120s 再放宽
+        )
+
+    async def generate(self, prompt: str) -> str:
+        """单轮文本生成（content 为 None 时返回空串）"""
+        logger.info("OpenCode generate, model=%s", settings.opencode_model)
+        try:
+            response = await self._llm.ainvoke(prompt)
+            _record_usage("opencode", response)
+            # 推理型免费模型在 max_tokens 被推理过程耗尽时 content 为 None，
+            # 空串兜底避免调用方 len(None) 崩溃（module-093 实测行为）
+            return response.content or ""
+        except Exception as e:
+            logger.error("OpenCode 调用失败: %s", e)
+            raise LLMException("opencode", "OpenCode 服务暂不可用", cause=e)
+
+    async def chat(self, messages: list[dict]) -> str:
+        """多轮对话（content 为 None 时返回空串，理由同 generate）"""
+        try:
+            response = await self._llm.ainvoke(messages)
+            _record_usage("opencode", response)
+            return response.content or ""
+        except Exception as e:
+            logger.error("OpenCode chat 失败: %s", e)
+            raise LLMException("opencode", "OpenCode 对话服务暂不可用", cause=e)
+
+    async def generate_stream(self, prompt: str) -> AsyncGenerator[str, None]:
+        """流式生成（流式场景供应商通常不返回 usage，不采集）"""
+        logger.info("OpenCode stream, model=%s", settings.opencode_model)
+        try:
+            async for chunk in self._llm.astream(prompt):
+                if chunk.content:
+                    yield chunk.content
+        except Exception as e:
+            logger.error("OpenCode 流式调用失败: %s", e)
+            raise LLMException("opencode", "OpenCode 流式服务暂不可用", cause=e)
+
+
 class FallbackClient(LLMClient):
     """降级链客户端：按顺序尝试多个供应商，失败自动切换
 
@@ -555,7 +626,7 @@ class LLMFactory:
     _fallback_chain: Optional[list[str]] = None
 
     # 降级链白名单：链上的每一项必须是可实例化的单供应商（不允许嵌套 fallback）
-    SUPPORTED_PROVIDERS = {"claude", "deepseek", "qwen", "zhipu", "modelscope"}
+    SUPPORTED_PROVIDERS = {"claude", "deepseek", "qwen", "zhipu", "modelscope", "opencode"}
 
     @classmethod
     def validate_chain(cls, chain: list) -> list[str]:
@@ -625,7 +696,7 @@ class LLMFactory:
         否则配置默认；clear_cache 后按新链重建。
 
         Args:
-            provider: 供应商（claude/deepseek/qwen/zhipu/modelscope/fallback）
+            provider: 供应商（claude/deepseek/qwen/zhipu/modelscope/opencode/fallback）
             temperature: 生成温度（None=默认 0.7）
 
         Returns:
@@ -648,6 +719,8 @@ class LLMFactory:
                 cls._instances[key] = QwenClient(temperature=temp)
             elif provider == "zhipu":
                 cls._instances[key] = ZhipuClient(temperature=temp)
+            elif provider == "opencode":
+                cls._instances[key] = OpenCodeClient(temperature=temp)
             elif provider == "fallback":
                 chain = cls.get_fallback_chain()
                 if not chain:

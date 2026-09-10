@@ -287,3 +287,5 @@
 | module-092 | Planner | [PLAN] 数据深化轮：--repeat 3 多轮采样（消除单次采样边界）+ 分阶段遥测（LLM/工具/编排三段拆解）+ 冷启动（图编译 import 计时 + cold/warm 比值） |
 | module-092 | Planner | [PLAN] 关键事实：usage 走 llm.client._record_usage 逐次上报（eval 层可拦截拿逐次 prompt/completion）；编排开销=总时长−ΣLLM−Σ工具=StateGraph 归因钥匙 |
 | module-092 | Planner | [HANDOFF] 交 Developer：先冒烟 --repeat 1 --sample 2，再正式 --repeat 3；顺带修 091 遗留 3 docstring；多轮下若 P95 结论翻转如实提请复核 ADR-0020 |
+| module-093 | 编排者 | [DEV] OpenCode Zen provider 接入解 092 跑批阻塞：OpenCodeClient（X-Session-Id 破免费层 MissingSessionID）+ config +3 字段 + 10 单测；全量 1800/0/3；agent/main 零 diff，src/config.py 纯增量偏离已申报 |
+| module-093 | 探针 | [PROBE] Zen 免费模型实测：mimo-v2.5-free 配额耗尽 429 / deepseek-v4-flash-free 上游不可用；可用=nemotron-3.5-lightning-free、nemotron-3-ultra-free；免费层需 X-Session-Id 头（UA 伪装无效） |
