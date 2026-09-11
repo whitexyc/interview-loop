@@ -8,13 +8,21 @@
 
 | 文件 | 用途 | AST |
 |------|------|-----|
-| `agent/ctx_manager.py` | WP-A 预算观测（estimate_tokens/classify_context/observe_context）+ WP-B 历史压缩（clear_tool_results/compact_history/compress_view）；视图模式，零侵入 | 23（≤200）|
-| `eval/ctx_tasks.py` | WP-C 对拍任务集：3 固定剧本 × 18 轮连续追问，每轮 answer_points，复用 066 判定器口径 | 6 |
-| `eval/ctx_parity.py` | WP-C 三臂裁决：off/clearing/clearing_compaction 逐臂跑同一剧本，复用 066 outcome_pass + save_agent_eval_run 落库，三判据逐值裁定 | 34 |
+| `agent/ctx_manager.py` | WP-A 预算观测（estimate_tokens/classify_context/observe_context）+ WP-B 历史压缩（clear_tool_results/compact_history/compress_view）；视图模式，零侵入 | 150（≤200）|
+| `eval/ctx_tasks.py` | WP-C 对拍任务集：3 固定剧本 × 18 轮连续追问，每轮 answer_points，复用 066 判定器口径 | 24 |
+| `eval/ctx_parity.py` | WP-C 三臂裁决：off/clearing/clearing_compaction 逐臂跑同一剧本，复用 066 outcome_pass + save_agent_eval_run 落库，三判据逐值裁定 | 173 |
 | `tests/agent/test_ctx_manager.py` | WP-A/B 单测：估算边界/五桶/占位符/块完整性/默认关零行为/视图不改原列表（19 项） | — |
 | `tests/agent/test_ctx_compress_wiring.py` | 两环路接入集成测试：compress_view 为副本、本地 messages 完整、ctx_compress span 触发（2 项） | — |
 
-> ctx_tasks.py + ctx_parity.py 合计 AST = 40（≤350，plan §5 预申请）。
+> ctx_tasks.py + ctx_parity.py 合计 AST = 198（≤350，plan §5 预申请）。
+>
+> **勘误（review-report MID-1）**：初报 23/6/34 系顶层语句口径误用（`len(tree.body)`），
+> 项目红线口径为 ast.walk 全语句——修复轮后实测 152/24/174（合计 198），两种口径下红线均满足。
+>
+> **修复轮（Reviewer PASS 附条件后，编排者按其处方执行）**：LOW-1 `_is_cjk` docstring
+> 系数 1.5→0.8 对齐实际；LOW-2 `_git_commit` 吞异常补 `logger.debug` 留痕；LOW-3
+> `_summarize_rounds` 截断 80/120 提常量；MID-2 ctx-report §3 补 ASCII 密集文本低估
+> 诚实边界（ratio 0.81）。定向单测 21 全绿、红线全空。
 
 ## 改动文件（均 ≤20 行接入 / 纯增量）
 

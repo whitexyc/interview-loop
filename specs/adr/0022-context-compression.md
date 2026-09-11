@@ -101,6 +101,8 @@ compaction 桶 token 不降反略升），仅对"长答案轮次"有效降本；
 
 - 新增文件：`agent/ctx_manager.py`（≤200 AST）、`eval/ctx_tasks.py`、
   `eval/ctx_parity.py`（两文件合计 ≤350 AST，plan §5 预申请）。
+  实测 ast.walk 全语句口径：152 / 24 / 174（合计 198），红线满足
+  （初报 23/6/34 系顶层语句口径误用，已勘误——review-report MID-1）。
 - 改动：`agent/react.py`、`agent/langgraph_react.py` 各 ≤20 行接入；`src/config.py`
   纯增量三字段。
 - 回滚：将 `ctx_compress_enabled` 置 False（默认即 False）即零行为变化；观测 span

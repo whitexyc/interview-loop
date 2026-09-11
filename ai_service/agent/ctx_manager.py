@@ -47,6 +47,10 @@ _ASCII_CHARS_PER_TOKEN = 4.0
 # clearing 占位符（只换 content 不动结构；{name}=工具名，可 tool_call_logs 回溯）
 _CLEARED_MARKER = "[tool result cleared: {name}; re-invoke the tool to retrieve]"
 
+# 摘要截断长度（review-report LOW-3：魔法数字提常量）
+_SUMMARY_USER_CHARS = 80
+_SUMMARY_ASSISTANT_CHARS = 120
+
 # compaction 规则式摘要前缀
 _SUMMARY_PREFIX = "[context summary:"
 
@@ -58,7 +62,7 @@ def _is_cjk(ch: str) -> bool:
         ch: 单字符
 
     Returns:
-        True=CJK（按 1.5 chars/token 估算）；False=其余（按 4 chars/token）
+        True=CJK（按 0.8 chars/token 估算）；False=其余（按 4 chars/token）
     """
     o = ord(ch)
     return (
@@ -251,9 +255,9 @@ def _summarize_rounds(rounds: list) -> str:
         q, a = "", ""
         for m in r:
             if m.get("role") == "user" and not q:
-                q = _content_text(m)[:80]
+                q = _content_text(m)[:_SUMMARY_USER_CHARS]
             elif m.get("role") == "assistant" and not a:
-                a = _content_text(m)[:120]
+                a = _content_text(m)[:_SUMMARY_ASSISTANT_CHARS]
         if q:
             parts.append(f"用户问「{q}」")
         if a:

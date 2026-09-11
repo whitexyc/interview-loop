@@ -301,7 +301,8 @@ def _git_commit() -> str:
     try:
         from eval.golden.golden_retrieval import get_git_commit
         return get_git_commit()
-    except Exception:
+    except Exception:  # noqa: BLE001 —— eval 层容错：失败返回空串不阻塞跑批（review LOW-2 补留痕）
+        logger.debug("git commit 获取失败", exc_info=True)
         return ""
 
 
