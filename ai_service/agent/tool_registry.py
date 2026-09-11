@@ -41,6 +41,16 @@ logger = logging.getLogger(__name__)
 # 异常自动重试 1 次。排除清单比白名单简单：未来新工具默认继承重试。
 _NO_RETRY_TOOLS = {"generate_answer", "verify_answer"}
 
+# 工具超时分档表（2026-09-11，依据 092 遥测实测）：生成/验证类工具内部含完整
+# LLM 生成，15s 档实测恒贴上限（qwen 下 p50=15012ms）；re_search（改写重检）
+# 亦频繁撞线。只读检索类保持 15s（实测 p50 8.7~10s 未撞线）。经
+# settings.tool_timeout_tiering 开关启用，默认 False 零行为变化。
+_TOOL_TIMEOUT_TIERS = {
+    "generate_answer": 40.0,
+    "verify_answer": 40.0,
+    "re_search": 30.0,
+}
+
 # module-083（WP-B）：幂等启用清单——只读检索 7 工具（用户确认口径）。
 # generate_answer / verify_answer / note_to_self 排除：每次调用语义不同
 # （生成/验证结果随 docs 变化）或已有内容级去重（module-041 scratchpad）。
@@ -325,6 +335,13 @@ class ToolRegistry:
         module-084：no_retry 透传（缺省 False，073 自动重试语义不变；外部
         MCP 副作用工具传 True 关闭自动重放）。
         """
+        # 工具超时分档（2026-09-11 运维台账）：092 遥测实测 generate_answer/
+        # verify_answer（内部含完整 LLM 生成）在 15s 档恒贴上限、re_search 亦
+        # 频繁撞线——分档给重工具放宽；开关默认 False 零行为变化（PW_TOOL_
+        # TIMEOUT_TIERING），显式传 timeout 的调用方优先级最高
+        if timeout is None and settings.tool_timeout_tiering \
+                and name in _TOOL_TIMEOUT_TIERS:
+            timeout = _TOOL_TIMEOUT_TIERS[name]
         self._tools[name] = AgentTool(name, description, args_schema, func,
                                       group=group, timeout=timeout,
                                       approval=approval, no_retry=no_retry)

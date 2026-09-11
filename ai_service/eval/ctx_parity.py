@@ -38,7 +38,7 @@ import agent.langgraph_react as lg_mod
 import agent.ctx_manager as cm
 from agent.react import ReactContext, _build_messages, react_loop
 from agent.ctx_manager import classify_context
-from eval import agent_tasks as at
+from eval import agent_tasks as at, parity_events
 from eval.ctx_tasks import load_ctx_scripts
 
 logger = logging.getLogger("ctx_parity")
@@ -166,19 +166,27 @@ async def _run_script(arm: str, script: dict, fixture: bool,
             fixture_client._cur_points = r["answer_points"]
         ctx = ReactContext(r["q"], identity=EVAL_IDENTITY, history=history)
         answer = ""
+        events: list = []
         try:
-            async for evt in react_loop(ctx, _build_messages(ctx),
-                                        settings.max_agent_tools):
-                if evt.get("type") == "done":
-                    answer = evt.get("answer", "") or ""
+            with parity_events.capture_tool_events(events):
+                async for evt in react_loop(ctx, _build_messages(ctx),
+                                            settings.max_agent_tools):
+                    if evt.get("type") == "done":
+                        answer = evt.get("answer", "") or ""
         except Exception as e:  # 单轮失败不中断整剧本，记空答案 + fail_reason
             logger.error("[%s/%s] 轮次失败: %s", arm, script["id"], e)
             answer = ""
         pseudo = {"expected_tools": [], "answer_points": r["answer_points"]}
+        hits = parity_events.answer_point_hits(r["answer_points"], answer)
         per_round.append({
             "q": r["q"], "answer_points": r["answer_points"],
             "answer": (answer or "")[:300],
             "pass": at.outcome_pass(pseudo, answer, []),
+            # 092 记录维度增强（2026-09-11 补齐遗留 minor）：答案质量细节 +
+            # 异常事件，与 092 口径一致
+            "answer_points_hit": hits,
+            "failed_points": parity_events.failed_points(hits),
+            "telemetry": {"events": parity_events.summarize_events(events)},
         })
         history.append({"role": "user", "content": r["q"]})
         if answer:

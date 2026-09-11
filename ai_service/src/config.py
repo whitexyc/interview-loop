@@ -186,6 +186,12 @@ class Settings(BaseSettings):
     # 环境变量：PW_TOOL_DEFAULT_TIMEOUT。
     tool_default_timeout: float = 15.0
 
+    # 工具超时分档（2026-09-11）：依据 092 遥测实测——generate_answer/
+    # verify_answer（内部含 LLM 生成）在统一 15s 档恒贴上限、re_search 频繁
+    # 撞线；开启后重工具按 _TOOL_TIMEOUT_TIERS 分档放宽（40/40/30s），只读
+    # 检索类不变。默认 False 零行为变化。环境变量：PW_TOOL_TIMEOUT_TIERING。
+    tool_timeout_tiering: bool = False
+
     # 工具幂等（module-083 WP-B）：同参只读检索二次调用拦截（执行成功后才记
     # 指纹，指纹集合每请求独立、跨请求不共享）；false 回退"同参每次执行"存量
     # 行为（逃生口）。
