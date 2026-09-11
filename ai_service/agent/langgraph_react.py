@@ -37,6 +37,7 @@ from agent.react import (
     ReactContext, _assistant_message, _build_messages,
     advance_phase, execute_tool_with_log, schemas_for_phase, _phase_budget,
 )
+from agent.ctx_manager import compress_view, observe_context
 from agent.reflector import reflector
 from agent.tool_registry import ToolRegistry, registry
 
@@ -98,7 +99,15 @@ async def llm_call(state: ReActGraphState) -> dict:
     client = LLMFactory.get_client()
     # module-058（ADR-0012 方案 A）：按 ctx.phase 阶段选工具 schema
     #（与手写 react_loop 共用 schemas_for_phase，防两处漂移）
-    response = await client.chat_with_tools(messages, schemas_for_phase(tools, ctx))
+    # module-093 WP-A/B：预算观测（默认开，零行为变化）+ 历史压缩（默认关，
+    # 超阈才对视图副本 clearing/compaction，本地 messages 保持完整 D1）
+    schemas = schemas_for_phase(tools, ctx)
+    view, ctx_meta = compress_view(messages, schemas)
+    observe_context(messages, schemas, where="langgraph_llm_call")
+    if ctx_meta.get("triggered"):
+        tracing.record_span("ctx_compress", "observe",
+                            decision=json.dumps(ctx_meta, ensure_ascii=False))
+    response = await client.chat_with_tools(view, schemas)
 
     content = response.get("content", "") or ""
     if content:

@@ -303,3 +303,5 @@
 | module-092 | Reviewer | [REVIEW] 记录维度增强(parity_events) PASS 0阻塞/3低:事件5/5全覆盖+裸失败不误判;口径一致225例0不一致;emit-warning符铁律5;capture双路径摘handler;JSONL b3/4齐;AST 198/118/43(余量2≠195);单测67+全量1849/0/0/3;红线零diff |
 | module-092 | Tester | [TEST] 最终验收(附条件): AST198/118/43≤200; 单测67; 全量1849/0/0/3; 红线agent/src/main.py空; AC27/28+1; 新字段answer_points_hit/failed_points/telemetry.events落库验证(id24/30); test-report.md |
 | module-092 | Tester | [REGRESSION] 全量1849/0/0/3零新增失败; T1-T9真实PG全过(T1 30行/T2 12-12/T3 3-3/T4±30%/T7批3·4齐/T8一致/T9 4批均值0.8882·2-12超阈); 冒烟端到端+新trace全字段 | |
+
+| module-093 | Developer | [DEV] module-093 上下文工程：ctx_manager.py(预算观测+历史压缩,23 AST≤200)+eval/ctx_tasks.py(3剧本×18轮)+eval/ctx_parity.py(三臂落库 module=093)+单测21项全绿+全量1870/0/3零新增失败；红线 rag/092资产/main.py零diff；ADR-0022 | |

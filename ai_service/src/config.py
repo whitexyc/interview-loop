@@ -196,6 +196,20 @@ class Settings(BaseSettings):
     # 工具全 "auto" 短路零 DB 开销。false 回退"required 也直接执行"（逃生口）。
     tool_approval_enabled: bool = True
 
+    # 上下文工程（module-093）：预算观测（默认开，零行为变化）+ 历史压缩
+    # （默认关，D5 行为开关默认 false → 存量测试逐字不变，全量回归零破坏）。
+    # 两环路共用 agent/ctx_manager.compress_view（手写/react langgraph 各自
+    # 调 LLM 前调用，D4 对拍公平），传入副本、本地 messages 保持完整（D1）。
+    #   ctx_compress_enabled —— 压缩总开关（PW_CTX_COMPRESS_ENABLED，默认 false
+    #     ；true 时超阈值先 clearing 再 compaction，均只改传给 LLM 的视图副本）；
+    #   ctx_token_threshold —— history 桶触发线（PW_CTX_TOKEN_THRESHOLD，默认
+    #     24000 est_tokens；clearing 后若仍超阈才 compaction）；
+    #   ctx_keep_recent —— clearing/compaction 保留最近条数（PW_CTX_KEEP_RECENT，
+    #     默认 6：clearing 保留最近 6 条 tool 消息原文 / compaction 保留最近 6 条）。
+    ctx_compress_enabled: bool = False
+    ctx_token_threshold: int = 24000
+    ctx_keep_recent: int = 6
+
     # 长期记忆（module-033/035）：提取 / 去重 / 动态K 阈值（参考 llm-push/19-Agent记忆管理）
     memory_importance_threshold: float = 0.6    # 提取事实 importance < 0.6 丢弃
     # module-035 校准：真实 bge-m3 同义改写 cosine≈0.88，0.95 太严导致漏去重 → 下调 0.85

@@ -39,6 +39,7 @@ from src import tasks  # module-089 预算账本（budget_exceeded/budget_break�
 from llm.client import LLMFactory
 from agent.reflector import reflector
 from agent.tool_registry import ToolRegistry, registry
+from agent.ctx_manager import compress_view, observe_context
 
 logger = logging.getLogger(__name__)
 
@@ -507,7 +508,15 @@ async def react_loop(
             break
         # module-058（ADR-0012 方案 A）：按 ctx.phase 阶段选工具 schema
         #（检索阶段 7 个 / 生成阶段 4 个；开关 false → 全量，零回归）
-        response = await client.chat_with_tools(messages, schemas_for_phase(tools, ctx))
+        # module-093 WP-A/B：预算观测（默认开，零行为变化）+ 历史压缩（默认
+        # 关，超阈才对视图副本 clearing/compaction，本地 messages 保持完整 D1）
+        schemas = schemas_for_phase(tools, ctx)
+        view, ctx_meta = compress_view(messages, schemas)
+        observe_context(messages, schemas, where="react_loop")
+        if ctx_meta.get("triggered"):
+            tracing.record_span("ctx_compress", "observe",
+                                decision=json.dumps(ctx_meta, ensure_ascii=False))
+        response = await client.chat_with_tools(view, schemas)
         tool_calls = response.get("tool_calls", []) or []
         content = response.get("content", "") or ""
 
