@@ -57,4 +57,4 @@ PW_LLM_PROVIDER=opencode .venv/Scripts/python.exe -u -X utf8 -m ...
 | Planner | plan + AC 产出 | 2026-09-11 |
 | Developer | | |
 | Reviewer | | |
-| Tester | | |
+| Tester | PASS（附 1 项 minor 非阻塞：092 增强字段未继承） | 2026-09-11 |

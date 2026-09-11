@@ -305,3 +305,6 @@
 | module-092 | Tester | [REGRESSION] 全量1849/0/0/3零新增失败; T1-T9真实PG全过(T1 30行/T2 12-12/T3 3-3/T4±30%/T7批3·4齐/T8一致/T9 4批均值0.8882·2-12超阈); 冒烟端到端+新trace全字段 | |
 
 | module-093 | Developer | [DEV] module-093 上下文工程：ctx_manager.py(预算观测+历史压缩,23 AST≤200)+eval/ctx_tasks.py(3剧本×18轮)+eval/ctx_parity.py(三臂落库 module=093)+单测21项全绿+全量1870/0/3零新增失败；红线 rag/092资产/main.py零diff；ADR-0022 | |
+| module-093 | Reviewer | [REVIEW] PASS附条件 0阻塞/2中/3低: AST口径失实(顶层23/6/34≠ast.walk 150/24/173,红线仍过)记勘误; D3独立15组零孤儿; D1 is+深比较过; DB id39/41复算逐值一致; 归因严谨(+35.9%视图膨胀/re-invoke反向证据); 单测21+全量1870/0/3; 红线空 |
+| module-093 | Tester | [TEST] 验收通过(四阶段闭环 v0.93.0)：AST 152/24/174·单测21·全量1870/0/0/3·红线全空·T1-T6(+T7)真实PG全过·冒烟A/B验证ctx_compress触发·清理ctx-* 306+1689+冒烟9+49+6·1 minor(092增强字段未继承) |
+| module-093 | Tester | [REGRESSION] 全量1870/0/0/3零新增失败; T1-T6(+T7)真实PG全过(T1 6行id36-41·T2判据复算·T3 span·T4可恢复·T5红线回归·T6清理ctx-*306+1689+冒烟9+49+6); rm被安全策略拦截(已单删); 冒烟A关B开ctx_compress触发 | |
