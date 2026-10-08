@@ -43,18 +43,20 @@ flowchart LR
 
 ## Live demo
 
-Screenshots below are **captured from the running system**, not mockups. Asking
-"what is the Region partition mechanism of G1 GC", the left panel shows the live
+The recording and screenshots below are **captured from the running system**, not mockups.
+Asking "how does the draft model in speculative decoding work", the left panel shows the live
 agentic pipeline while the right side streams an answer with per-sentence citations.
+
+![live demo](images/demo/demo-loop.gif)
 
 | Live pipeline | Pipeline finished | Retrieval hits & citations |
 |---|---|---|
 | ![pipeline](images/demo/demo-01-pipeline-idle.png) | ![done](images/demo/demo-02-pipeline-done.png) | ![citations](images/demo/demo-03-retrieval-and-citations.png) |
 
-Observable intermediate states: **hybrid retrieval recalled 11 passages → rerank kept 5
-(filtered 6) → self-reflection judged the evidence "insufficient" and triggered a second
-retrieval round → answer generated with sources cited down to the note's section and
-question number.**
+Observable intermediate states: **intent classification (knowledge-base, 98% confidence) →
+hybrid retrieval recalled 8 passages (scores 1.000 / 0.959 / 0.919 / 0.860 / 0.842) →
+rerank kept 5 of 8 (filtered 3) → self-reflection judged the evidence "sufficient" →
+answer generated with sources cited down to the note's section and question number.**
 
 ## Architecture
 
