@@ -1000,6 +1000,18 @@ async def submit_feedback(request: FeedbackRequest, fastapi_req: Request):
             await session.commit()
         logger.info("反馈落库: message_id=%d, rating=%d, identity=%s",
                     request.message_id, request.rating, identity)
+        # 反向闭环（module-080）：👎 且带题目 → 记一条待学笔记，供后续抓取优先级提升。
+        # 刻意不改响应体（tests/test_feedback.py 断言 resp.json() == {"status": "ok"}），
+        # 且 fail-open：录入失败不影响反馈落库。
+        if request.rating == -1 and request.topic:
+            try:
+                from rag.memory.weak_topics import save_weak_topic
+                await save_weak_topic(topic=request.topic,
+                                      context=request.comment or "",
+                                      identity=identity)
+                logger.info("待学笔记已录入: topic=%s", request.topic[:30])
+            except Exception as e:
+                logger.warning("待学笔记录入失败，fail-open: %s", e)
         return {"status": "ok"}
     except Exception as e:
         logger.error("反馈落库失败: %s", e, exc_info=True)

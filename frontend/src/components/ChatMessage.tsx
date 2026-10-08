@@ -49,6 +49,8 @@ interface ChatMessageProps {
   } | null;
   /** 异步 verify 进行中（module-060：答案先交付、验证后到，轮询 pending 期间） */
   verifying?: boolean;
+  /** 该回答对应的提问（👎 时作为 topic 上报，供后端录入待学笔记） */
+  question?: string;
 }
 
 /**
@@ -137,6 +139,7 @@ export default function ChatMessage({
   isStreaming,
   verifiedClaims,
   verifying,
+  question,
 }: ChatMessageProps) {
   const isUser = role === 'user';
 
@@ -155,7 +158,16 @@ export default function ChatMessage({
     if (messageId === undefined || rating !== null || submitting !== null) return;
     setSubmitting(value);
     try {
-      await submitFeedback({ message_id: messageId, rating: value === 'up' ? 1 : -1 });
+      const payload: { message_id: number; rating: 1 | -1; topic?: string } = {
+        message_id: messageId,
+        rating: value === 'up' ? 1 : -1,
+      };
+      // 👎 且已知提问内容 → 一并上报题目，后端录入待学笔记（module-080 反向闭环）。
+      // 只在有值时带上 topic，避免污染既有 payload 形状（既有单测按精确参数断言）。
+      if (value === 'down' && question?.trim()) {
+        payload.topic = question.trim().slice(0, 200);
+      }
+      await submitFeedback(payload);
       ratedMessages.set(messageId, value);
       persistRatedMessages();
       setRating(value);

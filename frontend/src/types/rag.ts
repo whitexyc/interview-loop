@@ -220,4 +220,6 @@ export interface FeedbackRequest {
   rating: 1 | -1;
   /** 可选评论（后端限制 ≤500 字符；前端当前不采集，留待后续扩展） */
   comment?: string;
+  /** 题目/主题（可选）：👎 时后端据此录入待学笔记，形成「答不好 → 薄弱点」闭环 */
+  topic?: string;
 }

@@ -76,6 +76,9 @@ class FeedbackRequest(BaseModel):
     rating: int = Field(..., description="评分：1=赞，-1=踩")
     comment: Optional[str] = Field(default=None, max_length=500,
                                    description="补充评论（可选，≤500）")
+    topic: Optional[str] = Field(default=None, max_length=200,
+                                 description="题目/主题（可选；👎 时用于录入待学笔记，"
+                                             "不传则不产生薄弱点）")
 
     @field_validator("rating")
     @classmethod

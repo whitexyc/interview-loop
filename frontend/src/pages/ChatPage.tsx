@@ -628,6 +628,11 @@ export default function ChatPage() {
           {messages.map((msg, i) => {
             const isLastAssistant = msg.role === 'assistant' && i === messages.length - 1;
             const isStreaming = loading && isLastAssistant && msg.content.length > 0;
+            // 该回答对应的提问：向前找最近一条 user 消息。👎 时作为 topic 上报，
+            // 后端据此录入待学笔记（module-080 反向闭环）
+            const question = msg.role === 'assistant'
+              ? [...messages.slice(0, i)].reverse().find((m) => m.role === 'user')?.content
+              : undefined;
             return (
               <ChatMessage
                 key={i}
@@ -639,6 +644,7 @@ export default function ChatPage() {
                 onCitationClick={handleCitationClick}
                 messageId={msg.id}
                 isStreaming={isStreaming}
+                question={question}
               />
             );
           })}
