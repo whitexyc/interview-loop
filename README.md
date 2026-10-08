@@ -189,10 +189,15 @@ flowchart LR
 
 ```bash
 docker compose up -d
-docker compose ps          # 等 postgres 变 healthy
+docker compose ps          # 等 postgres / redis 变 healthy
+python scripts/doctor.py   # 环境自检：21 项检查，附修复建议
 ```
 
 首次会编译 Apache AGE（约 3–8 分钟，之后走镜像缓存）。
+
+> **先跑 `doctor.py`**。它覆盖的都是真实踩过的坑，其中几条的报错极具误导性 ——
+> 例如 `no_proxy` 含 `[::1]` 会让 httpx 崩溃，表现为「检索正常但回答生成失败」；
+> JWT 密钥两侧不一致不会报错，而是**静默**把所有请求按 IP 隔离。
 
 > 这个镜像不是官方现成的：没有任何官方镜像同时提供 pgvector 与 Apache AGE，
 > 而本项目检索的图谱通道依赖 AGE、向量通道依赖 pgvector，所以基于
@@ -247,6 +252,10 @@ python scripts/sync_notes.py \
 走 `/ai/rag/documents/upload` 管线（解析 → 清洗 → 三级去重 → 父子分块 → 本地嵌入 → 入库），
 **幂等可重复执行** —— 已入库的笔记按内容哈希去重，只补新增与改动。
 
+> 批量灌库会撞上服务的 IP 限流（默认 20 次/60 秒）：脚本已按 `retry_after` 自动退避，
+> 但灌几百篇时建议临时调高阈值 —— 在 `ai_service/.env` 设
+> `PW_RATE_LIMIT_MAX_REQUESTS=200` 后重启 AI 层。
+
 ### 5. 出题 / 面试平台（可选）
 
 ```bash
@@ -271,10 +280,10 @@ interview-loop/
 ├── backend/               # Java 业务层（会话 · JWT · 简历 · 文档）
 ├── frontend/              # React 前端（问答 · 知识库管理 · 简历 · 反馈）
 ├── interview-admin/       # Spring Boot 出题/面试平台（含自带 compose 与 Dockerfile）
-├── scripts/               # sync_notes.py —— 笔记批量入库入口
+├── scripts/               # sync_notes.py（笔记入库）+ doctor.py（环境自检）
 ├── docker/postgres/       # pgvector + Apache AGE 自建镜像
 ├── specs/                 # 90+ 模块文档 + 23 份 ADR
-├── images/                # 机制图解（检索 / 记忆 / 幻觉检测 / 分块 …）
+├── images/                # 机制图解 + 闭环实测截图
 └── METRICS.md             # 全部量化指标（单一事实源）
 ```
 
@@ -294,9 +303,15 @@ interview-loop/
 | `PW_MCP_TOKEN` | MCP HTTP 模式 token（未设置拒绝启动） | — |
 | `PW_RETRIEVAL_FUSION_MODE` | 检索融合：`rrf` / `hybrid` / `weighted` | `rrf` |
 | `PW_VERIFY_ASYNC` | 幻觉验证异步化 | `true` |
+| `PW_RATE_LIMIT_MAX_REQUESTS` | IP 限流阈值（批量灌笔记时调高） | `20`（次/60 秒）|
+| `PW_FEEDBACK_INTERNAL_TOKEN` | 反向闭环扫描器访问 Java 低分题端点的内部 token | — |
 
 > ⚠️ `PW_JWT_SECRET` 与 Java 侧不一致时**不会报错**，而是静默把所有请求按匿名（client_ip）
 > 处理 —— 表现为「登录了但长期记忆不按用户隔离」。这是最容易踩的坑。
+
+> ⚠️ 降级链首位建议放 **flash 档模型**：自我反思的充分性判定用 15s 硬超时包住**整条链**，
+> 推理模型（长上下文下 reasoning 可达数千字符）会让整条链被 `asyncio.wait_for` 取消，
+> 连降级到下一个供应商的机会都没有。实测 `deepseek-v4.1-flash`（opencode Go）2.8s 返回。
 
 ---
 
