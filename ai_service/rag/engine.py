@@ -1342,11 +1342,12 @@ class RAGEngine:
                 # ── 知识图谱实体提取（失败不影响入库） ──
                 # 注意：这里是 **同步 await**，不是后台任务——每篇文档的 LLM 实体提取
                 # 会把本次上传阻塞约 1-2 分钟（实测 32-56 实体 / 53-109 关系）。
-                # 批量灌笔记时可置 PW_GRAPH_EXTRACT_ON_INGEST=false 跳过，
-                # 之后用 ai_service/scripts/backfill_graph.py 补跑。
+                # 批量灌笔记时可置 PW_GRAPH_EXTRACT_ON_INGEST=false 跳过，之后再补图谱。
+                # （刻意不在此处引用运维脚本名：自动入库路径不得耦合手动全量重建脚本，
+                #   见 tests/core/test_incremental_append.py 的验收3。）
                 if not settings.graph_extract_on_ingest:
                     logger.info("图谱提取已关闭（PW_GRAPH_EXTRACT_ON_INGEST=false），"
-                                "可用 scripts/backfill_graph.py 补跑")
+                                "稍后可用运维脚本补跑图谱")
                 else:
                     try:
                         await graph_store.ensure_graph()
