@@ -70,18 +70,50 @@ def parse_vault(spec: str) -> tuple[str, Path]:
     return label, root
 
 
-def upload(client: httpx.Client, api: str, path: Path, root: Path, label: str) -> tuple[bool, str]:
-    """上传单个笔记，返回 (是否成功, 说明)。"""
-    source = f"{label}:{path.relative_to(root).as_posix()}"
+def retry_after_seconds(resp: httpx.Response) -> float:
+    """从 429 响应里取应等待的秒数：优先响应体 retry_after，其次 Retry-After 头。"""
     try:
-        with path.open("rb") as fh:
-            resp = client.post(
-                api + UPLOAD_PATH,
-                files={"file": (path.name, fh, "text/markdown")},
-                data={"title": path.stem, "source": source},
-            )
-    except httpx.HTTPError as exc:
-        return False, f"请求失败: {exc}"
+        body = resp.json()
+        if isinstance(body, dict) and body.get("retry_after") is not None:
+            return max(float(body["retry_after"]), 1.0)
+    except ValueError:
+        pass
+    header = resp.headers.get("Retry-After")
+    if header and header.strip().isdigit():
+        return max(float(header.strip()), 1.0)
+    return 60.0
+
+
+def upload(client: httpx.Client, api: str, path: Path, root: Path, label: str,
+           max_retries: int = 5) -> tuple[bool, str]:
+    """上传单个笔记，返回 (是否成功, 说明)。
+
+    服务端按 IP 做滑动窗口限流（60s）。批量同步的请求速率远高于聊天，必然会撞
+    429 —— 尤其当笔记已被哈希去重时（每个文件只花 2-3 秒，速率更高）。
+    因此这里按服务端给出的 retry_after 退避重试，而不是把限流当失败上报。
+    """
+    source = f"{label}:{path.relative_to(root).as_posix()}"
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            with path.open("rb") as fh:
+                resp = client.post(
+                    api + UPLOAD_PATH,
+                    files={"file": (path.name, fh, "text/markdown")},
+                    data={"title": path.stem, "source": source},
+                )
+        except httpx.HTTPError as exc:
+            return False, f"请求失败: {exc}"
+
+        if resp.status_code == 429:
+            if attempt > max_retries:
+                return False, f"HTTP 429：重试 {max_retries} 次后仍被限流"
+            wait = retry_after_seconds(resp)
+            print(f"      触发限流，等待 {wait:.0f}s 后重试（{attempt}/{max_retries}）", flush=True)
+            time.sleep(wait + 0.5)
+            continue
+        break
 
     if resp.status_code != 200:
         return False, f"HTTP {resp.status_code}: {resp.text[:160]}"
@@ -110,6 +142,8 @@ def main() -> int:
     parser.add_argument("--api", default=DEFAULT_API, help=f"AI 服务地址（默认 {DEFAULT_API}）")
     parser.add_argument("--limit", type=int, default=0, help="每个 vault 最多处理多少个文件（0=不限）")
     parser.add_argument("--timeout", type=float, default=600.0, help="单文件上传超时秒数")
+    parser.add_argument("--max-retries", type=int, default=5,
+                        help="单文件被限流（429）时的最大重试次数，按服务端 retry_after 退避")
     parser.add_argument("--dry-run", action="store_true", help="只列出将要上传的文件")
     args = parser.parse_args()
 
@@ -134,7 +168,8 @@ def main() -> int:
     # （如 `[::1]`）时 httpx 解析环境代理会抛 InvalidURL，故显式忽略环境代理。
     with httpx.Client(timeout=args.timeout, trust_env=False) as client:
         for index, (label, root, note) in enumerate(jobs, start=1):
-            success, detail = upload(client, args.api, note, root, label)
+            success, detail = upload(client, args.api, note, root, label,
+                                     max_retries=args.max_retries)
             if success:
                 ok += 1
                 status = "ok"
