@@ -1339,30 +1339,38 @@ class RAGEngine:
                 # 缓存是优化层，失效失败降级（delete_by_prefix 内部 catch，返回 False）
                 await cache.delete_by_prefix("rag:retrieve:")
 
-                # ── 知识图谱实体提取（异步，失败不影响入库） ──
-                try:
-                    await graph_store.ensure_graph()
-                    extraction = await graph_extractor.extract_from_document(content)
-                    entities = extraction.get("entities", [])
-                    relations = extraction.get("relations", [])
-                    parent_id = parent_objs[0].id if parent_objs else None
+                # ── 知识图谱实体提取（失败不影响入库） ──
+                # 注意：这里是 **同步 await**，不是后台任务——每篇文档的 LLM 实体提取
+                # 会把本次上传阻塞约 1-2 分钟（实测 32-56 实体 / 53-109 关系）。
+                # 批量灌笔记时可置 PW_GRAPH_EXTRACT_ON_INGEST=false 跳过，
+                # 之后用 ai_service/scripts/backfill_graph.py 补跑。
+                if not settings.graph_extract_on_ingest:
+                    logger.info("图谱提取已关闭（PW_GRAPH_EXTRACT_ON_INGEST=false），"
+                                "可用 scripts/backfill_graph.py 补跑")
+                else:
+                    try:
+                        await graph_store.ensure_graph()
+                        extraction = await graph_extractor.extract_from_document(content)
+                        entities = extraction.get("entities", [])
+                        relations = extraction.get("relations", [])
+                        parent_id = parent_objs[0].id if parent_objs else None
 
-                    for ent in entities:
-                        name = ent.get("name", "").strip()
-                        ent_type = ent.get("type", "concept")
-                        if name and parent_id:
-                            await graph_store.upsert_entity(name, ent_type, int(parent_id))
+                        for ent in entities:
+                            name = ent.get("name", "").strip()
+                            ent_type = ent.get("type", "concept")
+                            if name and parent_id:
+                                await graph_store.upsert_entity(name, ent_type, int(parent_id))
 
-                    for rel in relations:
-                        src = rel.get("source", "").strip()
-                        tgt = rel.get("target", "").strip()
-                        if src and tgt:
-                            await graph_store.upsert_relation(src, tgt)
+                        for rel in relations:
+                            src = rel.get("source", "").strip()
+                            tgt = rel.get("target", "").strip()
+                            if src and tgt:
+                                await graph_store.upsert_relation(src, tgt)
 
-                    logger.info("Graph: extracted %d entities, %d relations",
-                                len(entities), len(relations))
-                except Exception as e:
-                    logger.warning("Graph 提取/写入失败，跳过: %s", e)
+                        logger.info("Graph: extracted %d entities, %d relations",
+                                    len(entities), len(relations))
+                    except Exception as e:
+                        logger.warning("Graph 提取/写入失败，跳过: %s", e)
 
                 return {
                     "id": parent_objs[0].id,

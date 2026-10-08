@@ -158,6 +158,13 @@ class Settings(BaseSettings):
     rate_limit_max_requests: int = 20
     rate_limit_window_seconds: int = 60
 
+    # 入库时是否同步做知识图谱实体提取（LLM 调用）。默认 true = 现状。
+    # 注意 engine.add_document 里是 **同步 await**，每篇文档会阻塞上传约 1-2 分钟
+    # （实测 32-56 实体 / 53-109 关系），批量灌笔记时总时长会被它主导。
+    # 置 false 可跳过，之后用 ai_service/scripts/backfill_graph.py 补跑。
+    # 环境变量：PW_GRAPH_EXTRACT_ON_INGEST
+    graph_extract_on_ingest: bool = True
+
     # 工具调用明细落库（module-066 / ADR-0017 决策 2）：react 循环每次实际
     # 执行工具落一行 tool_call_logs（trace_id/工具名/参数/成败/预览/耗时），
     # 补 request_logs 缺工具调用明细的核心缺口。默认 true（与 request_logs
