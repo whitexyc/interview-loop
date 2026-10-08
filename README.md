@@ -297,6 +297,20 @@ interview-loop/
 
 ---
 
+## 致谢与第三方代码
+
+`interview-admin/`（出题 / 面试平台）来自第三方开源项目 **「码上面试平台」**：
+
+| | |
+|---|---|
+| 后端 | <https://github.com/lishuangqiang/AI-Meeting> |
+| 前端 | <https://github.com/lishuangqiang/AI-Meeting-Frontend> |
+| 许可 | MIT License, Copyright (c) 2026 xunzhi-agent-team |
+
+原文保留在 [`interview-admin/LICENSE`](interview-admin/LICENSE)（MIT 要求保留版权声明）。
+本仓库在其基础上做了接入改造：`KnowledgeBaseClient` 对接本仓库 AI 层的
+`POST /ai/rag/search`、monorepo 路径适配、凭据全部外置为环境变量。
+
 ## 开源协作
 
 欢迎 Issue / PR，详见 [CONTRIBUTING.md](CONTRIBUTING.md) 与 [SECURITY.md](SECURITY.md)。

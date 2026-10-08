@@ -6,8 +6,13 @@ import java.nio.charset.StandardCharsets;
 public class WorkflowRequest {
 
     public static void main(String[] args) throws Exception {
-        String apiKey = "your-xunfei-api-key";
-        String apiSecret = "your-xunfei-api-secret";
+        // 凭据从环境变量读取，不硬编码（原文件曾内嵌一对真实凭据）
+        String apiKey = System.getenv().getOrDefault("XUNFEI_API_KEY", "");
+        String apiSecret = System.getenv().getOrDefault("XUNFEI_API_SECRET", "");
+        if (apiKey.isEmpty() || apiSecret.isEmpty()) {
+            System.err.println("请先设置 XUNFEI_API_KEY / XUNFEI_API_SECRET 环境变量");
+            return;
+        }
 
         String urlString = "https://xingchen-api.xf-yun.com/workflow/v1/chat/completions";
         URL url = new URL(urlString);
