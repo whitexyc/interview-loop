@@ -470,22 +470,27 @@ class ModelScopeClient(_ModelScopeBaseClient):
 
 
 class OpenCodeClient(LLMClient):
-    """OpenCode Zen 网关客户端（OpenAI 兼容，module-093）
+    """OpenCode 网关客户端（OpenAI 兼容，module-093）
 
-    Zen（https://opencode.ai/zen/v1）是 OpenCode 团队的模型网关。其免费层模型
-    （`-free` 后缀）直连会被网关拒绝：
+    两个端点，同一套 key，但 session 头要求不同：
 
-        MissingSessionID: OpenCode's free tier can only be used in OpenCode
+    - **Zen**（https://opencode.ai/zen/v1）：免费层模型（`-free` 后缀）直连会被拒：
 
-    实测（2026-09-10）带上任意 `X-Session-Id` 请求头即放行，故此处通过
-    default_headers 注入实例级 UUID（每次实例化生成，无跨实例一致性要求）。
+          MissingSessionID: OpenCode's free tier can only be used in OpenCode
+
+      实测（2026-09-10）带任意 `X-Session-Id` 请求头即放行。
+    - **Go**（https://opencode.ai/zen/go/v1，订阅制，模型更多）：要求
+      `x-opencode-session`，缺失时报 MissingSessionID 并提示见 go 文档。
+
+    故此处**同时注入两种头名**（同值实例级 UUID），使两个端点都能直接使用，
+    无需按 base_url 分支。实例级即可，无跨实例一致性要求。
 
     免费层配额较紧（30 RPM / 500 RPD / 1M TPD），批量评测前须先估算请求数：
     超限返回 429（不重试即失败），故调用方需自行控制并发与重试。
 
-    与 _ModelScopeBaseClient 的差异：base_url/api_key 独立配置，且多带
-    X-Session-Id 头（免费层必需）；其余调用形态一致（底层同为 ChatOpenAI，
-    chat_with_tools 直接复用基类的 _chat_with_tools_openai 路径）。
+    与 _ModelScopeBaseClient 的差异：base_url/api_key 独立配置，且多带 session 头；
+    其余调用形态一致（底层同为 ChatOpenAI，chat_with_tools 直接复用基类的
+    _chat_with_tools_openai 路径）。
     """
 
     def __init__(self, temperature: float = 0.7):
@@ -496,7 +501,10 @@ class OpenCodeClient(LLMClient):
             model=settings.opencode_model,
             api_key=settings.opencode_api_key,
             base_url=settings.opencode_base_url,
-            default_headers={"X-Session-Id": self._session_id},
+            default_headers={
+                "X-Session-Id": self._session_id,        # Zen 免费层
+                "x-opencode-session": self._session_id,  # Go 订阅端点
+            },
             temperature=temperature,  # 默认 0.7；结构化任务可传低温度
             timeout=180,   # 网关上游抖动较大，比 deepseek 的 120s 再放宽
         )
