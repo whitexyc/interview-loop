@@ -243,8 +243,12 @@ async def rate_limit_middleware(request: Request, call_next):
     # 成功注入 request.state.user_id；无/非法/过期 token → ""（降级 client_ip，零回归）
     request.state.user_id = parse_jwt(request.headers.get("Authorization"))
 
-    # 限流检查
-    allowed, retry_after = check_rate_limit(client_ip)
+    # 限流检查（阈值可配：批量入库 vault 时调高可显著缩短总时长）
+    allowed, retry_after = check_rate_limit(
+        client_ip,
+        max_requests=settings.rate_limit_max_requests,
+        window_seconds=settings.rate_limit_window_seconds,
+    )
     if not allowed:
         return JSONResponse(
             status_code=429,

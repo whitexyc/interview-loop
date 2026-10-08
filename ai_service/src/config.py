@@ -150,6 +150,14 @@ class Settings(BaseSettings):
     # 测试环境由 conftest autouse fixture 钉住 false（测试不污染落库）。
     request_logs_enabled: bool = True
 
+    # IP 限流（滑动窗口，模块级默认 20 次/60 秒）。做成可配是为了批量入库：
+    # scripts/sync_notes.py 灌一整个笔记 vault 时请求速率远高于聊天，20/分钟会
+    # 频繁撞 429（脚本已按 retry_after 退避，但调高阈值可显著缩短总时长）。
+    # 默认值与 src/ratelimit.py 的 _DEFAULT_* 保持一致，零行为变化。
+    # 环境变量：PW_RATE_LIMIT_MAX_REQUESTS / PW_RATE_LIMIT_WINDOW_SECONDS
+    rate_limit_max_requests: int = 20
+    rate_limit_window_seconds: int = 60
+
     # 工具调用明细落库（module-066 / ADR-0017 决策 2）：react 循环每次实际
     # 执行工具落一行 tool_call_logs（trace_id/工具名/参数/成败/预览/耗时），
     # 补 request_logs 缺工具调用明细的核心缺口。默认 true（与 request_logs
