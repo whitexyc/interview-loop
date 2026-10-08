@@ -1,155 +1,306 @@
-# Agentic RAG 技术文档知识库系统
+<div align="center">
 
-> 全栈 Agentic RAG 知识库问答系统：**三通道融合检索 + Agent 工具化编排 + 多层记忆 + 幻觉检测**
-> 三层架构：React 前端 · Spring Boot 业务层 · Python FastAPI AI 推理层
+# interview-loop
 
-## 项目架构
+**笔记 → 出题 → 面试 → 学习**
+
+把个人知识库变成一条可持续的面试训练闭环。
+
+你写的笔记被检索增强的 RAG 吃进去 → 系统据此生成**针对你知识结构**的面试题 →
+面试结果回流成薄弱点 → 薄弱点决定下一轮出题。
+
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-1876%20%2B%2063%20%2B%20106-brightgreen.svg)](#测试与工程质量)
+[![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](ai_service/)
+[![Java](https://img.shields.io/badge/Java-17%2B-orange?logo=openjdk)](interview-admin/)
+[![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.2-6DB33F?logo=springboot)](interview-admin/)
+[![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](frontend/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16%20%2B%20pgvector%20%2B%20AGE-4169E1?logo=postgresql)](docker/postgres/)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+
+</div>
+
+---
+
+## 为什么做这个
+
+市面上的「AI 面试」大多是通用题库套壳：题目与你的知识结构无关，答完也不知道弱在哪。
+
+这个项目反过来 —— **以你自己的笔记为唯一事实源**：
+
+- 题目从你的笔记里检索出来，问的是你真写过、也真可能被问的东西
+- 每道题都能溯源到你笔记里的原文（`[N]` 引用，点击弹出出处）
+- 答得不好的知识点沉淀为**薄弱点**，下一轮出题优先打这些点
+
+所以闭环不是「问答机器人 + 题库」，而是四段互相咬合的链路：
+
+```mermaid
+flowchart LR
+    A["📝 笔记<br/>Markdown vault"] -->|sync_notes.py| B["🔍 RAG 知识库<br/>三通道检索 + 重排"]
+    B -->|KnowledgeBaseClient| C["🎯 出题<br/>按简历关键词检索知识点"]
+    C --> D["🎙️ 面试<br/>追问 / 语音 / 仪态评估"]
+    D -->|答题结果| E["📉 薄弱点<br/>weak_topics"]
+    E -->|优先出题| C
+    E -->|补笔记| A
+```
+
+---
+
+## 效果展示
+
+### 面试链路
+
+| 面试入口 | 上传简历 | 在线解析并出题 |
+|---|---|---|
+| ![面试入口](interview-admin/docs/assets/面试入口.png) | ![上传简历](interview-admin/docs/assets/上传简历.png) | ![在线解析并出题](interview-admin/docs/assets/在线解析并出题.png) |
+
+| 提问环节 | 追问环节 | 面试结果分析 |
+|---|---|---|
+| ![提问环节](interview-admin/docs/assets/提问环节.png) | ![追问环节](interview-admin/docs/assets/追问环节.png) | ![面试结果分析](interview-admin/docs/assets/面试结果分析.png) |
+
+### 知识库与问答
+
+| 文档首页 | 文档管理 | 登录 |
+|---|---|---|
+| ![文档首页](interview-admin/docs/assets/文档首页截图.png) | ![文档截图](interview-admin/docs/assets/文档截图.png) | ![首页登录](interview-admin/docs/assets/首页登陆.png) |
+
+---
+
+## 系统架构
 
 ```
-提问链路：
-  用户提问 → 意图识别 → 三通道检索 → 重排 → 反思纠错 → 生成 → 幻觉检测 → 回答
-
-入库链路：
-  文档上传 → 解析（AnyDoc）→ 清洗（白名单）→ 归一化 → 去重 → 分块 → 嵌入 → 入库
-
-服务架构：
-  用户 → React 前端 → Vite 代理
-    ├─ /api/* → Spring Boot（会话管理 · JWT 认证 · 文档管理）
-    └─ /ai/*  → Python FastAPI（RAG 流水线 · Agent 问答 · 流式回答）
+                    ┌──────────────────────────────────────────┐
+   浏览器 ──────────▶│  React 18 + Vite  (3001)                 │
+                    └───────────────┬──────────────────────────┘
+                                    │ Vite 代理
+                    ┌───────────────┴───────────────┐
+                    │ /api/*                        │ /ai/*
+                    ▼                               ▼
+    ┌───────────────────────────┐   ┌────────────────────────────────────┐
+    │ Spring Boot 3.2  (8081)   │   │ FastAPI AI 层  (8001)              │
+    │ 会话 / JWT / 简历 / 文档  │   │ RAG 流水线 / Agent / 记忆 / MCP     │
+    └───────────┬───────────────┘   └──────────┬─────────────────────────┘
+                │                              │
+                │              ┌───────────────┼───────────────┐
+                │              ▼               ▼               ▼
+                │   PostgreSQL 16          Redis         本地模型（离线）
+                │   pgvector + AGE                      bge-m3 嵌入
+                │                                       bge-reranker 重排
+                │                                       HHEM 幻觉裁判
+                │
+                │        ┌────────────────────────────────────────────┐
+                └───────▶│ Spring Boot 3.2 出题/面试平台  (8002)      │
+                         │ interview-admin/  MySQL 8 + MongoDB 7      │
+                         │ 出题 · 追问 · 语音转写 · 仪态评估 · 复盘   │
+                         └────────────────────────────────────────────┘
+                                        │
+                                        │ POST /ai/rag/search
+                                        └──▶ 回到 AI 层取知识点（fail-open 熔断）
 ```
 
-## 技术栈
+`interview-admin` 通过 `KnowledgeBaseClient` 调用 AI 层的 `POST /ai/rag/search`，
+把检索到的知识点注入出题 prompt。任何失败（连接拒绝 / 超时 / 非 200）一律返回空串，
+出题退化为纯简历出题 —— **绝不因知识库故障阻断面试流程**。
 
-| 层 | 技术 |
-|------|------|
-| 前端 | React 18 + TypeScript + Ant Design + Vite |
-| 后端 | Spring Boot 3.2 + MyBatis-Plus + JWT |
-| AI 层 | Python FastAPI + LangChain/LangGraph + SQLAlchemy + pgvector |
-| 数据库 | PostgreSQL 16 (pgvector + Apache AGE) + Redis |
-| LLM | 多供应商降级链（配置默认 qwen → zhipu → deepseek；运行时可动态调序，实际顺序以 Redis 持久化结果为准） |
-| 本地模型 | bge-m3 嵌入（GGUF + llama-cpp）· bge-reranker-v2-m3 重排 · HHEM 幻觉裁判（全部离线推理） |
+---
 
-## 功能
+## 核心能力
 
-### Agentic RAG 智能问答
+### 检索（三通道融合 + 本地重排）
 
-- **意图识别**：先判断问题类型（知识库问答 / 闲聊 / 实时信息）——本地轻量分类器毫秒级响应，识别失败自动回退大模型判断，宁可多检索不漏检
-- **三通道混合检索**：关键词全文 + 语义向量 + 知识图谱三路并行检索后融合排序（评测命中率 Top-5 = 99.05%），支持加权融合回退
-- **语义重排**：本地重排模型对召回结果精排 Top-5，截断超长文档防止推理卡顿
-- **父子两级分块**：按章节切父块（完整语义）+ 约 300 字子块（重叠 50 字符）——小块检索精准、大块回答完整
-- **自我反思纠错**：检索结果不充分时自动改写查询重检（最多 3 轮），新结果与旧结果合并
-- **Agent 工具化**：10 个工具由模型自主编排调用（检索 / 图谱 / 记忆 / 重检 / 生成 / 逐句验证 / 笔记），**按执行阶段分组暴露**——检索命中即切生成阶段（检索 3 轮未命中强制切），避免死锁、节省 token；工具调用过程实时展示
-- **幻觉检测**：逐句验证答案是否被检索文档支持（有依据 / 可推断 / 无依据三档），前端逐句色标；验证异步进行——答案先返回、验证结果后台补充，不阻塞阅读
-- **多层记忆**：长期记住用户偏好（自动抽取、永久保存）/ 短期记住近期内容（30 天自然衰减、反复提及自动升级为长期）/ 会话记住完整对话（刷新恢复 + 长对话自动摘要），按用户隔离互不串扰；记忆纠错——升级留底可回溯、**双判共识冲突检测**（nli+clf 都判矛盾才标废弃，Precision 0.94，宁可漏检也不错标）
-- **流式 SSE**：逐 token 输出 + 管线步骤实时展示
-- **引用溯源**：回答 `[N]` 标注来源，点击弹出原文
-- **MCP 标准工具服务**：ToolRegistry 工具经官方 MCP SDK（FastMCP）暴露为标准 MCP Server——**6 个只读检索工具**（混合/全文/向量/图谱检索 + 实体提取 + 记忆召回）双传输对外提供：**stdio**（本地 Cursor / Claude Code / Claude Desktop 即插即用）与 **Streamable HTTP**（挂载 `/ai/mcp`，Bearer token 认证）；工具定义单一事实源（ToolRegistry），改描述 MCP 自动同步；HTTP 模式 `PW_MCP_TOKEN` 未配置拒绝启动（fail-closed，宁可不用不能裸奔）；stdio 为本地进程模式零认证（安全边界如实声明）；工具返回自动截断 2000 字符
+- **三通道并行**：关键词全文 + 语义向量 + 知识图谱（Apache AGE），RRF 融合
+- **父子两级分块**：按章节切父块（完整语义）+ 约 300 字子块（重叠 50 字符）—— 小块检索精准、大块回答完整
+- **本地重排**：`bge-reranker-v2-m3` 精排 Top-5，截断超长文档防推理卡顿
+- **全部离线**：嵌入 / 重排 / 幻觉裁判三个模型本地推理，零外部依赖
 
-### 文档解析与数据清洗（Ingestion 管线）
+### Agent 与记忆
 
-- **文档解析**：7 种格式统一入口（`.md/.txt/.pdf/.docx/.xlsx/.pptx/.epub/.csv`），格式识别**读字节魔数**（PDF `%PDF`、Office `PK\x03\x04`）不靠扩展名——文件改名也能认出；AnyDoc 主引擎（14 格式 → GFM Markdown，4.4ms）+ PyMuPDF 回退（双栏论文走中线重组）+ pymupdf4llm 出 Markdown 结构；三层图片解析（OCR / VLM / MinerU）全默认关，扫描版如实提示"图片未解析"
-- **数据清洗**：白名单哲学——代码块 / 表格 / 行内代码 / URL / 公式用 `⟦⟧` 占位符**先保护再清洗**，不误伤；五步流水线（格式清理 → 冗余过滤 → 断行合并 → 语义修复 → 分块准备）；Unicode NFKC 归一化统一全角半角（`ＲＲＦ` → `RRF`，防检索失配）
-- **文档去重**：sha256 完全重复直接丢弃 + 语义余弦 ≥0.95 标簇检索抑制（不删只标 canonical）+ SimHash 预留；Boilerplate 先剥离防页脚套话拉高相似度
-- **原始文件留存**：原件落盘（`sha256[:16]_净文件名`），支持改分块策略后重灌
+- **手写 ReAct 循环**：10 个工具按执行阶段分组暴露，检索命中即切生成阶段（避免死锁、省 token）
+- **自我反思纠错**：检索不充分时改写查询重检（最多 3 轮），新旧结果合并
+- **多层记忆**：长期偏好（永久）/ 短期内容（30 天衰减，反复提及自动升级）/ 会话上下文；按用户隔离
+- **记忆纠错**：双判共识冲突检测（nli + clf 都判矛盾才标废弃，Precision 0.94，宁可漏检不错标）
 
-### 工程实践
+### 幻觉检测
 
-- **1870 项自动化测试**（70+ 个测试文件）+ 真实环境端到端验证
-- **评估闭环**：检索层 112 题评测集 + 命中率 / 排序质量指标 + 单通道消融；**Agent 行为层**（066）工具调用明细落库 + 36 条任务集 + 三层指标（任务完成率 pass^1/pass^3、工具正确率、成本步数），判定全确定性不用 LLM 评 LLM；**幻觉检测**（071）136 条三态标注 + 阈值校准（kappa 0.33 天花板如实标注）
-- **可观测性**：每次请求全链路可追踪（各阶段耗时 / token 用量 / 缓存命中）+ Agent 工具调用明细（trace_id / 参数 / 成败 / 耗时），可回答"单问题成本"与 P50/P95 延迟
-- **三次数据化架构裁定**：手写 ReAct vs LangGraph StateGraph 双环路对拍（等价性夹具 36/36 逐字等价）→ 多批次采样验证（批次间漂移 65% 的方法论发现）→ 上下文压缩三臂对拍（clearing 反直觉 +31.6%）。判据事前定死、不利结论照实记；实验端点保留可复现（eval/langgraph_parity.py、parity_telemetry.py、ctx_parity.py），详见 specs/module-091/092/093 与 ADR-0020~0023
-- **架构决策记录**：23 份关键选型留档（检索 / 分块 / 记忆 / 幻觉检测 / 工具治理 / Agent 评估 / MCP 集成 / 框架对比 / 上下文压缩等）
-- **数据飞轮**：用户反馈与验证结果落库，作为模型再训练数据源
-- 📊 **评估指标总览**：检索 Hit@5/MRR + 三通道消融 + 意图/充分性/幻觉检测等完整量化指标见 [METRICS.md](METRICS.md)
+逐句验证答案是否被检索文档支持（有依据 / 可推断 / 无依据三档），前端逐句色标；
+验证**异步进行** —— 答案先返回，验证结果后台补充，不阻塞阅读。
 
-## 本地模型下载
+### MCP 标准工具服务
 
-生产链路 3 个本地模型 + 1 个评估可选模型，统一放 `ai_service/models/`（不随仓库分发）：
+10 个工具经官方 MCP SDK（FastMCP）暴露为标准 MCP Server，**6 个只读检索工具**双传输对外：
 
-| 模型 | 目录 | 用途 | 来源 |
-|------|------|------|------|
-| bge-m3（GGUF q8_0） | `ai_service/models/bge-m3-gguf/bge-m3-q8_0.gguf` | 语义向量嵌入 | HuggingFace bge-m3 GGUF 量化版（llama-cpp 加载，完全离线） |
-| bge-reranker-v2-m3 | `ai_service/models/bge-reranker-v2-m3/` | 检索重排精排 | HuggingFace `BAAI/bge-reranker-v2-m3`（safetensors ~2.17GB） |
-| HHEM-2.1-Open | `ai_service/models/hhem-2.1-open/` | 幻觉检测裁判 | HuggingFace Vectara 官方发布（hhem-2.1-open，110M 参数，约 418MB，含自定义 modeling 文件） |
-| mDeBERTa-v3-base-xnli（可选） | `ai_service/models/mdeberta-nli/` | 文本矛盾/蕴含判断（评估实验，非生产链路） | HuggingFace mDeBERTa-v3-base-xnli 多语言系列 |
+- **stdio** —— 本地 Cursor / Claude Code / Claude Desktop 即插即用
+- **Streamable HTTP** —— 挂载 `/ai/mcp`，Bearer token 认证（未配置 token 拒绝启动，fail-closed）
 
-国内网络建议走镜像下载：
+---
+
+## 测试与工程质量
+
+| 层 | 测试数 | 状态 |
+|---|---|---|
+| AI 层（Python / pytest） | **1876** | 全绿 |
+| 前端（React / Vitest） | **63** | 全绿 |
+| 出题面试平台（Java / JUnit） | **106** | 104 通过（2 项已知红测试，见下） |
+
+工程化程度是这个项目最有区分度的部分：
+
+- **模块制交付**：90+ 个模块规格目录，每个含 plan / acceptance-criteria / changelog / review-report / test-report 五件套
+- **23 份 ADR**：检索、分块、记忆、幻觉检测、工具治理、Agent 评估、MCP 集成、框架对比、上下文压缩等关键选型全部留档
+- **四阶段闭环**：Planner → Developer → Reviewer → Tester，单模块生产代码红线 AST ≤ 200 行，改前报影响面、改后全量回归
+- **判定不用 LLM 评 LLM**：所有评测结论均为确定性判定
+
+### 三次数据化架构裁定
+
+这是项目里我最有底气讲的部分 —— **判据事前定死，不利结论照实记**：
+
+| 轮次 | 议题 | 结论 |
+|---|---|---|
+| 091 | 手写 ReAct vs LangGraph StateGraph 双环路对拍 | 等价性夹具 **36/36 逐字等价** → 维持自研 |
+| 092 | 多批次采样验证 | 发现**批次间漂移 65%** 的方法论问题，暴露单次采样判据的不可靠 |
+| 093 | 上下文压缩三臂对拍（off / clearing / clearing+compaction） | **clearing 单独用是负收益**（history tokens 反升 31.6%）—— 与 Anthropic「最安全的压缩」直觉相反 |
+
+093 的归因是「每调用视图膨胀 +36% → 失锚 → 长答案复利」，而非 re-invoke 循环。
+完整数据见 [`METRICS.md`](METRICS.md) 与 [`specs/module-091/092/093`](specs/) 及 ADR-0020~0023。
+
+---
+
+## 快速开始
+
+### 前置依赖
+
+- Docker（用于起 PostgreSQL 16 + pgvector + Apache AGE、Redis）
+- Python 3.11+ · Node.js 18+ · JDK 17+
+
+### 1. 起依赖服务
 
 ```bash
-# 示例：重排模型（其余模型同理，替换 repo 与 --local-dir 路径）
+docker compose up -d
+docker compose ps          # 等 postgres 变 healthy
+```
+
+首次会编译 Apache AGE（约 3–8 分钟，之后走镜像缓存）。
+
+> 这个镜像不是官方现成的：没有任何官方镜像同时提供 pgvector 与 Apache AGE，
+> 而本项目检索的图谱通道依赖 AGE、向量通道依赖 pgvector，所以基于
+> `pgvector/pgvector:pg16` 补编了 AGE。见 [`docker/postgres/Dockerfile`](docker/postgres/Dockerfile)。
+
+### 2. 下载本地模型（约 3.2 GB，不随仓库分发）
+
+| 模型 | 目录 | 用途 | 大小 |
+|---|---|---|---|
+| bge-m3（GGUF q8_0） | `ai_service/models/bge-m3-gguf/` | 语义嵌入 | 606 MB |
+| bge-reranker-v2-m3 | `ai_service/models/bge-reranker-v2-m3/` | 检索重排 | 2.17 GB |
+| HHEM-2.1-Open | `ai_service/models/hhem-2.1-open/` | 幻觉检测裁判 | 418 MB |
+
+```bash
+# 国内网络建议走镜像
 HF_ENDPOINT=https://hf-mirror.com huggingface-cli download BAAI/bge-reranker-v2-m3 \
   --local-dir ai_service/models/bge-reranker-v2-m3
 ```
 
-> 缺模型行为：**嵌入/重排**缺权重会明确报错并提示路径（各自校验文件存在性与大小，不回退在线加载）；**HHEM 幻觉裁判**缺失/加载失败/超时会降级回 LLM 判分（有 warning 日志），保证验证链路可用。
-
-## 快速启动
-
-### 前置依赖
-
-- Python 3.11+
-- Node.js 18+
-- JDK 17+
-- PostgreSQL 16（pgvector + AGE 扩展）
-- Redis
-
-### 启动服务
+### 3. 配置并启动
 
 ```bash
-# 1. AI 推理层（端口 8001）
-cd ai_service
-pip install -r requirements.txt
+cp ai_service/.env.example ai_service/.env
+# 填入 LLM API Key，并保证 PW_JWT_SECRET 与 backend/application.yml 的 jwt.secret 同值
+
+# AI 层（8001）
+cd ai_service && pip install -r requirements.txt
 python -m uvicorn main:app --host 0.0.0.0 --port 8001
 
-# 2. Java 后端（端口 8081）
-cd backend
-mvn spring-boot:run
+# Java 后端（8081）
+cd backend && mvn spring-boot:run
 
-# 3. 前端（端口 3001）
-cd frontend
-npm install
-npm run dev
+# 前端（3001）
+cd frontend && npm install && npm run dev
 ```
 
-访问 http://localhost:3001
+访问 <http://localhost:3001>。
 
-## 项目目录
+### 4. 把你的笔记灌进去
+
+```bash
+# 预演：只列出将要上传的文件
+python scripts/sync_notes.py --dry-run --vault llm-push=/path/to/notes/llm-push
+
+# 实际同步（可重复 --vault）
+python scripts/sync_notes.py \
+    --vault llm-push=/path/to/notes/llm-push \
+    --vault python-push=/path/to/notes/python-push \
+    --vault backend-push=/path/to/notes/backend-push
+```
+
+走 `/ai/rag/documents/upload` 管线（解析 → 清洗 → 三级去重 → 父子分块 → 本地嵌入 → 入库），
+**幂等可重复执行** —— 已入库的笔记按内容哈希去重，只补新增与改动。
+
+### 5. 出题 / 面试平台（可选）
+
+```bash
+cd interview-admin
+docker compose up -d          # MySQL 8 + MongoDB 7 + Redis
+./mvnw spring-boot:run        # 8002
+```
+
+---
+
+## 目录结构
 
 ```
-├── ai_service/              # Python AI 推理层（RAG 流水线 · Agent · 记忆 · 评估）
-│   ├── rag/                 #   RAG 核心：检索 / 分块 / 重排 / 记忆 / 图谱 / 文档解析+清洗
-│   ├── agent/               #   Agent：ReAct 循环 / 工具注册表 / 意图路由 / 反思
-│   ├── eval/                #   评测：golden 集 / 消融 / 基准 / 版本化回归
-│   ├── tests/               #   1870 项自动化测试
-│   └── mcp_server.py        #   MCP 标准工具服务（FastMCP，6 只读工具 + 双传输）
-├── backend/                 # Java 业务层（会话 · JWT · 文档管理）
-├── frontend/                # React 前端（问答页 · 知识库管理 · 反馈）
-├── specs/                   # 模块文档（90+ 模块 plan/review/test-report）+ 23 份 ADR
-├── visio/                   # 架构流程图（端到端 10 步 / 记忆机制）
-└── METRICS.md               # 全部量化指标（单一事实源）
+interview-loop/
+├── ai_service/            # Python AI 推理层
+│   ├── rag/               #   检索 / 分块 / 重排 / 记忆 / 图谱 / 文档解析与清洗
+│   ├── agent/             #   ReAct 循环 / 工具注册表 / 意图路由 / 反思
+│   ├── eval/              #   评测：golden 集 / 消融 / 公开基准 / 版本化回归
+│   ├── tests/             #   1876 项自动化测试
+│   ├── scripts/           #   重建 / 图谱补跑 / 迁移等运维脚本
+│   └── mcp_server.py      #   MCP 标准工具服务（FastMCP，6 只读工具 + 双传输）
+├── backend/               # Java 业务层（会话 · JWT · 简历 · 文档）
+├── frontend/              # React 前端（问答 · 知识库管理 · 简历 · 反馈）
+├── interview-admin/       # Spring Boot 出题/面试平台（含自带 compose 与 Dockerfile）
+├── scripts/               # sync_notes.py —— 笔记批量入库入口
+├── docker/postgres/       # pgvector + Apache AGE 自建镜像
+├── specs/                 # 90+ 模块文档 + 23 份 ADR
+├── images/                # 机制图解（检索 / 记忆 / 幻觉检测 / 分块 …）
+└── METRICS.md             # 全部量化指标（单一事实源）
 ```
+
+---
 
 ## 环境变量
 
+主要项（完整见 [`ai_service/.env.example`](ai_service/.env.example)）：
+
 | 变量 | 说明 | 默认值 |
-|------|------|--------|
-| `PW_DATABASE_URL` | PostgreSQL 连接 | `postgresql+asyncpg://postgres:postgres123@localhost:5432/personal_website` |
+|---|---|---|
+| `PW_DATABASE_URL` | PostgreSQL 连接 | `postgresql+asyncpg://postgres:123456@localhost:5432/personal_website` |
 | `PW_REDIS_URL` | Redis 连接 | `redis://localhost:6379/0` |
-| `PW_LLM_PROVIDER` | 默认 LLM 供应商 | `fallback` |
-| `PW_FALLBACK_CHAIN` | 降级链（逗号分隔） | `qwen,zhipu,deepseek` |
-| `PW_DEEPSEEK_API_KEY` | DeepSeek API Key | — |
-| `PW_CLAUDE_API_KEY` | Claude API Key | — |
-| `PW_JWT_SECRET` | JWT 共享密钥（与 Java 后端一致，HS256） | — |
-| `PW_MCP_TOKEN` | MCP HTTP 模式访问 token（`/ai/mcp`，Bearer 认证；**未设置拒绝启动**，fail-closed） | — |
-| `VITE_EDIT_PASSWORD` | 文档上传密码 | — |
-| `PW_RETRIEVAL_FUSION_MODE` | 检索融合模式：`rrf`（默认）/ `hybrid` / `weighted` | `rrf` |
-| `PW_INTENT_CLASSIFIER_ENABLED` | 意图分类器开关 | `true` |
-| `PW_TOOL_PHASE_SPLIT` | 工具阶段分组开关（检索组/生成组） | `true` |
-| `PW_VERIFY_ASYNC` | 幻觉验证异步化开关（答案先回、后台验证） | `true` |
-| `PW_REQUEST_LOGS` | 可观测性落库开关（trace / 阶段耗时 / token） | `true` |
-| `PW_PDF_FALLBACK_MD` | PDF 回退路径 Markdown 输出（pymupdf4llm） | `true` |
-| `PW_MEMORY_CONFLICT_JUDGE` | 记忆矛盾裁判：`dual`（双判共识）/ `nli` / `clf` | `dual` |
+| `PW_LLM_PROVIDER` | LLM 供应商（`fallback` = 按链降级） | `fallback` |
+| `PW_FALLBACK_CHAIN` | 降级链 | `qwen,zhipu,opencode,deepseek` |
+| `PW_JWT_SECRET` | JWT 共享密钥（HS256，**须 ≥32 字节且与 Java 侧同值**） | — |
+| `PW_MCP_TOKEN` | MCP HTTP 模式 token（未设置拒绝启动） | — |
+| `PW_RETRIEVAL_FUSION_MODE` | 检索融合：`rrf` / `hybrid` / `weighted` | `rrf` |
+| `PW_VERIFY_ASYNC` | 幻觉验证异步化 | `true` |
+
+> ⚠️ `PW_JWT_SECRET` 与 Java 侧不一致时**不会报错**，而是静默把所有请求按匿名（client_ip）
+> 处理 —— 表现为「登录了但长期记忆不按用户隔离」。这是最容易踩的坑。
+
+---
+
+## 已知问题
+
+- `interview-admin` 有 **2 项自导入起就未通过的测试**，它们描述的是期望行为而实现不符，
+  需要产品侧判定「是实现有 bug 还是断言需修正」：
+  1. `XunfeiAudioServiceAssemblerTest` —— 无 `pgs` 分段时期望实时快照被**替换**，实现为**追加**
+     （`"AAB"` vs 期望 `"AB"`），表现为实时字幕重复片段
+  2. `InterviewRecordServiceImplTest` —— Mockito in-order 校验失败（「先结束会话再落库」顺序不符）
+- AI 层测试需要本机具备 PostgreSQL + Redis 与三个本地模型权重（CI 未覆盖全量 AI 层测试）
+
+---
+
+## 开源协作
+
+欢迎 Issue / PR，详见 [CONTRIBUTING.md](CONTRIBUTING.md) 与 [SECURITY.md](SECURITY.md)。
 
 ## License
 
-MIT
+[MIT](LICENSE)
