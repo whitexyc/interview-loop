@@ -64,6 +64,18 @@ flowchart LR
 |---|---|---|
 | ![文档首页](interview-admin/docs/assets/文档首页截图.png) | ![文档截图](interview-admin/docs/assets/文档截图.png) | ![首页登录](interview-admin/docs/assets/首页登陆.png) |
 
+### 闭环实测（本机运行截图）
+
+以下是**真实运行时**的抓图（非设计稿）：提问「G1 垃圾收集器的 Region 分区机制是什么」，
+左侧实时展示 Agentic 执行流程，右侧回答带逐句引用溯源。
+
+| 执行流程（实时） | 管线完成 | 检索命中与引用溯源 |
+|---|---|---|
+| ![执行流程](images/demo/demo-01-pipeline-idle.png) | ![管线完成](images/demo/demo-02-pipeline-done.png) | ![检索与引用](images/demo/demo-03-retrieval-and-citations.png) |
+
+可直接观测到的中间态：**混合检索召回 11 条 → Rerank 保留 5 条（过滤 6 条）→
+自我反思判定「不充分」触发二次检索 → 生成回答并标注来源**（来源精确到笔记的板块与题目编号）。
+
 ---
 
 ## 系统架构
