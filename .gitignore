@@ -38,7 +38,9 @@ prompt.md
 
 # Project docs (not source code)
 # specs/ + memory/ 2026-08-20 起进 git 跟踪（模块文档/共享记忆是交付物，两端同步靠 git）
-docs/
+# 注意写成 /docs/ 而非 docs/：后者会匹配任意层级的 docs 目录，
+# 会把 interview-admin/docs（界面截图等 README 素材）一并忽略
+/docs/
 
 # Models (download separately, not source code)
 ai_service/models/
