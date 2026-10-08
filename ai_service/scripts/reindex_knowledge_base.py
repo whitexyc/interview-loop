@@ -43,11 +43,31 @@ from rag.graph.graph_extractor import graph_extractor
 
 logger = logging.getLogger("reindex_knowledge_base")
 
-# 源目录：(绝对路径, source 前缀)
-DOCS_DIRS = [
-    (r"<notes-dir>\backend-push", "backend-push"),
-    (r"<notes-dir>\llm-push", "llm-push"),
-]
+# 源目录：(绝对路径, source 前缀)。
+# 不硬编码本机路径——通过 --dir 参数或 PW_NOTES_DIRS 环境变量提供。
+# 格式 `LABEL=PATH`，多个用逗号分隔：
+#   python reindex_knowledge_base.py --dir llm-push=/path/to/llm-push
+#   PW_NOTES_DIRS="llm-push=/p/llm-push,backend-push=/p/backend-push" python reindex_knowledge_base.py
+DOCS_DIRS: list[tuple[str, str]] = []
+
+
+def parse_docs_dirs(specs: list[str]) -> list[tuple[str, str]]:
+    """把 `LABEL=PATH` 规格（逗号分隔可含多项）解析为 (路径, 前缀) 列表。
+
+    省略 LABEL 时取目录名作为前缀。
+    """
+    dirs: list[tuple[str, str]] = []
+    for spec in specs:
+        for item in spec.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            if "=" in item:
+                label, _, raw = item.partition("=")
+                dirs.append((raw.strip(), label.strip()))
+            else:
+                dirs.append((item, os.path.basename(item.rstrip("/\\"))))
+    return dirs
 
 
 def setup_logging():
@@ -57,23 +77,28 @@ def setup_logging():
     )
 
 
-def collect_files() -> list[tuple[str, str, str, str]]:
+def collect_files(dirs: list[tuple[str, str]] | None = None) -> list[tuple[str, str, str, str]]:
     """收集源文件 → [(path, dirname, fname, title)]，处理标题冲突"""
     files: list[tuple[str, str, str, str]] = []
     used_titles: set[str] = set()
-    for dirpath, prefix in DOCS_DIRS:
+    for dirpath, prefix in (dirs if dirs is not None else DOCS_DIRS):
         if not os.path.isdir(dirpath):
             logger.warning("目录不存在，跳过: %s", dirpath)
             continue
-        for fname in sorted(os.listdir(dirpath)):
-            if not fname.endswith(".md"):
-                continue
-            title = fname[:-3]
-            if title in used_titles:
-                title = f"{title}-{prefix}"
-                logger.info("标题冲突，重命名: %s → %s", fname, title)
-            used_titles.add(title)
-            files.append((os.path.join(dirpath, fname), prefix, fname, title))
+        for root, subdirs, names in os.walk(dirpath):
+            # 跳过编辑器配置 / Agent 工作目录，避免把工具产物当笔记灌进来
+            subdirs[:] = sorted(d for d in subdirs
+                                if d not in {".obsidian", ".workbuddy", ".trash", ".git",
+                                             "__pycache__", "node_modules"})
+            for fname in sorted(n for n in names if n.endswith(".md")):
+                # 递归：vault 下笔记按主题分子目录，非递归会漏掉子目录内容
+                rel = os.path.relpath(os.path.join(root, fname), dirpath).replace("\\", "/")
+                title = rel[:-3]
+                if title in used_titles:
+                    title = f"{title}-{prefix}"
+                    logger.info("标题冲突，重命名: %s → %s", rel, title)
+                used_titles.add(title)
+                files.append((os.path.join(root, fname), prefix, rel, title))
     return files
 
 
@@ -223,8 +248,9 @@ async def load_docs_from_db() -> list[tuple[str, str, int]]:
         return [(r[0], r[2], r[1]) for r in rows]
 
 
-async def main(dry_run: bool, no_graph: bool, skip_import: bool = False):
-    files = collect_files()
+async def main(dry_run: bool, no_graph: bool, skip_import: bool = False,
+               dirs: list[tuple[str, str]] | None = None):
+    files = collect_files(dirs)
     if not files:
         logger.error("未找到任何源文件")
         sys.exit(1)
@@ -294,5 +320,14 @@ if __name__ == "__main__":
     parser.add_argument("--no-graph", action="store_true", help="跳过知识图谱重建")
     parser.add_argument("--skip-import", action="store_true",
                         help="跳过文档导入（崩溃恢复/补图谱：直接从库加载图谱数据）")
+    parser.add_argument("--dir", action="append", default=[], metavar="LABEL=PATH",
+                        help="源目录（可重复；逗号分隔可含多项）。也可用 PW_NOTES_DIRS 环境变量")
     args = parser.parse_args()
-    asyncio.run(main(dry_run=args.dry_run, no_graph=args.no_graph, skip_import=args.skip_import))
+
+    specs = args.dir or [os.environ.get("PW_NOTES_DIRS", "")]
+    dirs = parse_docs_dirs(specs)
+    if not dirs:
+        parser.error("未指定源目录：请用 --dir LABEL=PATH 或设置 PW_NOTES_DIRS 环境变量")
+
+    asyncio.run(main(dry_run=args.dry_run, no_graph=args.no_graph,
+                     skip_import=args.skip_import, dirs=dirs))

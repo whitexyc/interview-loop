@@ -57,10 +57,8 @@ ai_service/eval/datasets/public/
 .claude/settings.local.json
 /settings.local.json
 
-# 本地构建/部署/技术栈文件（2026-08-20 起不进 git，本地保留）
-/Makefile
-/docker-compose.yml
-/start.bat
+# 本机技术栈笔记（个人文档，不入库）
+# 注：docker-compose.yml / Makefile / start.ps1 属于开源交付物，已改为跟踪
 /tech-stack.md
 
 # CodeGraph index (本地索引库，随时用 `codegraph init` 重建，不进 git)
@@ -71,3 +69,6 @@ ai_service/eval/datasets/public/
 
 # 评测 IO 留痕数据（module-092 扩展：LLM 阶段输入输出 JSONL，体量大不入库）
 eval_io_traces/
+
+# Agent 工作记忆 / 会话日志（本机过程文件，不属于项目交付物）
+.workbuddy/
