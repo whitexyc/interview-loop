@@ -189,6 +189,9 @@ interview-loop/
 
 ## Known issues
 
+See also **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** — 8 real deployment failures
+(symptom → root cause → fix), each one disguised as a code/API bug.
+
 - `interview-admin` has **2 tests that have never passed since import**. They encode intended
   behavior the implementation does not satisfy; a product decision is needed on whether the
   implementation or the assertion is wrong:

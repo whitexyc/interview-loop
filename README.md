@@ -198,6 +198,7 @@ python scripts/doctor.py   # 环境自检：21 项检查，附修复建议
 > **先跑 `doctor.py`**。它覆盖的都是真实踩过的坑，其中几条的报错极具误导性 ——
 > 例如 `no_proxy` 含 `[::1]` 会让 httpx 崩溃，表现为「检索正常但回答生成失败」；
 > JWT 密钥两侧不一致不会报错，而是**静默**把所有请求按 IP 隔离。
+> 完整速查见 **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)**（8 类真实故障：症状 → 根因 → 修复）。
 
 > 这个镜像不是官方现成的：没有任何官方镜像同时提供 pgvector 与 Apache AGE，
 > 而本项目检索的图谱通道依赖 AGE、向量通道依赖 pgvector，所以基于
@@ -316,6 +317,10 @@ interview-loop/
 ---
 
 ## 已知问题
+
+> 部署类故障（检索正常但回答失败、限流、模型缺失、图谱为空等 8 类）见
+> **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** —— 每条都是真实踩坑记录，
+> 且大多伪装成代码/API 故障。
 
 - `interview-admin` 有 **2 项自导入起就未通过的测试**，它们描述的是期望行为而实现不符，
   需要产品侧判定「是实现有 bug 还是断言需修正」：
