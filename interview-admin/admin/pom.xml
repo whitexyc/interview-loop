@@ -12,6 +12,14 @@
     <properties>
         <!-- 与测试依赖/agent 路径保持一致，避免 Mockito 运行时自注入告警 -->
         <mockito.version>5.14.2</mockito.version>
+        <!--
+          surefire/failsafe 的 <argLine> 里用了 @{argLine} 占位符（供 jacoco 等
+          覆盖率插件注入参数）。本项目未接覆盖率插件，占位符无人赋值时会被当作
+          字面量传给 JVM，导致 forked VM 启动即崩溃
+          （The forked VM terminated without properly saying goodbye）。
+          显式定义为空串，占位符即可正常解析。
+        -->
+        <argLine></argLine>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
         <maven.compiler.encoding>UTF-8</maven.compiler.encoding>
